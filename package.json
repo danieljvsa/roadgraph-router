@@ -1,0 +1,56 @@
+{
+  "name": "@danieljvsa/roadgraph-router",
+  "version": "0.1.0",
+  "description": "Browser-safe A* routing over pre-built directed road graphs.",
+  "private": false,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "routing",
+    "road-graph",
+    "a-star",
+    "offline",
+    "browser"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/danieljvsa/roadgraph-router.git"
+  },
+  "bugs": {
+    "url": "https://github.com/danieljvsa/roadgraph-router/issues"
+  },
+  "homepage": "https://github.com/danieljvsa/roadgraph-router#readme",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=18"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/worker.ts --format esm --dts --clean",
+    "check": "tsc --noEmit",
+    "test": "jest --runInBand",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/geojson": "^7946.0.16",
+    "jest": "^30.5.0",
+    "ts-jest": "^29.4.12",
+    "tsup": "^8.5.1",
+    "typescript": "^5.0.0"
+  }
+}
