@@ -15,5 +15,6 @@ const second = {
 it("stitches matching boundary nodes from adjacent graph tiles", () => {
   const merged = mergeRoadGraphs([first, second]);
   expect(merged.nodeLatitudes).toHaveLength(3);
+  expect(merged.spatialIndex).toBeDefined();
   expect(route(merged, { lat: 37, lng: -8 }, { lat: 37, lng: -7.8 }).distanceMeters).toBe(200);
 });

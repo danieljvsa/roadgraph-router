@@ -1,4 +1,5 @@
 import type { RoadGraph } from "./types";
+import { withSpatialIndex } from "./spatial-index";
 
 /**
  * Combines overlapping graph tiles into one directed graph. The OSM compiler
@@ -52,5 +53,5 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
     edgeDistancesMeters[index] = edge.distance;
     edgeDurationsSeconds[index] = edge.duration;
   }
-  return { nodeLatitudes: Float64Array.from(latitudes), nodeLongitudes: Float64Array.from(longitudes), edgeOffsets, edgeTargets, edgeDistancesMeters, edgeDurationsSeconds };
+  return withSpatialIndex({ nodeLatitudes: Float64Array.from(latitudes), nodeLongitudes: Float64Array.from(longitudes), edgeOffsets, edgeTargets, edgeDistancesMeters, edgeDurationsSeconds });
 }

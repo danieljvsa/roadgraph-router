@@ -50,6 +50,19 @@ const router = await RoadRouter.open("/routing/portugal.efrb");
 
 Serve bundles as `application/octet-stream` without whole-file HTTP content
 encoding so byte offsets remain stable. The bundle reader already supports
-individually gzip-compressed chunks; an importer can use those to reduce
-storage without preventing HTTP Range requests. Spatial indexes are runtime
-structures for now, rather than part of the on-disk format.
+individually gzip-compressed chunks; use
+`encodeCompressedRoadGraphBundle()` when creating one in a browser-compatible
+runtime. Spatial indexes are runtime structures for now, rather than part of
+the on-disk format.
+
+## Benchmark a bundle
+
+Use exact or near-road coordinates to measure a representative route without
+downloading the whole file. The runner reports bundle size, loaded nodes and
+edges, Range bytes, memory delta, graph-load timing, and A* timing:
+
+```sh
+npm run benchmark -- path/to/portugal.efrb \
+  --origin 37.0194,-7.9304 \
+  --destination 37.0340,-7.8900
+```

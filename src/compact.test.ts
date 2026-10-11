@@ -21,6 +21,7 @@ describe("compact graph v2", () => {
     expect(result.nodeIds).toEqual([0, 1, 3]);
     expect(result.distanceMeters).toBe(200);
     expect(result.durationSeconds).toBe(20);
+    expect(result.geometry.coordinates).toEqual([[-8, 41], [-7.999, 41], [-7.999, 41.001]]);
   });
 
   it("uses the spatial index to snap without changing the nearest result", () => {

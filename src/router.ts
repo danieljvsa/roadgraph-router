@@ -102,6 +102,9 @@ export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     nodeIds,
     distanceMeters,
     durationSeconds,
-    geometry: { type: "LineString", coordinates: nodeIds.map((node) => [graph.nodeLongitudes[node], graph.nodeLatitudes[node]]) },
+    geometry: { type: "LineString", coordinates: nodeIds.map((node) => {
+      const coordinate = coordinateFor(graph, node);
+      return [coordinate.lng, coordinate.lat];
+    }) },
   };
 }

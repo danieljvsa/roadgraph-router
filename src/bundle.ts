@@ -24,9 +24,12 @@ export type RoadGraphBundle = {
   url: string;
   tiles: BundleTile[];
   loadForRoute(origin: Coordinate, destination: Coordinate): Promise<RoadGraph>;
+  loadExpandedForRoute(origin: Coordinate, destination: Coordinate): Promise<RoadGraph>;
 };
 
 export type BundleGraphTile = { id: number; bounds: BundleBounds; graph: RoadGraph };
+export type BundleEncodeOptions = { compression?: "none" | "gzip" };
+type BundleChunk = { data: ArrayBuffer; rawByteLength: number; compression: BundleCompression };
 
 function contains(bounds: BundleBounds, coordinate: Coordinate) {
   return coordinate.lat >= bounds.minLat && coordinate.lat <= bounds.maxLat && coordinate.lng >= bounds.minLng && coordinate.lng <= bounds.maxLng;
@@ -65,13 +68,16 @@ async function decodeChunk(buffer: ArrayBuffer, compression: BundleCompression) 
   return withSpatialIndex(decodeGraph(await new Response(stream).arrayBuffer()));
 }
 
-/** Creates a single, range-addressable bundle from independently readable compact graph tiles. */
-export function encodeRoadGraphBundle(tiles: BundleGraphTile[]): ArrayBuffer {
-  if (!tiles.length) throw new Error("A routing bundle requires at least one tile.");
-  const chunks = tiles.map((tile) => encodeCompactGraph(compactGraph(tile.graph)));
+async function gzipChunk(buffer: ArrayBuffer): Promise<ArrayBuffer> {
+  if (!("CompressionStream" in globalThis)) throw new Error("This runtime cannot create gzip-compressed routing bundles.");
+  const stream = new Blob([buffer]).stream().pipeThrough(new CompressionStream("gzip"));
+  return new Response(stream).arrayBuffer();
+}
+
+function createBundle(tiles: BundleGraphTile[], chunks: BundleChunk[]): ArrayBuffer {
   const directoryBytes = tiles.length * DIRECTORY_ENTRY_BYTES;
   let offset = HEADER_BYTES + directoryBytes;
-  const byteLength = offset + chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const byteLength = offset + chunks.reduce((sum, chunk) => sum + chunk.data.byteLength, 0);
   const buffer = new ArrayBuffer(byteLength);
   const view = new DataView(buffer);
   view.setUint32(0, MAGIC, true);
@@ -90,13 +96,34 @@ export function encodeRoadGraphBundle(tiles: BundleGraphTile[]): ArrayBuffer {
     view.setInt32(entry + 12, toFixed(tile.bounds.maxLat), true);
     view.setInt32(entry + 16, toFixed(tile.bounds.maxLng), true);
     view.setUint32(entry + 20, offset, true);
-    view.setUint32(entry + 24, chunk.byteLength, true);
-    view.setUint32(entry + 28, chunk.byteLength, true);
-    view.setUint16(entry + 32, BundleCompression.none, true);
-    new Uint8Array(buffer, offset, chunk.byteLength).set(new Uint8Array(chunk));
-    offset += chunk.byteLength;
+    view.setUint32(entry + 24, chunk.data.byteLength, true);
+    view.setUint32(entry + 28, chunk.rawByteLength, true);
+    view.setUint16(entry + 32, chunk.compression, true);
+    new Uint8Array(buffer, offset, chunk.data.byteLength).set(new Uint8Array(chunk.data));
+    offset += chunk.data.byteLength;
   }
   return buffer;
+}
+
+/** Creates a single, range-addressable bundle from independently readable compact graph tiles. */
+export function encodeRoadGraphBundle(tiles: BundleGraphTile[]): ArrayBuffer {
+  if (!tiles.length) throw new Error("A routing bundle requires at least one tile.");
+  const chunks = tiles.map((tile) => {
+    const data = encodeCompactGraph(compactGraph(tile.graph));
+    return { data, rawByteLength: data.byteLength, compression: BundleCompression.none };
+  });
+  return createBundle(tiles, chunks);
+}
+
+/** Creates a bundle with independently gzip-compressed EFR2 chunks. */
+export async function encodeCompressedRoadGraphBundle(tiles: BundleGraphTile[], options: BundleEncodeOptions = {}): Promise<ArrayBuffer> {
+  if (!tiles.length) throw new Error("A routing bundle requires at least one tile.");
+  if ((options.compression ?? "gzip") === "none") return encodeRoadGraphBundle(tiles);
+  const chunks = await Promise.all(tiles.map(async (tile) => {
+    const raw = encodeCompactGraph(compactGraph(tile.graph));
+    return { data: await gzipChunk(raw), rawByteLength: raw.byteLength, compression: BundleCompression.gzip };
+  }));
+  return createBundle(tiles, chunks);
 }
 
 export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetch): Promise<RoadGraphBundle> {
@@ -139,6 +166,25 @@ export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetc
     }
     return graph;
   };
+  const routeTiles = (origin: Coordinate, destination: Coordinate, ring: number) => {
+    const corridor: BundleBounds = {
+      minLat: Math.min(origin.lat, destination.lat), minLng: Math.min(origin.lng, destination.lng),
+      maxLat: Math.max(origin.lat, destination.lat), maxLng: Math.max(origin.lng, destination.lng),
+    };
+    const direct = tiles.filter((tile) => intersects(tile.bounds, corridor));
+    if (!ring || !direct.length) return direct;
+    const latitudePadding = Math.max(...direct.map((tile) => tile.bounds.maxLat - tile.bounds.minLat)) * ring;
+    const longitudePadding = Math.max(...direct.map((tile) => tile.bounds.maxLng - tile.bounds.minLng)) * ring;
+    return tiles.filter((tile) => intersects(tile.bounds, {
+      minLat: corridor.minLat - latitudePadding, minLng: corridor.minLng - longitudePadding,
+      maxLat: corridor.maxLat + latitudePadding, maxLng: corridor.maxLng + longitudePadding,
+    }));
+  };
+  const loadTiles = async (routeTiles: BundleTile[]) => {
+    if (!routeTiles.length) throw new RouterError("ROUTE_ACROSS_TILES", "No local graph tiles cover the route corridor.");
+    if (routeTiles.length === 1) return loadTile(routeTiles[0]);
+    return mergeRoadGraphs(await Promise.all(routeTiles.map(loadTile)));
+  };
   return {
     url,
     tiles,
@@ -147,12 +193,10 @@ export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetc
       const destinationTile = tiles.find((tile) => contains(tile.bounds, destination));
       if (!originTile || !destinationTile) throw new RouterError("ROUTE_OUTSIDE_COVERAGE", "The route is outside the available bundle coverage.");
       if (originTile.id === destinationTile.id) return loadTile(originTile);
-      const corridor: BundleBounds = {
-        minLat: Math.min(origin.lat, destination.lat), minLng: Math.min(origin.lng, destination.lng),
-        maxLat: Math.max(origin.lat, destination.lat), maxLng: Math.max(origin.lng, destination.lng),
-      };
-      const corridorTiles = tiles.filter((tile) => intersects(tile.bounds, corridor));
-      return mergeRoadGraphs(await Promise.all(corridorTiles.map(loadTile)));
+      return loadTiles(routeTiles(origin, destination, 0));
+    },
+    async loadExpandedForRoute(origin, destination) {
+      return loadTiles(routeTiles(origin, destination, 1));
     },
   };
 }
