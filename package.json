@@ -28,7 +28,7 @@
   "homepage": "https://github.com/danieljvsa/roadgraph-router#readme",
   "license": "UNLICENSED",
   "engines": {
-    "node": ">=18"
+    "node": ">=22.5"
   },
   "exports": {
     ".": {

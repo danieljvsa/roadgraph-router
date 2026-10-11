@@ -28,6 +28,10 @@ export interface RoadGraph {
   edgeDistanceScale?: number;
   /** Edge duration values are multiplied by this scale. Omitted means seconds. */
   edgeDurationScale?: number;
+  /** Optional intermediate vertices per directed edge, stored using coordinateScale. */
+  edgeShapeOffsets?: Uint32Array;
+  edgeShapeLatitudes?: Int32Array;
+  edgeShapeLongitudes?: Int32Array;
   spatialIndex?: NodeSpatialIndex;
 }
 

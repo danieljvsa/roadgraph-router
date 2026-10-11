@@ -39,6 +39,10 @@ export function compactGraph(graph: RoadGraph, options: CompactGraphOptions = {}
     edgeDurationsSeconds[index] = Math.round(durations[index] / edgeDurationScale);
   }
 
+  const edgeShapeOffsets = graph.edgeShapeOffsets?.slice();
+  const edgeShapeLatitudes = graph.edgeShapeLatitudes && Int32Array.from(graph.edgeShapeLatitudes, (value) => Math.round((value / inputCoordinateScale) * coordinateScale));
+  const edgeShapeLongitudes = graph.edgeShapeLongitudes && Int32Array.from(graph.edgeShapeLongitudes, (value) => Math.round((value / inputCoordinateScale) * coordinateScale));
+
   return {
     nodeLatitudes,
     nodeLongitudes,
@@ -49,5 +53,6 @@ export function compactGraph(graph: RoadGraph, options: CompactGraphOptions = {}
     coordinateScale,
     edgeDistanceScale,
     edgeDurationScale,
+    ...(edgeShapeOffsets && edgeShapeLatitudes && edgeShapeLongitudes ? { edgeShapeOffsets, edgeShapeLatitudes, edgeShapeLongitudes } : {}),
   };
 }

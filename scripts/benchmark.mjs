@@ -17,7 +17,7 @@ function coordinate(value) {
 
 const input = process.argv.slice(2).find((argument) => !argument.startsWith("--"));
 if (!input || !option("--origin") || !option("--destination")) {
-  throw new Error("Usage: npm run benchmark -- path/to/portugal.efrb --origin 37.0194,-7.9304 --destination 37.0340,-7.8900");
+  throw new Error("Usage: npm run benchmark -- path/to/region.efrb --origin latitude,longitude --destination latitude,longitude");
 }
 
 const origin = coordinate(option("--origin"));

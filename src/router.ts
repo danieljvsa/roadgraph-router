@@ -87,24 +87,35 @@ export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   if (!Number.isFinite(costs[destination])) throw new RouterError("NO_ROUTE", "No car route connects the selected points.");
 
   const nodeIds: number[] = [];
+  const routeEdges: number[] = [];
   let distanceMeters = 0;
   let durationSeconds = 0;
   for (let node = destination; node !== -1; node = previousNode[node]) {
     nodeIds.push(node);
     const edge = previousEdge[node];
     if (edge >= 0) {
+      routeEdges.push(edge);
       distanceMeters += graph.edgeDistancesMeters[edge] * (graph.edgeDistanceScale ?? 1);
       durationSeconds += graph.edgeDurationsSeconds[edge] * (graph.edgeDurationScale ?? 1);
     }
   }
   nodeIds.reverse();
+  routeEdges.reverse();
+  const coordinates: GeoJSON.Position[] = [];
+  const originCoordinate = coordinateFor(graph, nodeIds[0]);
+  coordinates.push([originCoordinate.lng, originCoordinate.lat]);
+  for (let index = 0; index < routeEdges.length; index += 1) {
+    const edge = routeEdges[index];
+    if (graph.edgeShapeOffsets && graph.edgeShapeLatitudes && graph.edgeShapeLongitudes) {
+      for (let point = graph.edgeShapeOffsets[edge]; point < graph.edgeShapeOffsets[edge + 1]; point += 1) coordinates.push([graph.edgeShapeLongitudes[point] / (graph.coordinateScale ?? 1), graph.edgeShapeLatitudes[point] / (graph.coordinateScale ?? 1)]);
+    }
+    const coordinate = coordinateFor(graph, nodeIds[index + 1]);
+    coordinates.push([coordinate.lng, coordinate.lat]);
+  }
   return {
     nodeIds,
     distanceMeters,
     durationSeconds,
-    geometry: { type: "LineString", coordinates: nodeIds.map((node) => {
-      const coordinate = coordinateFor(graph, node);
-      return [coordinate.lng, coordinate.lat];
-    }) },
+    geometry: { type: "LineString", coordinates },
   };
 }

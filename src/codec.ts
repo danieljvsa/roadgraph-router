@@ -1,102 +1,85 @@
 import type { RoadGraph } from "./types";
 
-const MAGIC = 0x45465254; // EFRT
+const MAGIC = 0x45465254;
 const VERSION = 1;
 const HEADER_BYTES = 16;
-const COMPACT_MAGIC = 0x32524645; // EFR2
+const COMPACT_MAGIC = 0x32524645; // EFR2 family
 const COMPACT_VERSION = 2;
+const SHAPED_COMPACT_VERSION = 3;
 const COMPACT_HEADER_BYTES = 32;
+const SHAPED_COMPACT_HEADER_BYTES = 40;
 
 export function encodeGraph(graph: RoadGraph): ArrayBuffer {
-  const nodeCount = graph.nodeLatitudes.length;
-  const edgeCount = graph.edgeTargets.length;
-  if (graph.nodeLongitudes.length !== nodeCount || graph.edgeOffsets.length !== nodeCount + 1 || graph.edgeDistancesMeters.length !== edgeCount || graph.edgeDurationsSeconds.length !== edgeCount || graph.edgeOffsets[nodeCount] !== edgeCount) throw new Error("Invalid road graph");
-  const byteLength = HEADER_BYTES + nodeCount * 16 + (nodeCount + 1) * 4 + edgeCount * 12;
-  const buffer = new ArrayBuffer(byteLength);
-  const view = new DataView(buffer);
-  view.setUint32(0, MAGIC, true);
-  view.setUint16(4, VERSION, true);
-  view.setUint32(8, nodeCount, true);
-  view.setUint32(12, edgeCount, true);
+  const nodes = graph.nodeLatitudes.length, edges = graph.edgeTargets.length;
+  if (graph.nodeLongitudes.length !== nodes || graph.edgeOffsets.length !== nodes + 1 || graph.edgeDistancesMeters.length !== edges || graph.edgeDurationsSeconds.length !== edges || graph.edgeOffsets[nodes] !== edges) throw new Error("Invalid road graph");
+  const buffer = new ArrayBuffer(HEADER_BYTES + nodes * 16 + (nodes + 1) * 4 + edges * 12);
+  const view = new DataView(buffer); view.setUint32(0, MAGIC, true); view.setUint16(4, VERSION, true); view.setUint32(8, nodes, true); view.setUint32(12, edges, true);
   let offset = HEADER_BYTES;
-  new Float64Array(buffer, offset, nodeCount).set(graph.nodeLatitudes); offset += nodeCount * 8;
-  new Float64Array(buffer, offset, nodeCount).set(graph.nodeLongitudes); offset += nodeCount * 8;
-  new Uint32Array(buffer, offset, nodeCount + 1).set(graph.edgeOffsets); offset += (nodeCount + 1) * 4;
-  new Uint32Array(buffer, offset, edgeCount).set(graph.edgeTargets); offset += edgeCount * 4;
-  new Float32Array(buffer, offset, edgeCount).set(graph.edgeDistancesMeters); offset += edgeCount * 4;
-  new Float32Array(buffer, offset, edgeCount).set(graph.edgeDurationsSeconds);
+  new Float64Array(buffer, offset, nodes).set(graph.nodeLatitudes); offset += nodes * 8;
+  new Float64Array(buffer, offset, nodes).set(graph.nodeLongitudes); offset += nodes * 8;
+  new Uint32Array(buffer, offset, nodes + 1).set(graph.edgeOffsets); offset += (nodes + 1) * 4;
+  new Uint32Array(buffer, offset, edges).set(graph.edgeTargets); offset += edges * 4;
+  new Float32Array(buffer, offset, edges).set(graph.edgeDistancesMeters); offset += edges * 4;
+  new Float32Array(buffer, offset, edges).set(graph.edgeDurationsSeconds);
   return buffer;
 }
 
 export function decodeGraph(buffer: ArrayBuffer): RoadGraph {
   if (buffer.byteLength < HEADER_BYTES) throw new Error("Invalid routing graph header");
-  const view = new DataView(buffer);
-  if (view.getUint32(0, true) === COMPACT_MAGIC && view.getUint16(4, true) === COMPACT_VERSION) return decodeCompactGraph(buffer);
-  if (view.getUint32(0, true) !== MAGIC || view.getUint16(4, true) !== VERSION) throw new Error("Unsupported routing graph format");
-  const nodeCount = view.getUint32(8, true);
-  const edgeCount = view.getUint32(12, true);
-  const expected = HEADER_BYTES + nodeCount * 16 + (nodeCount + 1) * 4 + edgeCount * 12;
+  const view = new DataView(buffer), magic = view.getUint32(0, true), version = view.getUint16(4, true);
+  if (magic === COMPACT_MAGIC && (version === COMPACT_VERSION || version === SHAPED_COMPACT_VERSION)) return decodeCompactGraph(buffer);
+  if (magic !== MAGIC || version !== VERSION) throw new Error("Unsupported routing graph format");
+  const nodes = view.getUint32(8, true), edges = view.getUint32(12, true), expected = HEADER_BYTES + nodes * 16 + (nodes + 1) * 4 + edges * 12;
   if (buffer.byteLength !== expected) throw new Error("Truncated routing graph");
   let offset = HEADER_BYTES;
-  const nodeLatitudes = new Float64Array(buffer.slice(offset, offset += nodeCount * 8));
-  const nodeLongitudes = new Float64Array(buffer.slice(offset, offset += nodeCount * 8));
-  const edgeOffsets = new Uint32Array(buffer.slice(offset, offset += (nodeCount + 1) * 4));
-  const edgeTargets = new Uint32Array(buffer.slice(offset, offset += edgeCount * 4));
-  const edgeDistancesMeters = new Float32Array(buffer.slice(offset, offset += edgeCount * 4));
-  const edgeDurationsSeconds = new Float32Array(buffer.slice(offset, offset += edgeCount * 4));
+  const nodeLatitudes = new Float64Array(buffer.slice(offset, offset += nodes * 8));
+  const nodeLongitudes = new Float64Array(buffer.slice(offset, offset += nodes * 8));
+  const edgeOffsets = new Uint32Array(buffer.slice(offset, offset += (nodes + 1) * 4));
+  const edgeTargets = new Uint32Array(buffer.slice(offset, offset += edges * 4));
+  const edgeDistancesMeters = new Float32Array(buffer.slice(offset, offset += edges * 4));
+  const edgeDurationsSeconds = new Float32Array(buffer.slice(offset, offset += edges * 4));
   return { nodeLatitudes, nodeLongitudes, edgeOffsets, edgeTargets, edgeDistancesMeters, edgeDurationsSeconds };
 }
 
-/** Encodes the fixed-point v2 format. It cuts v1 graph storage roughly in half. */
+/** Encodes fixed-point EFR2 v2, or v3 when compact per-edge shape points exist. */
 export function encodeCompactGraph(graph: RoadGraph): ArrayBuffer {
-  if (!(graph.nodeLatitudes instanceof Int32Array) || !(graph.nodeLongitudes instanceof Int32Array) || !(graph.edgeDistancesMeters instanceof Uint16Array) || !(graph.edgeDurationsSeconds instanceof Uint16Array)) {
-    throw new Error("Compact graphs require Int32 coordinates and Uint16 edge weights.");
-  }
-  const coordinateScale = graph.coordinateScale ?? 0;
-  const edgeDistanceScale = graph.edgeDistanceScale ?? 1;
-  const edgeDurationScale = graph.edgeDurationScale ?? 1;
-  if (!Number.isInteger(coordinateScale) || !Number.isInteger(edgeDistanceScale) || !Number.isInteger(edgeDurationScale) || coordinateScale <= 0 || edgeDistanceScale <= 0 || edgeDurationScale <= 0 || edgeDistanceScale > 65_535 || edgeDurationScale > 65_535) {
-    throw new Error("Invalid compact graph scales.");
-  }
-  const nodeCount = graph.nodeLatitudes.length;
-  const edgeCount = graph.edgeTargets.length;
-  if (graph.nodeLongitudes.length !== nodeCount || graph.edgeOffsets.length !== nodeCount + 1 || graph.edgeDistancesMeters.length !== edgeCount || graph.edgeDurationsSeconds.length !== edgeCount || graph.edgeOffsets[nodeCount] !== edgeCount) throw new Error("Invalid road graph");
-  const byteLength = COMPACT_HEADER_BYTES + nodeCount * 8 + (nodeCount + 1) * 4 + edgeCount * 8;
-  const buffer = new ArrayBuffer(byteLength);
-  const view = new DataView(buffer);
-  view.setUint32(0, COMPACT_MAGIC, true);
-  view.setUint16(4, COMPACT_VERSION, true);
-  view.setUint32(8, nodeCount, true);
-  view.setUint32(12, edgeCount, true);
-  view.setUint32(16, coordinateScale, true);
-  view.setUint16(20, edgeDistanceScale, true);
-  view.setUint16(22, edgeDurationScale, true);
-  let offset = COMPACT_HEADER_BYTES;
-  new Int32Array(buffer, offset, nodeCount).set(graph.nodeLatitudes); offset += nodeCount * 4;
-  new Int32Array(buffer, offset, nodeCount).set(graph.nodeLongitudes); offset += nodeCount * 4;
-  new Uint32Array(buffer, offset, nodeCount + 1).set(graph.edgeOffsets); offset += (nodeCount + 1) * 4;
-  new Uint32Array(buffer, offset, edgeCount).set(graph.edgeTargets); offset += edgeCount * 4;
-  new Uint16Array(buffer, offset, edgeCount).set(graph.edgeDistancesMeters); offset += edgeCount * 2;
-  new Uint16Array(buffer, offset, edgeCount).set(graph.edgeDurationsSeconds);
+  if (!(graph.nodeLatitudes instanceof Int32Array) || !(graph.nodeLongitudes instanceof Int32Array) || !(graph.edgeDistancesMeters instanceof Uint16Array) || !(graph.edgeDurationsSeconds instanceof Uint16Array)) throw new Error("Compact graphs require Int32 coordinates and Uint16 edge weights.");
+  const coordinateScale = graph.coordinateScale ?? 0, edgeDistanceScale = graph.edgeDistanceScale ?? 1, edgeDurationScale = graph.edgeDurationScale ?? 1;
+  if (!Number.isInteger(coordinateScale) || !Number.isInteger(edgeDistanceScale) || !Number.isInteger(edgeDurationScale) || coordinateScale <= 0 || edgeDistanceScale <= 0 || edgeDurationScale <= 0 || edgeDistanceScale > 65535 || edgeDurationScale > 65535) throw new Error("Invalid compact graph scales.");
+  const nodes = graph.nodeLatitudes.length, edges = graph.edgeTargets.length;
+  if (graph.nodeLongitudes.length !== nodes || graph.edgeOffsets.length !== nodes + 1 || graph.edgeDistancesMeters.length !== edges || graph.edgeDurationsSeconds.length !== edges || graph.edgeOffsets[nodes] !== edges) throw new Error("Invalid road graph");
+  const shaped = Boolean(graph.edgeShapeOffsets || graph.edgeShapeLatitudes || graph.edgeShapeLongitudes);
+  if (shaped && (!graph.edgeShapeOffsets || !graph.edgeShapeLatitudes || !graph.edgeShapeLongitudes || graph.edgeShapeOffsets.length !== edges + 1 || graph.edgeShapeLatitudes.length !== graph.edgeShapeLongitudes.length || graph.edgeShapeOffsets[edges] !== graph.edgeShapeLatitudes.length)) throw new Error("Invalid compact edge geometry.");
+  const points = graph.edgeShapeLatitudes?.length ?? 0, header = shaped ? SHAPED_COMPACT_HEADER_BYTES : COMPACT_HEADER_BYTES;
+  const buffer = new ArrayBuffer(header + nodes * 8 + (nodes + 1) * 4 + edges * 8 + (shaped ? (edges + 1) * 4 + points * 8 : 0));
+  const view = new DataView(buffer); view.setUint32(0, COMPACT_MAGIC, true); view.setUint16(4, shaped ? SHAPED_COMPACT_VERSION : COMPACT_VERSION, true); view.setUint32(8, nodes, true); view.setUint32(12, edges, true); view.setUint32(16, coordinateScale, true); view.setUint16(20, edgeDistanceScale, true); view.setUint16(22, edgeDurationScale, true); if (shaped) view.setUint32(24, points, true);
+  let offset = header;
+  new Int32Array(buffer, offset, nodes).set(graph.nodeLatitudes); offset += nodes * 4;
+  new Int32Array(buffer, offset, nodes).set(graph.nodeLongitudes); offset += nodes * 4;
+  new Uint32Array(buffer, offset, nodes + 1).set(graph.edgeOffsets); offset += (nodes + 1) * 4;
+  new Uint32Array(buffer, offset, edges).set(graph.edgeTargets); offset += edges * 4;
+  new Uint16Array(buffer, offset, edges).set(graph.edgeDistancesMeters); offset += edges * 2;
+  new Uint16Array(buffer, offset, edges).set(graph.edgeDurationsSeconds); offset += edges * 2;
+  if (shaped) { new Uint32Array(buffer, offset, edges + 1).set(graph.edgeShapeOffsets!); offset += (edges + 1) * 4; new Int32Array(buffer, offset, points).set(graph.edgeShapeLatitudes!); offset += points * 4; new Int32Array(buffer, offset, points).set(graph.edgeShapeLongitudes!); }
   return buffer;
 }
 
 function decodeCompactGraph(buffer: ArrayBuffer): RoadGraph {
   if (buffer.byteLength < COMPACT_HEADER_BYTES) throw new Error("Invalid compact routing graph header");
-  const view = new DataView(buffer);
-  const nodeCount = view.getUint32(8, true);
-  const edgeCount = view.getUint32(12, true);
-  const coordinateScale = view.getUint32(16, true);
-  const edgeDistanceScale = view.getUint16(20, true);
-  const edgeDurationScale = view.getUint16(22, true);
-  const expected = COMPACT_HEADER_BYTES + nodeCount * 8 + (nodeCount + 1) * 4 + edgeCount * 8;
+  const view = new DataView(buffer), version = view.getUint16(4, true), nodes = view.getUint32(8, true), edges = view.getUint32(12, true), coordinateScale = view.getUint32(16, true), edgeDistanceScale = view.getUint16(20, true), edgeDurationScale = view.getUint16(22, true);
+  const shaped = version === SHAPED_COMPACT_VERSION, points = shaped ? view.getUint32(24, true) : 0, header = shaped ? SHAPED_COMPACT_HEADER_BYTES : COMPACT_HEADER_BYTES;
+  const expected = header + nodes * 8 + (nodes + 1) * 4 + edges * 8 + (shaped ? (edges + 1) * 4 + points * 8 : 0);
   if (!coordinateScale || !edgeDistanceScale || !edgeDurationScale || buffer.byteLength !== expected) throw new Error("Truncated compact routing graph");
-  let offset = COMPACT_HEADER_BYTES;
-  const nodeLatitudes = new Int32Array(buffer.slice(offset, offset += nodeCount * 4));
-  const nodeLongitudes = new Int32Array(buffer.slice(offset, offset += nodeCount * 4));
-  const edgeOffsets = new Uint32Array(buffer.slice(offset, offset += (nodeCount + 1) * 4));
-  const edgeTargets = new Uint32Array(buffer.slice(offset, offset += edgeCount * 4));
-  const edgeDistancesMeters = new Uint16Array(buffer.slice(offset, offset += edgeCount * 2));
-  const edgeDurationsSeconds = new Uint16Array(buffer.slice(offset, offset += edgeCount * 2));
-  return { nodeLatitudes, nodeLongitudes, edgeOffsets, edgeTargets, edgeDistancesMeters, edgeDurationsSeconds, coordinateScale, edgeDistanceScale, edgeDurationScale };
+  let offset = header;
+  const nodeLatitudes = new Int32Array(buffer.slice(offset, offset += nodes * 4));
+  const nodeLongitudes = new Int32Array(buffer.slice(offset, offset += nodes * 4));
+  const edgeOffsets = new Uint32Array(buffer.slice(offset, offset += (nodes + 1) * 4));
+  const edgeTargets = new Uint32Array(buffer.slice(offset, offset += edges * 4));
+  const edgeDistancesMeters = new Uint16Array(buffer.slice(offset, offset += edges * 2));
+  const edgeDurationsSeconds = new Uint16Array(buffer.slice(offset, offset += edges * 2));
+  if (!shaped) return { nodeLatitudes, nodeLongitudes, edgeOffsets, edgeTargets, edgeDistancesMeters, edgeDurationsSeconds, coordinateScale, edgeDistanceScale, edgeDurationScale };
+  const edgeShapeOffsets = new Uint32Array(buffer.slice(offset, offset += (edges + 1) * 4));
+  const edgeShapeLatitudes = new Int32Array(buffer.slice(offset, offset += points * 4));
+  const edgeShapeLongitudes = new Int32Array(buffer.slice(offset, offset += points * 4));
+  return { nodeLatitudes, nodeLongitudes, edgeOffsets, edgeTargets, edgeDistancesMeters, edgeDurationsSeconds, coordinateScale, edgeDistanceScale, edgeDurationScale, edgeShapeOffsets, edgeShapeLatitudes, edgeShapeLongitudes };
 }
