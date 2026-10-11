@@ -1,7 +1,13 @@
-export { decodeGraph, encodeGraph } from "./codec";
+export { decodeGraph, encodeCompactGraph, encodeGraph } from "./codec";
+export { compactGraph } from "./compact";
 export { findNearestNode, route } from "./router";
+export { createSpatialIndex, withSpatialIndex } from "./spatial-index";
+export { RoadRouter } from "./road-router";
+export { BundleCompression, encodeRoadGraphBundle, openRoadGraphBundle } from "./bundle";
 export { RouterError } from "./types";
 export { createRouteGraphLoader } from "./manifest";
 export { mergeRoadGraphs } from "./merge";
-export type { Coordinate, RoadGraph, RoutePreference, RouteResult, RouterErrorCode } from "./types";
+export type { CompactGraphOptions } from "./compact";
+export type { BundleBounds, BundleGraphTile, BundleTile, RoadGraphBundle } from "./bundle";
+export type { Coordinate, CoordinateStorage, EdgeWeightStorage, NodeSpatialIndex, RoadGraph, RoutePreference, RouteResult, RouterErrorCode } from "./types";
 export type { GraphBounds, GraphTile, RouteGraphLoader, RouteGraphManifest } from "./manifest";

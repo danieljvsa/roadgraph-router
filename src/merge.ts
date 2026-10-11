@@ -16,9 +16,12 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
 
   for (const graph of graphs) {
     const nodeMap = new Uint32Array(graph.nodeLatitudes.length);
+    const coordinateScale = graph.coordinateScale ?? 1;
+    const distanceScale = graph.edgeDistanceScale ?? 1;
+    const durationScale = graph.edgeDurationScale ?? 1;
     for (let index = 0; index < graph.nodeLatitudes.length; index += 1) {
-      const lat = graph.nodeLatitudes[index];
-      const lng = graph.nodeLongitudes[index];
+      const lat = graph.nodeLatitudes[index] / coordinateScale;
+      const lng = graph.nodeLongitudes[index] / coordinateScale;
       const key = `${lat},${lng}`;
       let mergedIndex = nodes.get(key);
       if (mergedIndex === undefined) {
@@ -31,7 +34,7 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
     }
     for (let from = 0; from < graph.nodeLatitudes.length; from += 1) {
       for (let edge = graph.edgeOffsets[from]; edge < graph.edgeOffsets[from + 1]; edge += 1) {
-        edges.push({ from: nodeMap[from], to: nodeMap[graph.edgeTargets[edge]], distance: graph.edgeDistancesMeters[edge], duration: graph.edgeDurationsSeconds[edge] });
+        edges.push({ from: nodeMap[from], to: nodeMap[graph.edgeTargets[edge]], distance: graph.edgeDistancesMeters[edge] * distanceScale, duration: graph.edgeDurationsSeconds[edge] * durationScale });
       }
     }
   }

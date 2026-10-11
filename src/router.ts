@@ -1,6 +1,7 @@
 import { MinPriorityQueue } from "./priority-queue";
 import type { Coordinate, RoadGraph, RoutePreference, RouteResult } from "./types";
 import { RouterError } from "./types";
+import { nearbyNodeIds } from "./spatial-index";
 
 const EARTH_RADIUS_METERS = 6_371_000;
 const MAX_CAR_SPEED_MPS = 36.11; // 130 km/h: admissible fastest-route heuristic.
@@ -16,7 +17,8 @@ function haversineMeters(a: Coordinate, b: Coordinate) {
 }
 
 function coordinateFor(graph: RoadGraph, nodeId: number): Coordinate {
-  return { lat: graph.nodeLatitudes[nodeId], lng: graph.nodeLongitudes[nodeId] };
+  const scale = graph.coordinateScale ?? 1;
+  return { lat: graph.nodeLatitudes[nodeId] / scale, lng: graph.nodeLongitudes[nodeId] / scale };
 }
 
 function assertGraph(graph: RoadGraph) {
@@ -30,12 +32,17 @@ function assertGraph(graph: RoadGraph) {
 export function findNearestNode(graph: RoadGraph, coordinate: Coordinate, maxDistanceMeters = 500): number | null {
   let closest: number | null = null;
   let closestDistance = maxDistanceMeters;
-  for (let nodeId = 0; nodeId < graph.nodeLatitudes.length; nodeId++) {
+  const checkNode = (nodeId: number) => {
     const distance = haversineMeters(coordinate, coordinateFor(graph, nodeId));
     if (distance <= closestDistance) {
       closest = nodeId;
       closestDistance = distance;
     }
+  };
+  if (graph.spatialIndex) {
+    for (const nodeId of nearbyNodeIds(graph.spatialIndex, coordinate, maxDistanceMeters)) checkNode(nodeId);
+  } else {
+    for (let nodeId = 0; nodeId < graph.nodeLatitudes.length; nodeId += 1) checkNode(nodeId);
   }
   return closest;
 }
@@ -63,7 +70,9 @@ export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     const end = graph.edgeOffsets[node + 1];
     for (let edge = start; edge < end; edge++) {
       const target = graph.edgeTargets[edge];
-      const edgeCost = preference === "fastest" ? graph.edgeDurationsSeconds[edge] : graph.edgeDistancesMeters[edge];
+      const edgeCost = preference === "fastest"
+        ? graph.edgeDurationsSeconds[edge] * (graph.edgeDurationScale ?? 1)
+        : graph.edgeDistancesMeters[edge] * (graph.edgeDistanceScale ?? 1);
       const cost = costs[node] + edgeCost;
       if (cost >= costs[target]) continue;
       costs[target] = cost;
@@ -84,8 +93,8 @@ export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     nodeIds.push(node);
     const edge = previousEdge[node];
     if (edge >= 0) {
-      distanceMeters += graph.edgeDistancesMeters[edge];
-      durationSeconds += graph.edgeDurationsSeconds[edge];
+      distanceMeters += graph.edgeDistancesMeters[edge] * (graph.edgeDistanceScale ?? 1);
+      durationSeconds += graph.edgeDurationsSeconds[edge] * (graph.edgeDurationScale ?? 1);
     }
   }
   nodeIds.reverse();
