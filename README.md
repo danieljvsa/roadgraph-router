@@ -4,6 +4,29 @@ Browser-safe routing primitives for pre-built directed road graphs. The package 
 
 It deliberately does not download OpenStreetMap data or call a directions service. Graph creation belongs to a separate Node-only importer.
 
+## Compile any region
+
+The package includes a Node-only, streaming PBF compiler. It discovers bounds,
+partitions the extract automatically, preserves one-way edges, and emits an
+EFRB bundle that can be opened by `RoadRouter`. No country, region name, or
+fixed grid is built into the command:
+
+```sh
+roadgraph-compile input.osm.pbf --output region.efrb \
+  --profile car --tile-size-km 120 --compression gzip
+```
+
+Use `--padding-km` to tune cross-tile overlap, `--shape-tolerance-m` to remove
+only visually straight, unambiguous shape nodes, and `--bbox minLon,minLat,maxLon,maxLat`
+to compile a smaller area from a larger extract. The compiler writes a
+`region.efrb.json` report with input size, OSM-road counts, routing-node
+reduction, edges, compressed output size, peak RSS, and elapsed time.
+
+The first importer targets `.osm.pbf`, because PBF supports country-scale
+streaming. Convert XML `.osm` extracts to PBF before compiling; this avoids
+loading a whole XML document into memory. The runtime format is unchanged:
+EFR2 chunks inside EFRB.
+
 ## Usage
 
 ```ts

@@ -8,7 +8,8 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "scripts/roadgraph-compile.mjs"
   ],
   "keywords": [
     "routing",
@@ -39,19 +40,26 @@
       "import": "./dist/worker.js"
     }
   },
+  "bin": {
+    "roadgraph-compile": "./scripts/roadgraph-compile.mjs"
+  },
   "scripts": {
     "build": "tsup src/index.ts src/worker.ts --format esm --dts --clean",
     "check": "tsc --noEmit",
     "test": "jest --runInBand",
     "benchmark": "npm run build && node scripts/benchmark.mjs",
+    "compile": "node scripts/roadgraph-compile.mjs",
     "prepack": "npm run build"
   },
   "devDependencies": {
-    "@types/jest": "^30.0.0",
     "@types/geojson": "^7946.0.16",
+    "@types/jest": "^30.0.0",
     "jest": "^30.5.0",
     "ts-jest": "^29.4.12",
     "tsup": "^8.5.1",
     "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "osm-pbf-parser-node": "^1.1.4"
   }
 }
