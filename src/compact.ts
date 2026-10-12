@@ -57,5 +57,8 @@ export function compactGraph(graph: RoadGraph, options: CompactGraphOptions = {}
     ...(graph.turnRestrictionFromEdges && graph.turnRestrictionToEdges
       ? { turnRestrictionFromEdges: graph.turnRestrictionFromEdges.slice(), turnRestrictionToEdges: graph.turnRestrictionToEdges.slice() }
       : {}),
+    ...(graph.turnRestrictionSequenceOffsets && graph.turnRestrictionSequenceEdges
+      ? { turnRestrictionSequenceOffsets: graph.turnRestrictionSequenceOffsets.slice(), turnRestrictionSequenceEdges: graph.turnRestrictionSequenceEdges.slice() }
+      : {}),
   };
 }

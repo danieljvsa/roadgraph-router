@@ -7,10 +7,12 @@ const COMPACT_MAGIC = 0x32524645; // EFR2 family
 const COMPACT_VERSION = 2;
 const SHAPED_COMPACT_VERSION = 3;
 const RESTRICTED_COMPACT_VERSION = 4;
+/** v5 adds banned edge sequences for `via`-way turn restrictions. */
+const SEQUENCED_COMPACT_VERSION = 5;
 const COMPACT_HEADER_BYTES = 32;
 /** v3 and v4 share one 40-byte header; v4 fills the shape-point field's spare neighbour. */
 const SHAPED_COMPACT_HEADER_BYTES = 40;
-const SUPPORTED_COMPACT_VERSIONS = new Set<number>([COMPACT_VERSION, SHAPED_COMPACT_VERSION, RESTRICTED_COMPACT_VERSION]);
+const SUPPORTED_COMPACT_VERSIONS = new Set<number>([COMPACT_VERSION, SHAPED_COMPACT_VERSION, RESTRICTED_COMPACT_VERSION, SEQUENCED_COMPACT_VERSION]);
 
 export function encodeGraph(graph: RoadGraph): ArrayBuffer {
   const nodes = graph.nodeLatitudes.length, edges = graph.edgeTargets.length;
@@ -56,17 +58,21 @@ export function encodeCompactGraph(graph: RoadGraph): ArrayBuffer {
   if (!Number.isInteger(coordinateScale) || !Number.isInteger(edgeDistanceScale) || !Number.isInteger(edgeDurationScale) || coordinateScale <= 0 || edgeDistanceScale <= 0 || edgeDurationScale <= 0 || edgeDistanceScale > 65535 || edgeDurationScale > 65535) throw new Error("Invalid compact graph scales.");
   const nodes = graph.nodeLatitudes.length, edges = graph.edgeTargets.length;
   if (graph.nodeLongitudes.length !== nodes || graph.edgeOffsets.length !== nodes + 1 || graph.edgeDistancesMeters.length !== edges || graph.edgeDurationsSeconds.length !== edges || graph.edgeOffsets[nodes] !== edges) throw new Error("Invalid road graph");
-  const restricted = Boolean(graph.turnRestrictionFromEdges?.length || graph.turnRestrictionToEdges?.length);
-  if (restricted && graph.turnRestrictionFromEdges!.length !== graph.turnRestrictionToEdges!.length) throw new Error("Invalid compact turn restrictions.");
-  const restrictions = restricted ? graph.turnRestrictionFromEdges!.length : 0;
+  const sequenceEdges = graph.turnRestrictionSequenceEdges?.length ?? 0;
+  const sequences = sequenceEdges ? (graph.turnRestrictionSequenceOffsets?.length ?? 1) - 1 : 0;
+  if (sequences && (!graph.turnRestrictionSequenceOffsets || graph.turnRestrictionSequenceOffsets[sequences] !== sequenceEdges)) throw new Error("Invalid compact turn restriction sequences.");
+  for (let index = 0; index < sequenceEdges; index += 1) if (graph.turnRestrictionSequenceEdges![index] >= edges) throw new Error("Turn restriction references an edge outside the graph.");
+  const restricted = Boolean(graph.turnRestrictionFromEdges?.length || graph.turnRestrictionToEdges?.length) || sequences > 0;
+  if ((graph.turnRestrictionFromEdges?.length ?? 0) !== (graph.turnRestrictionToEdges?.length ?? 0)) throw new Error("Invalid compact turn restrictions.");
+  const restrictions = graph.turnRestrictionFromEdges?.length ?? 0;
   for (let pair = 0; pair < restrictions; pair += 1) if (graph.turnRestrictionFromEdges![pair] >= edges || graph.turnRestrictionToEdges![pair] >= edges) throw new Error("Turn restriction references an edge outside the graph.");
   const hasShapes = Boolean(graph.edgeShapeOffsets || graph.edgeShapeLatitudes || graph.edgeShapeLongitudes);
   if (hasShapes && (!graph.edgeShapeOffsets || !graph.edgeShapeLatitudes || !graph.edgeShapeLongitudes || graph.edgeShapeOffsets.length !== edges + 1 || graph.edgeShapeLatitudes.length !== graph.edgeShapeLongitudes.length || graph.edgeShapeOffsets[edges] !== graph.edgeShapeLatitudes.length)) throw new Error("Invalid compact edge geometry.");
   const shaped = hasShapes || restricted;
-  const version = restricted ? RESTRICTED_COMPACT_VERSION : hasShapes ? SHAPED_COMPACT_VERSION : COMPACT_VERSION;
+  const version = sequences ? SEQUENCED_COMPACT_VERSION : restricted ? RESTRICTED_COMPACT_VERSION : hasShapes ? SHAPED_COMPACT_VERSION : COMPACT_VERSION;
   const points = graph.edgeShapeLatitudes?.length ?? 0, header = shaped ? SHAPED_COMPACT_HEADER_BYTES : COMPACT_HEADER_BYTES;
-  const buffer = new ArrayBuffer(header + nodes * 8 + (nodes + 1) * 4 + edges * 8 + (shaped ? (edges + 1) * 4 + points * 8 : 0) + restrictions * 8);
-  const view = new DataView(buffer); view.setUint32(0, COMPACT_MAGIC, true); view.setUint16(4, version, true); view.setUint32(8, nodes, true); view.setUint32(12, edges, true); view.setUint32(16, coordinateScale, true); view.setUint16(20, edgeDistanceScale, true); view.setUint16(22, edgeDurationScale, true); if (shaped) { view.setUint32(24, points, true); view.setUint32(28, restrictions, true); }
+  const buffer = new ArrayBuffer(header + nodes * 8 + (nodes + 1) * 4 + edges * 8 + (shaped ? (edges + 1) * 4 + points * 8 : 0) + restrictions * 8 + (sequences ? (sequences + 1) * 4 + sequenceEdges * 4 : 0));
+  const view = new DataView(buffer); view.setUint32(0, COMPACT_MAGIC, true); view.setUint16(4, version, true); view.setUint32(8, nodes, true); view.setUint32(12, edges, true); view.setUint32(16, coordinateScale, true); view.setUint16(20, edgeDistanceScale, true); view.setUint16(22, edgeDurationScale, true); if (shaped) { view.setUint32(24, points, true); view.setUint32(28, restrictions, true); view.setUint32(32, sequences, true); view.setUint32(36, sequenceEdges, true); }
   let offset = header;
   new Int32Array(buffer, offset, nodes).set(graph.nodeLatitudes); offset += nodes * 4;
   new Int32Array(buffer, offset, nodes).set(graph.nodeLongitudes); offset += nodes * 4;
@@ -80,9 +86,13 @@ export function encodeCompactGraph(graph: RoadGraph): ArrayBuffer {
     new Int32Array(buffer, offset, points).set(graph.edgeShapeLatitudes ?? []); offset += points * 4;
     new Int32Array(buffer, offset, points).set(graph.edgeShapeLongitudes ?? []); offset += points * 4;
   }
-  if (restricted) {
+  if (restrictions) {
     new Uint32Array(buffer, offset, restrictions).set(graph.turnRestrictionFromEdges!); offset += restrictions * 4;
-    new Uint32Array(buffer, offset, restrictions).set(graph.turnRestrictionToEdges!);
+    new Uint32Array(buffer, offset, restrictions).set(graph.turnRestrictionToEdges!); offset += restrictions * 4;
+  }
+  if (sequences) {
+    new Uint32Array(buffer, offset, sequences + 1).set(graph.turnRestrictionSequenceOffsets!); offset += (sequences + 1) * 4;
+    new Uint32Array(buffer, offset, sequenceEdges).set(graph.turnRestrictionSequenceEdges!);
   }
   return buffer;
 }
@@ -92,7 +102,9 @@ function decodeCompactGraph(buffer: ArrayBuffer): RoadGraph {
   const view = new DataView(buffer), version = view.getUint16(4, true), nodes = view.getUint32(8, true), edges = view.getUint32(12, true), coordinateScale = view.getUint32(16, true), edgeDistanceScale = view.getUint16(20, true), edgeDurationScale = view.getUint16(22, true);
   const shaped = version >= SHAPED_COMPACT_VERSION, points = shaped ? view.getUint32(24, true) : 0, header = shaped ? SHAPED_COMPACT_HEADER_BYTES : COMPACT_HEADER_BYTES;
   const restrictions = version >= RESTRICTED_COMPACT_VERSION ? view.getUint32(28, true) : 0;
-  const expected = header + nodes * 8 + (nodes + 1) * 4 + edges * 8 + (shaped ? (edges + 1) * 4 + points * 8 : 0) + restrictions * 8;
+  const sequences = version >= SEQUENCED_COMPACT_VERSION ? view.getUint32(32, true) : 0;
+  const sequenceEdges = version >= SEQUENCED_COMPACT_VERSION ? view.getUint32(36, true) : 0;
+  const expected = header + nodes * 8 + (nodes + 1) * 4 + edges * 8 + (shaped ? (edges + 1) * 4 + points * 8 : 0) + restrictions * 8 + (sequences ? (sequences + 1) * 4 + sequenceEdges * 4 : 0);
   if (!coordinateScale || !edgeDistanceScale || !edgeDurationScale || buffer.byteLength !== expected) throw new Error("Truncated compact routing graph");
   let offset = header;
   const nodeLatitudes = new Int32Array(buffer.slice(offset, offset += nodes * 4));
@@ -107,8 +119,13 @@ function decodeCompactGraph(buffer: ArrayBuffer): RoadGraph {
   const edgeShapeLatitudes = new Int32Array(buffer.slice(offset, offset += points * 4));
   const edgeShapeLongitudes = new Int32Array(buffer.slice(offset, offset += points * 4));
   if (points) Object.assign(graph, { edgeShapeOffsets, edgeShapeLatitudes, edgeShapeLongitudes });
-  if (!restrictions) return graph;
-  graph.turnRestrictionFromEdges = new Uint32Array(buffer.slice(offset, offset += restrictions * 4));
-  graph.turnRestrictionToEdges = new Uint32Array(buffer.slice(offset, offset += restrictions * 4));
+  if (restrictions) {
+    graph.turnRestrictionFromEdges = new Uint32Array(buffer.slice(offset, offset += restrictions * 4));
+    graph.turnRestrictionToEdges = new Uint32Array(buffer.slice(offset, offset += restrictions * 4));
+  }
+  if (sequences) {
+    graph.turnRestrictionSequenceOffsets = new Uint32Array(buffer.slice(offset, offset += (sequences + 1) * 4));
+    graph.turnRestrictionSequenceEdges = new Uint32Array(buffer.slice(offset, offset += sequenceEdges * 4));
+  }
   return graph;
 }

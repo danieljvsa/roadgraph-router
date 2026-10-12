@@ -79,14 +79,22 @@ function encodeEfr2(graph) {
   // Restrictions are collected against pre-grouping edge positions, so they
   // follow each edge into the CSR layout through the same permutation.
   const banned = [...new Set((graph.restrictions ?? []).map(([from, to]) => `${placement[from]}:${placement[to]}`))].map((pair) => pair.split(":").map(Number)).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const runs = [...new Set((graph.runs ?? []).map((run) => run.map((edge) => placement[edge]).join(",")))].map((run) => run.split(",").map(Number)).filter((run) => run.length >= 3).sort((a, b) => a[0] - b[0] || a.length - b.length || a[1] - b[1]);
+  const runEdges = runs.reduce((sum, run) => sum + run.length, 0);
   const shapeOffsets = new Uint32Array(edges + 1); for (let i = 0; i < edges; i += 1) shapeOffsets[i + 1] = shapeOffsets[i] + shapes[i].length;
-  const points = shapeOffsets[edges], version = banned.length ? 4 : 3;
-  const bytes = 40 + nodes * 8 + (nodes + 1) * 4 + edges * 8 + (edges + 1) * 4 + points * 8 + banned.length * 8, buffer = new ArrayBuffer(bytes), view = new DataView(buffer);
-  view.setUint32(0, EFR2_MAGIC, true); view.setUint16(4, version, true); view.setUint32(8, nodes, true); view.setUint32(12, edges, true); view.setUint32(16, SCALE, true); view.setUint16(20, distanceScale, true); view.setUint16(22, durationScale, true); view.setUint32(24, points, true); view.setUint32(28, banned.length, true);
+  const points = shapeOffsets[edges], version = runs.length ? 5 : banned.length ? 4 : 3;
+  const bytes = 40 + nodes * 8 + (nodes + 1) * 4 + edges * 8 + (edges + 1) * 4 + points * 8 + banned.length * 8 + (runs.length ? (runs.length + 1) * 4 + runEdges * 4 : 0), buffer = new ArrayBuffer(bytes), view = new DataView(buffer);
+  view.setUint32(0, EFR2_MAGIC, true); view.setUint16(4, version, true); view.setUint32(8, nodes, true); view.setUint32(12, edges, true); view.setUint32(16, SCALE, true); view.setUint16(20, distanceScale, true); view.setUint16(22, durationScale, true); view.setUint32(24, points, true); view.setUint32(28, banned.length, true); view.setUint32(32, runs.length, true); view.setUint32(36, runEdges, true);
   let offset = 40; const latitudes = new Int32Array(buffer, offset, nodes); offset += latitudes.byteLength; const longitudes = new Int32Array(buffer, offset, nodes); offset += longitudes.byteLength; for (let i = 0; i < nodes; i += 1) { latitudes[i] = fixed(graph.nodes[i].lat); longitudes[i] = fixed(graph.nodes[i].lon); }
   new Uint32Array(buffer, offset, nodes + 1).set(offsets); offset += (nodes + 1) * 4; new Uint32Array(buffer, offset, edges).set(targets); offset += edges * 4; new Uint16Array(buffer, offset, edges).set(distances); offset += edges * 2; new Uint16Array(buffer, offset, edges).set(durations); offset += edges * 2; new Uint32Array(buffer, offset, edges + 1).set(shapeOffsets); offset += (edges + 1) * 4;
   const shapeLatitudes = new Int32Array(buffer, offset, points); offset += points * 4; const shapeLongitudes = new Int32Array(buffer, offset, points); offset += points * 4; let point = 0; for (const shape of shapes) for (const coordinate of shape) { shapeLatitudes[point] = fixed(coordinate.lat); shapeLongitudes[point++] = fixed(coordinate.lon); }
-  if (banned.length) { new Uint32Array(buffer, offset, banned.length).set(banned.map((pair) => pair[0])); offset += banned.length * 4; new Uint32Array(buffer, offset, banned.length).set(banned.map((pair) => pair[1])); }
+  if (banned.length) { new Uint32Array(buffer, offset, banned.length).set(banned.map((pair) => pair[0])); offset += banned.length * 4; new Uint32Array(buffer, offset, banned.length).set(banned.map((pair) => pair[1])); offset += banned.length * 4; }
+  if (runs.length) {
+    const runOffsets = new Uint32Array(runs.length + 1);
+    for (let i = 0; i < runs.length; i += 1) runOffsets[i + 1] = runOffsets[i] + runs[i].length;
+    new Uint32Array(buffer, offset, runs.length + 1).set(runOffsets); offset += (runs.length + 1) * 4;
+    new Uint32Array(buffer, offset, runEdges).set(runs.flat());
+  }
   return buffer;
 }
 function assemble(chunks, compression) { let offset = HEADER + chunks.length * DIRECTORY, size = offset + chunks.reduce((sum, chunk) => sum + chunk.data.byteLength, 0), out = new ArrayBuffer(size), view = new DataView(out); view.setUint32(0, EFRB_MAGIC, true); view.setUint16(4, 1, true); view.setUint16(6, HEADER, true); view.setUint32(8, chunks.length, true); view.setUint32(12, HEADER, true); view.setUint32(16, chunks.length * DIRECTORY, true); for (let i = 0; i < chunks.length; i += 1) { const chunk = chunks[i], at = HEADER + i * DIRECTORY, b = chunk.tile.bounds; view.setUint32(at, chunk.tile.id, true); view.setInt32(at + 4, fixed(b.minLat), true); view.setInt32(at + 8, fixed(b.minLon), true); view.setInt32(at + 12, fixed(b.maxLat), true); view.setInt32(at + 16, fixed(b.maxLon), true); view.setUint32(at + 20, offset, true); view.setUint32(at + 24, chunk.data.byteLength, true); view.setUint32(at + 28, chunk.rawBytes, true); view.setUint16(at + 32, compression === "gzip" ? 1 : 0, true); new Uint8Array(out, offset, chunk.data.byteLength).set(chunk.data); offset += chunk.data.byteLength; } return out; }
@@ -133,14 +141,21 @@ async function firstPass(file, roadFile, limitBytes, profile) {
       const from = members.find((member) => member.role === "from" && member.type === "way");
       const to = members.find((member) => member.role === "to" && member.type === "way");
       const via = members.filter((member) => member.role === "via");
-      // `via` may be a way for restrictions spanning a whole link road. Those
-      // need an edge-path ban rather than a single banned pair, so they are
-      // counted and skipped instead of being approximated.
-      if (!from || !to || via.length !== 1 || via[0].type !== "node") { skippedRestrictions += 1; continue; }
-      const viaNode = Number(via[0].ref);
-      keeperNodes.add(viaNode);
+      if (!from || !to || !via.length) { skippedRestrictions += 1; continue; }
       restrictionWays.add(Number(from.ref)); restrictionWays.add(Number(to.ref));
-      restrictions.push({ kind: parsed.kind, from: Number(from.ref), to: Number(to.ref), via: viaNode });
+      if (via.length === 1 && via[0].type === "node") {
+        const viaNode = Number(via[0].ref);
+        keeperNodes.add(viaNode);
+        restrictions.push({ kind: parsed.kind, from: Number(from.ref), to: Number(to.ref), via: viaNode });
+        continue;
+      }
+      // A `via` way names a whole link road, so the ban covers a run of edges
+      // rather than one turn. Its ends must stay in the topology for the run
+      // to be found again at build time.
+      if (!via.every((member) => member.type === "way")) { skippedRestrictions += 1; continue; }
+      const viaWays = via.map((member) => Number(member.ref));
+      for (const way of viaWays) restrictionWays.add(way);
+      restrictions.push({ kind: parsed.kind, from: Number(from.ref), to: Number(to.ref), viaWays });
       continue;
     }
     if (entity.type !== "way") continue;
@@ -157,7 +172,7 @@ async function firstPass(file, roadFile, limitBytes, profile) {
   if (!Number.isFinite(bounds.minLat)) throw new Error("The input contains no OSM nodes.");
   // Drop restrictions whose ways were filtered out by the profile; they can
   // never produce a banned pair and would only cost memory downstream.
-  const usable = restrictions.filter((restriction) => required.has(restriction.via));
+  const usable = restrictions.filter((restriction) => restriction.viaWays || required.has(restriction.via));
   return { required, keeperNodes, bounds, ways, restrictions: usable, restrictionWays, skippedRestrictions };
 }
 
@@ -186,25 +201,71 @@ async function secondPass(file, required, limitBytes, databasePath) {
  * here into the equivalent bans on every other way out of the via node, so the
  * runtime never has to know the difference.
  */
+const MAX_VIA_EDGES = 4, MAX_VIA_CHAINS = 8;
+
+/** Every simple run of edges leaving `start` that stays on the restriction's via ways. */
+function viaChains(graph, outgoing, start, viaWays) {
+  const chains = [], used = new Set();
+  const walk = (node, chain) => {
+    if (chain.length >= MAX_VIA_EDGES || chains.length >= MAX_VIA_CHAINS) return;
+    for (const edge of outgoing.get(node) ?? []) {
+      if (!viaWays.has(graph.edges[edge].way) || used.has(edge)) continue;
+      const extended = [...chain, edge];
+      chains.push(extended);
+      used.add(edge);
+      walk(graph.edges[edge].to, extended);
+      used.delete(edge);
+    }
+  };
+  walk(start, []);
+  return chains;
+}
+
+/**
+ * Resolves one tile's OSM turn restrictions. A `via` node becomes a banned
+ * (fromEdge, toEdge) pair; a `via` way becomes a banned run covering the whole
+ * link. `only_*` relations are expanded here into bans on every other way out,
+ * so the runtime never has to know the difference.
+ */
 function resolveRestrictions(graph, restrictions) {
-  if (!graph.wayEdges.size) return [];
+  if (!graph.wayEdges.size) return { banned: [], runs: [] };
   const outgoing = new Map();
   for (let index = 0; index < graph.edges.length; index += 1) {
     const list = outgoing.get(graph.edges[index].from);
     if (list) list.push(index); else outgoing.set(graph.edges[index].from, [index]);
   }
-  const banned = [];
+  const banned = [], runs = [];
   for (const restriction of restrictions) {
-    const via = graph.ids.get(restriction.via);
-    if (via === undefined) continue;
-    const fromEdges = (graph.wayEdges.get(restriction.from) ?? []).filter((index) => graph.edges[index].to === via);
-    const toEdges = (graph.wayEdges.get(restriction.to) ?? []).filter((index) => graph.edges[index].from === via);
-    if (!fromEdges.length || !toEdges.length) continue;
-    if (restriction.kind === "no") { for (const from of fromEdges) for (const to of toEdges) banned.push([from, to]); continue; }
-    const mandatory = new Set(toEdges);
-    for (const from of fromEdges) for (const to of outgoing.get(via) ?? []) if (!mandatory.has(to)) banned.push([from, to]);
+    const fromAll = graph.wayEdges.get(restriction.from) ?? [];
+    const toAll = graph.wayEdges.get(restriction.to) ?? [];
+    if (!fromAll.length || !toAll.length) continue;
+
+    if (!restriction.viaWays) {
+      const via = graph.ids.get(restriction.via);
+      if (via === undefined) continue;
+      const fromEdges = fromAll.filter((index) => graph.edges[index].to === via);
+      const toEdges = toAll.filter((index) => graph.edges[index].from === via);
+      if (!fromEdges.length || !toEdges.length) continue;
+      if (restriction.kind === "no") { for (const from of fromEdges) for (const to of toEdges) banned.push([from, to]); continue; }
+      const mandatory = new Set(toEdges);
+      for (const from of fromEdges) for (const to of outgoing.get(via) ?? []) if (!mandatory.has(to)) banned.push([from, to]);
+      continue;
+    }
+
+    const viaWays = new Set(restriction.viaWays);
+    for (const from of fromAll) {
+      for (const chain of viaChains(graph, outgoing, graph.edges[from].to, viaWays)) {
+        if (chain.includes(from)) continue;
+        const end = graph.edges[chain[chain.length - 1]].to;
+        const toEdges = toAll.filter((index) => graph.edges[index].from === end && !chain.includes(index));
+        if (!toEdges.length) continue;
+        if (restriction.kind === "no") { for (const to of toEdges) runs.push([from, ...chain, to]); continue; }
+        const mandatory = new Set(toEdges);
+        for (const to of outgoing.get(end) ?? []) if (!mandatory.has(to) && !chain.includes(to)) runs.push([from, ...chain, to]);
+      }
+    }
   }
-  return banned;
+  return { banned, runs };
 }
 
 async function build(roadFile, coordinates, topology, layout, bounds, tolerance, paddingKm, tileSizeKm, limitBytes) {
@@ -221,7 +282,7 @@ async function build(roadFile, coordinates, topology, layout, bounds, tolerance,
       if (!inside(points[0], expand(tile.bounds, paddingKm))) continue;
       const graph = graphs.get(tile.id), from = add(graph, ids[0], points[0]), to = add(graph, ids[ids.length - 1], points[points.length - 1]);
       const index = graph.edges.length;
-      graph.edges.push({ from, to, distance, duration: distance / (velocity * (1000 / 3600)), shape });
+      graph.edges.push({ from, to, distance, duration: distance / (velocity * (1000 / 3600)), shape, way: tracked ? wayId : 0 });
       // Only ways named by a restriction need a reverse index, which keeps the
       // lookup table proportional to the restrictions rather than to the graph.
       if (tracked) { const list = graph.wayEdges.get(wayId); if (list) list.push(index); else graph.wayEdges.set(wayId, [index]); }
@@ -245,11 +306,17 @@ async function build(roadFile, coordinates, topology, layout, bounds, tolerance,
       start = i;
     }
   }
-  let bannedTurns = 0;
-  for (const graph of graphs.values()) { graph.restrictions = resolveRestrictions(graph, topology.restrictions); bannedTurns += graph.restrictions.length; }
+  let bannedTurns = 0, bannedRuns = 0;
+  for (const graph of graphs.values()) {
+    const resolved = resolveRestrictions(graph, topology.restrictions);
+    graph.restrictions = resolved.banned;
+    graph.runs = resolved.runs;
+    bannedTurns += resolved.banned.length;
+    bannedRuns += resolved.runs.length;
+  }
   const result = [...graphs.values()].filter((graph) => graph.edges.length), routingNodeIds = new Set();
   for (const graph of result) for (const id of graph.ids.keys()) routingNodeIds.add(id);
-  return { graphs: result, routingEdges, routingNodes: routingNodeIds.size, bannedTurns };
+  return { graphs: result, routingEdges, routingNodes: routingNodeIds.size, bannedTurns, bannedRuns };
 }
 
 const input = inputArg(), outputOption = opt("--output"), profileName = opt("--profile", "car"), compression = opt("--compression", "gzip"), tileSizeKm = Number(opt("--tile-size-km", "120")), paddingKm = Number(opt("--padding-km", "8")), tolerance = Number(opt("--shape-tolerance-m", "2")), requested = parseBounds(opt("--bbox"));
@@ -271,8 +338,8 @@ else {
     const bundle = assemble(chunks, compression); await mkdir(dirname(output), { recursive: true }); await writeFile(output, new Uint8Array(bundle));
     await verifyBundle(output, chunks.length);
     const nodesBefore = storedNodes, nodesAfter = built.routingNodes, edges = built.routingEdges, rawBytes = chunks.reduce((sum, chunk) => sum + chunk.rawBytes, 0);
-    const report = { formatVersion: 1, input: file, inputBytes: source.size, profile: profile.name, compression: `${compression}-per-tile`, tileSizeKm, paddingKm, pbfPasses: 2, tiles: chunks.length, relevantOsmWays: first.ways, relevantOsmNodes, relevantOsmNodesExact: false, routingNodesBeforeSimplification: nodesBefore, routingNodesAfterSimplification: nodesAfter, reductionPercent: Number((100 * (1 - nodesAfter / Math.max(1, nodesBefore))).toFixed(2)), routingEdges: edges, turnRestrictionsRead: first.restrictions.length, turnRestrictionsSkipped: first.skippedRestrictions, bannedTurnPairs: built.bannedTurns, uncompressedGraphBytes: rawBytes, bundleBytes: bundle.byteLength, compressionRatio: Number((bundle.byteLength / Math.max(1, rawBytes)).toFixed(4)), peakRssBytes: Math.max(observedPeakRss, process.memoryUsage().rss), elapsedMilliseconds: Math.round(performance.now() - started) };
+    const report = { formatVersion: 1, input: file, inputBytes: source.size, profile: profile.name, compression: `${compression}-per-tile`, tileSizeKm, paddingKm, pbfPasses: 2, tiles: chunks.length, relevantOsmWays: first.ways, relevantOsmNodes, relevantOsmNodesExact: false, routingNodesBeforeSimplification: nodesBefore, routingNodesAfterSimplification: nodesAfter, reductionPercent: Number((100 * (1 - nodesAfter / Math.max(1, nodesBefore))).toFixed(2)), routingEdges: edges, turnRestrictionsRead: first.restrictions.length, turnRestrictionsSkipped: first.skippedRestrictions, bannedTurnPairs: built.bannedTurns, bannedTurnRuns: built.bannedRuns, uncompressedGraphBytes: rawBytes, bundleBytes: bundle.byteLength, compressionRatio: Number((bundle.byteLength / Math.max(1, rawBytes)).toFixed(4)), peakRssBytes: Math.max(observedPeakRss, process.memoryUsage().rss), elapsedMilliseconds: Math.round(performance.now() - started) };
     await writeFile(`${output}.json`, `${JSON.stringify(report, null, 2)}\n`);
-    console.table({ input_mb: (source.size / 1e6).toFixed(1), pbf_passes: report.pbfPasses, relevant_ways: first.ways.toLocaleString(), relevant_nodes: relevantOsmNodes.toLocaleString(), nodes_before: nodesBefore.toLocaleString(), nodes_after: nodesAfter.toLocaleString(), reduction_percent: report.reductionPercent, routing_edges: edges.toLocaleString(), turn_restrictions: first.restrictions.length.toLocaleString(), banned_turn_pairs: built.bannedTurns.toLocaleString(), tiles: chunks.length, raw_mb: (rawBytes / 1e6).toFixed(1), efrb_mb: (bundle.byteLength / 1e6).toFixed(1), compression_ratio: report.compressionRatio, peak_rss_mb: (report.peakRssBytes / 1e6).toFixed(1), elapsed_seconds: (report.elapsedMilliseconds / 1000).toFixed(1) });
+    console.table({ input_mb: (source.size / 1e6).toFixed(1), pbf_passes: report.pbfPasses, relevant_ways: first.ways.toLocaleString(), relevant_nodes: relevantOsmNodes.toLocaleString(), nodes_before: nodesBefore.toLocaleString(), nodes_after: nodesAfter.toLocaleString(), reduction_percent: report.reductionPercent, routing_edges: edges.toLocaleString(), turn_restrictions: first.restrictions.length.toLocaleString(), banned_turn_pairs: built.bannedTurns.toLocaleString(), banned_turn_runs: built.bannedRuns.toLocaleString(), tiles: chunks.length, raw_mb: (rawBytes / 1e6).toFixed(1), efrb_mb: (bundle.byteLength / 1e6).toFixed(1), compression_ratio: report.compressionRatio, peak_rss_mb: (report.peakRssBytes / 1e6).toFixed(1), elapsed_seconds: (report.elapsedMilliseconds / 1000).toFixed(1) });
   } finally { await rm(workspace, { recursive: true, force: true }); }
 }

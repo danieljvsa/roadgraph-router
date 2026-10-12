@@ -6,7 +6,7 @@ import { open, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { gunzipSync } from "node:zlib";
-import { openRoadGraphBundle, route } from "../dist/index.js";
+import { openRoadGraphBundle, RoadRouter, route } from "../dist/index.js";
 
 const EFR2_MAGIC = 0x32524645;
 const HEADER_BYTES = 32;
@@ -66,6 +66,7 @@ function recordingFetcher(stats) {
 let totalNodes = 0;
 let totalEdges = 0;
 let totalRestrictions = 0;
+let totalRuns = 0;
 let rawBytes = 0;
 const directoryHeader = new Uint8Array(HEADER_BYTES);
 await file.read(directoryHeader, 0, HEADER_BYTES, 0);
@@ -83,10 +84,11 @@ for (let index = 0; index < tileCount; index += 1) {
   const raw = compressed ? gunzipSync(chunk) : chunk;
   const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
   const version = view.getUint16(4, true);
-  if (view.getUint32(0, true) !== EFR2_MAGIC || version < 2 || version > 4) throw new Error(`Tile ${index} is not a supported EFR2 graph.`);
+  if (view.getUint32(0, true) !== EFR2_MAGIC || version < 2 || version > 5) throw new Error(`Tile ${index} is not a supported EFR2 graph.`);
   totalNodes += view.getUint32(8, true);
   totalEdges += view.getUint32(12, true);
   if (version >= 4) totalRestrictions += view.getUint32(28, true);
+  if (version >= 5) totalRuns += view.getUint32(32, true);
   rawBytes += raw.byteLength;
 }
 
@@ -99,6 +101,7 @@ console.table({
   nodes: totalNodes.toLocaleString("en-US"),
   edges: totalEdges.toLocaleString("en-US"),
   banned_turn_pairs: totalRestrictions.toLocaleString("en-US"),
+  banned_turn_runs: totalRuns.toLocaleString("en-US"),
 });
 
 const results = {};
@@ -107,36 +110,41 @@ for (const { name, origin, destination } of routes) {
   global.gc?.();
   const before = process.memoryUsage();
   const openedAt = performance.now();
-  const bundle = await openRoadGraphBundle("local://routing.efrb", recordingFetcher(stats));
+  const fetcher = recordingFetcher(stats);
+  const bundle = await openRoadGraphBundle("local://routing.efrb", fetcher);
   const directoryBytes = stats.bytes;
   const loadedAt = performance.now();
-  let graph;
-  try {
-    graph = await bundle.loadForRoute(origin, destination);
-  } catch (error) {
-    results[name] = { error: error.message };
-    continue;
-  }
-  const loadedMs = performance.now() - loadedAt;
-  const routedAt = performance.now();
+  // Route through the public entry point, so the measurement includes the
+  // tile selection an application actually gets.
+  const router = await RoadRouter.open("local://routing.efrb", fetcher);
   let result;
   try {
-    result = route(graph, origin, destination);
+    result = await router.route(origin, destination);
   } catch (error) {
-    results[name] = { tiles_loaded: stats.requests - 2, bytes_loaded: stats.bytes.toLocaleString("en-US"), error: error.message };
+    results[name] = { tiles_loaded: stats.requests - 4, bytes_loaded: stats.bytes.toLocaleString("en-US"), error: error.message };
     continue;
   }
-  const routedMs = performance.now() - routedAt;
+  const routedMs = performance.now() - loadedAt;
+  // Separate the two halves by replaying the same tiles without the search.
+  const replayStats = { bytes: 0, requests: 0 };
+  const replay = await openRoadGraphBundle("local://routing.efrb", recordingFetcher(replayStats));
+  const loadStartedAt = performance.now();
+  const graph = await replay.loadTiles(replay.tilesWithinBudget(origin, destination, result.durationSeconds * (150 * 1000 / 3600)));
+  const loadedMs = performance.now() - loadStartedAt;
+  const searchAt = performance.now();
+  route(graph, origin, destination);
+  const searchMs = performance.now() - searchAt;
   const after = process.memoryUsage();
   results[name] = {
-    tiles_loaded: stats.requests - 2,
+    tiles_loaded: stats.requests - 4,
     range_requests: stats.requests,
     bytes_loaded: stats.bytes.toLocaleString("en-US"),
     mb_loaded: (stats.bytes / 1e6).toFixed(2),
     directory_bytes: directoryBytes,
     open_ms: (loadedAt - openedAt).toFixed(1),
     graph_load_ms: loadedMs.toFixed(1),
-    route_ms: routedMs.toFixed(1),
+    search_ms: searchMs.toFixed(1),
+    total_route_ms: routedMs.toFixed(1),
     graph_nodes: graph.nodeLatitudes.length.toLocaleString("en-US"),
     graph_edges: graph.edgeTargets.length.toLocaleString("en-US"),
     rss_delta_mb: ((after.rss - before.rss) / 1e6).toFixed(1),

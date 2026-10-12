@@ -39,6 +39,16 @@ export interface RoadGraph {
    */
   turnRestrictionFromEdges?: Uint32Array;
   turnRestrictionToEdges?: Uint32Array;
+  /**
+   * Banned edge *sequences*, for OSM restrictions whose `via` is a way rather
+   * than a node. Sequence i occupies
+   * turnRestrictionSequenceEdges[offsets[i] .. offsets[i + 1]) and forbids
+   * traversing those directed edges one after another, in that order. Pairs
+   * above are the two-edge case and stay separate because they need no search
+   * state to enforce.
+   */
+  turnRestrictionSequenceOffsets?: Uint32Array;
+  turnRestrictionSequenceEdges?: Uint32Array;
   spatialIndex?: NodeSpatialIndex;
 }
 

@@ -47,9 +47,17 @@ it detours, and will re-approach the same junction from a permitted arm if that
 is the only way through. Graphs without restrictions keep the cheaper
 node-labelled search.
 
-Restrictions with a `via` **way** rather than a `via` node need a banned edge
-*path* instead of a banned pair. They are counted as `turnRestrictionsSkipped`
-in the compile report rather than approximated.
+Restrictions whose `via` is a **way** rather than a node ban a whole run of
+edges, which a single pair cannot express. They are stored as banned
+*sequences*: a run of three or more directed edges that may not be driven one
+after another. The search carries the partial match along only while a run is
+actually being driven, so the ordinary case still costs one array slot per
+edge, and the ban applies to the whole run rather than to any pair inside it —
+driving the link is still allowed, only continuing off it is not.
+
+A `via`-way run is enforced against the path actually taken, not against an
+approximation. In a Portugal extract they are 541 runs against 33,796 pairs,
+and they add 5 KB to a 71 MB bundle.
 
 ## Snapping to the road, not to the junction
 
@@ -86,6 +94,35 @@ decode, so loading a graph costs nothing extra and repeated routes amortise it:
 | --- | --- |
 | First route on a freshly loaded tile | 102 ms |
 | Each route after that, same tile | 7–13 ms |
+
+## Choosing which tiles to load
+
+A route is not confined to the rectangle between its endpoints: the quickest
+road often bulges well outside it. Rather than loading that rectangle plus a
+ring of neighbours — a rule that changes meaning when a region is recompiled at
+a different tile size — the router asks a geometric question.
+
+Any route passing through a tile is at least
+`distance(origin, tile) + distance(tile, destination)` long. Compare that
+against the route already found and a tile either could hold something better,
+or provably could not and is never downloaded. The test is a ground distance,
+so the set of tiles considered does not depend on how the bundle was cut. On a
+Portugal extract, 120 km and 40 km tilings now return the identical
+Braga–Évora route (460.16 km / 244.3 min) where they previously disagreed by
+22 minutes.
+
+The confirmation pass carries the cost of the route already found, so it
+abandons anything no better almost immediately and is much cheaper than the
+first search.
+
+This is insurance, and on a long route it is not free: see the measurements
+below. `maxDetourFactor` caps how far off the straight line the search will
+reach, as a multiple of the direct distance, trading the guarantee for a
+smaller download while staying independent of tile size:
+
+```ts
+const router = await RoadRouter.open("/routing/region.efrb", undefined, { maxDetourFactor: 1.15 });
+```
 
 ## Compile any region
 
@@ -206,10 +243,18 @@ Routes from that bundle, each measured against a fresh reader:
 
 | Route | Tiles | Range bytes | Graph load | A* | Heap | Distance | Duration |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Short urban (Lisbon) | 1 | 7.41 MB | 176 ms | 100 ms | 8 MB | 5.37 km | 5.9 min |
-| Medium regional (Lisbon–Setúbal) | 1 | 7.41 MB | 126 ms | 171 ms | 28 MB | 48.41 km | 32.4 min |
-| Long distance (Porto–Faro) | 6 | 42.66 MB | 1.52 s | 849 ms | 70 MB | 553.20 km | 284.8 min |
-| Cross-tile (Braga–Évora) | 6 | 52.81 MB | 1.64 s | 978 ms | 74 MB | 460.16 km | 244.3 min |
+| Short urban (Lisbon) | 1 | 7.41 MB | 124 ms | 90 ms | 46 MB | 5.37 km | 5.9 min |
+| Medium regional (Lisbon–Setúbal) | 2 | 8.04 MB | 398 ms | 152 ms | 34 MB | 48.41 km | 32.4 min |
+| Long distance (Porto–Faro) | 16 | 68.34 MB | 2.61 s | 1.59 s | 34 MB | 553.20 km | 284.8 min |
+| Cross-tile (Braga–Évora) | 15 | 68.34 MB | 2.78 s | 1.51 s | 20 MB | 460.16 km | 244.3 min |
+
+Short and medium routes are essentially unchanged. A cross-country route now
+loads 68 MB rather than 43 MB, because proving no better road exists means
+considering most of a country-shaped region — and Portugal's dense tiles lie in
+every corridor, so capping `maxDetourFactor` to 1.15 still needs 15 tiles and
+67.7 MB. The honest summary is that tile-size independence costs bytes on long
+routes and almost nothing on short ones. Tiles are cached per bundle, so an
+application routing repeatedly in a region pays it once.
 
 A* time includes building the edge index on a graph loaded for that one route;
 an application routing repeatedly in a region pays it once (see above). The

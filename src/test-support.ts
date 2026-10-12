@@ -1,5 +1,5 @@
 import type { RoadGraph } from "./types";
-import { packTurnRestrictions } from "./turn-restrictions";
+import { packTurnRestrictions, packTurnSequences } from "./turn-restrictions";
 
 /**
  * Test-only graph builder. Roads are written as `A-B` (two-way) or `A>B`
@@ -14,6 +14,8 @@ export type GraphSpec = {
   speedsKph?: Record<string, number>;
   /** Banned turns, each `[arrivingEdge, departingEdge]` written as `A>B`. */
   bans?: [string, string][];
+  /** Banned runs of three or more edges, for `via`-way restrictions. */
+  bannedRuns?: string[][];
   /** Intermediate shape points per directed edge `A>B`, as `[latitude, longitude]` pairs. */
   shapes?: Record<string, [number, number][]>;
 };
@@ -86,6 +88,12 @@ export function buildGraph(spec: GraphSpec): BuiltGraph {
     return [fromEdge, toEdge] as const;
   });
 
+  const runs = (spec.bannedRuns ?? []).map((run) => run.map((key) => {
+    const edge = edgeIndex.get(key);
+    if (edge === undefined) throw new Error(`Banned run names a road that is not in the spec: "${key}".`);
+    return edge;
+  }));
+
   const coordinateScale = 10_000_000;
   return {
     nodeIndex,
@@ -103,6 +111,7 @@ export function buildGraph(spec: GraphSpec): BuiltGraph {
       edgeShapeLongitudes: Int32Array.from(shapeLongitudes, (value) => Math.round(value * coordinateScale)),
     } : {}),
     ...(bans.length ? packTurnRestrictions(bans) : {}),
+    ...(runs.length ? packTurnSequences(runs) : {}),
   };
 }
 

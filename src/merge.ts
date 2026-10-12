@@ -1,6 +1,6 @@
 import type { RoadGraph } from "./types";
 import { withSpatialIndex } from "./spatial-index";
-import { packTurnRestrictions } from "./turn-restrictions";
+import { packTurnRestrictions, packTurnSequences } from "./turn-restrictions";
 
 const COORDINATE_SCALE = 10_000_000;
 /** Two edges count as the same road when their lengths agree to the centimetre. */
@@ -157,14 +157,28 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
 
   // 5. Rebase every tile's restrictions onto the merged edge numbering.
   const bannedPairs: [number, number][] = [];
+  const bannedSequences: number[][] = [];
   for (let index = 0; index < graphs.length; index += 1) {
-    const { turnRestrictionFromEdges: fromEdges, turnRestrictionToEdges: toEdges } = graphs[index];
-    if (!fromEdges || !toEdges) continue;
+    const graph = graphs[index];
     const edgeMap = edgeMaps[index];
-    for (let pair = 0; pair < fromEdges.length; pair += 1) {
-      const fromEdge = slotToEdge[edgeMap[fromEdges[pair]]];
-      const toEdge = slotToEdge[edgeMap[toEdges[pair]]];
-      if (fromEdge >= 0 && toEdge >= 0) bannedPairs.push([fromEdge, toEdge]);
+    const rebase = (edge: number) => slotToEdge[edgeMap[edge]];
+    const { turnRestrictionFromEdges: fromEdges, turnRestrictionToEdges: toEdges } = graph;
+    if (fromEdges && toEdges) {
+      for (let pair = 0; pair < fromEdges.length; pair += 1) {
+        const fromEdge = rebase(fromEdges[pair]);
+        const toEdge = rebase(toEdges[pair]);
+        if (fromEdge >= 0 && toEdge >= 0) bannedPairs.push([fromEdge, toEdge]);
+      }
+    }
+    const offsets = graph.turnRestrictionSequenceOffsets;
+    const sequenceEdges = graph.turnRestrictionSequenceEdges;
+    if (!offsets || !sequenceEdges) continue;
+    for (let sequence = 0; sequence + 1 < offsets.length; sequence += 1) {
+      const rebased: number[] = [];
+      for (let at = offsets[sequence]; at < offsets[sequence + 1]; at += 1) rebased.push(rebase(sequenceEdges[at]));
+      // A run that lost an edge to clipping cannot be enforced, and keeping a
+      // shortened version would ban a turn nobody asked to ban.
+      if (rebased.every((edge) => edge >= 0)) bannedSequences.push(rebased);
     }
   }
 
@@ -178,5 +192,6 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
     edgeDurationsSeconds,
     ...(pointCount ? { edgeShapeOffsets, edgeShapeLatitudes, edgeShapeLongitudes } : {}),
     ...(bannedPairs.length ? packTurnRestrictions(bannedPairs) : {}),
+    ...(bannedSequences.length ? packTurnSequences(bannedSequences) : {}),
   });
 }

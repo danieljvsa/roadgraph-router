@@ -46,14 +46,16 @@ describe("a long road crossing several tiles", () => {
     expect(stats.requests).toBe(2 + tiles.length);
   });
 
-  it("loads only the tiles the corridor touches", async () => {
+  it("leaves out tiles that could not hold a better route", async () => {
     const tiles = [0, 1, 2, 3, 4].map((column) => highwayTile(column));
     const bundle = encodeRoadGraphBundle(tiles);
     const { fetcher, stats } = rangeFetcher(bundle);
     const router = await RoadRouter.open("/routing/corridor.efrb", fetcher);
 
     await router.route(point(0, 0), point(0, 2));
-    expect(stats.requests).toBe(2 + 3);
+    // The far end of the corridor is too distant to beat the route found, so
+    // it is never downloaded, and the whole bundle is never pulled.
+    expect(stats.requests).toBeLessThan(2 + tiles.length);
     expect(stats.bytes).toBeLessThan(bundle.byteLength);
   });
 

@@ -25,6 +25,16 @@ export type RoadGraphBundle = {
   tiles: BundleTile[];
   loadForRoute(origin: Coordinate, destination: Coordinate): Promise<RoadGraph>;
   loadExpandedForRoute(origin: Coordinate, destination: Coordinate): Promise<RoadGraph>;
+  /**
+   * Every tile that a route of at most `budgetMeters` of travel could reach.
+   * A path through a tile is at least `distance(origin, tile) +
+   * distance(tile, destination)` long, so tiles failing that test cannot hold
+   * a better route and need never be downloaded. The test is a ground
+   * distance, which is what makes it independent of how the bundle was tiled.
+   */
+  tilesWithinBudget(origin: Coordinate, destination: Coordinate, budgetMeters: number): BundleTile[];
+  /** Merges the given tiles, reusing any chunk already downloaded. */
+  loadTiles(tiles: BundleTile[]): Promise<RoadGraph>;
 };
 
 export type BundleGraphTile = { id: number; bounds: BundleBounds; graph: RoadGraph };
@@ -37,6 +47,24 @@ function contains(bounds: BundleBounds, coordinate: Coordinate) {
 
 function intersects(first: BundleBounds, second: BundleBounds) {
   return first.minLat <= second.maxLat && first.maxLat >= second.minLat && first.minLng <= second.maxLng && first.maxLng >= second.minLng;
+}
+
+const EARTH_RADIUS_METERS = 6_371_000;
+
+function haversineMeters(a: Coordinate, b: Coordinate) {
+  const radians = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * radians;
+  const dLng = (b.lng - a.lng) * radians;
+  const value = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * radians) * Math.cos(b.lat * radians) * Math.sin(dLng / 2) ** 2;
+  return EARTH_RADIUS_METERS * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
+}
+
+/** Ground distance from a coordinate to the nearest point of a tile, 0 inside it. */
+export function distanceToBounds(coordinate: Coordinate, bounds: BundleBounds) {
+  return haversineMeters(coordinate, {
+    lat: Math.max(bounds.minLat, Math.min(coordinate.lat, bounds.maxLat)),
+    lng: Math.max(bounds.minLng, Math.min(coordinate.lng, bounds.maxLng)),
+  });
 }
 
 function toFixed(value: number) {
@@ -188,6 +216,16 @@ export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetc
   return {
     url,
     tiles,
+    tilesWithinBudget(origin, destination, budgetMeters) {
+      // A tile holding either endpoint is always a candidate: the route has to
+      // start and finish somewhere even when the budget is tiny.
+      return tiles.filter((tile) =>
+        contains(tile.bounds, origin) || contains(tile.bounds, destination) ||
+        distanceToBounds(origin, tile.bounds) + distanceToBounds(destination, tile.bounds) <= budgetMeters);
+    },
+    loadTiles(requested) {
+      return loadTiles(requested);
+    },
     async loadForRoute(origin, destination) {
       const originTile = tiles.find((tile) => contains(tile.bounds, origin));
       const destinationTile = tiles.find((tile) => contains(tile.bounds, destination));

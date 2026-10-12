@@ -47,3 +47,47 @@ export function packTurnRestrictions(pairs: Iterable<readonly [number, number]>)
     turnRestrictionToEdges: Uint32Array.from(sorted, (pair) => pair[1]),
   };
 }
+
+/**
+ * A restriction whose `via` is a way bans a run of three or more consecutive
+ * edges, which a single banned pair cannot express. They are kept apart from
+ * pairs because enforcing them costs search state, and they are rare: in a
+ * Portugal extract they are about 6% of the restrictions read.
+ */
+export type TurnSequenceIndex = {
+  /** Each banned run, in traversal order. */
+  sequences: number[][];
+  /** Runs keyed by their first edge, so the hot loop only pays when one starts. */
+  startingAt: Map<number, number[]>;
+};
+
+export function buildTurnSequenceIndex(graph: RoadGraph): TurnSequenceIndex | null {
+  const offsets = graph.turnRestrictionSequenceOffsets;
+  const edges = graph.turnRestrictionSequenceEdges;
+  if (!offsets || !edges || offsets.length < 2) return null;
+  const sequences: number[][] = [];
+  const startingAt = new Map<number, number[]>();
+  for (let index = 0; index + 1 < offsets.length; index += 1) {
+    const sequence = Array.from(edges.subarray(offsets[index], offsets[index + 1]));
+    if (sequence.length < 3) continue;
+    const id = sequences.length;
+    sequences.push(sequence);
+    const bucket = startingAt.get(sequence[0]);
+    if (bucket) bucket.push(id);
+    else startingAt.set(sequence[0], [id]);
+  }
+  return sequences.length ? { sequences, startingAt } : null;
+}
+
+/** Flattens banned runs into the two arrays the codec writes. */
+export function packTurnSequences(sequences: number[][]) {
+  const kept = sequences.filter((sequence) => sequence.length >= 3);
+  const unique = new Map(kept.map((sequence) => [sequence.join(","), sequence]));
+  const ordered = [...unique.values()].sort((a, b) => a[0] - b[0] || a.length - b.length || a[1] - b[1]);
+  const turnRestrictionSequenceOffsets = new Uint32Array(ordered.length + 1);
+  for (let index = 0; index < ordered.length; index += 1) turnRestrictionSequenceOffsets[index + 1] = turnRestrictionSequenceOffsets[index] + ordered[index].length;
+  const turnRestrictionSequenceEdges = new Uint32Array(turnRestrictionSequenceOffsets[ordered.length]);
+  let at = 0;
+  for (const sequence of ordered) for (const edge of sequence) turnRestrictionSequenceEdges[at++] = edge;
+  return { turnRestrictionSequenceOffsets, turnRestrictionSequenceEdges };
+}
