@@ -48,7 +48,7 @@
     "check": "tsc --noEmit",
     "test": "jest --runInBand",
     "benchmark": "npm run build && node scripts/benchmark.mjs",
-    "compile": "node scripts/roadgraph-compile.mjs",
+    "compile": "npm run build && node scripts/roadgraph-compile.mjs",
     "prepack": "npm run build"
   },
   "devDependencies": {
@@ -61,5 +61,9 @@
   },
   "dependencies": {
     "osm-pbf-parser-node": "^1.1.4"
+  },
+  "overrides": {
+    "argparse": "^2.0.1",
+    "esbuild": "^0.28.1"
   }
 }

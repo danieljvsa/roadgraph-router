@@ -32,7 +32,26 @@ export interface RoadGraph {
   edgeShapeOffsets?: Uint32Array;
   edgeShapeLatitudes?: Int32Array;
   edgeShapeLongitudes?: Int32Array;
+  /**
+   * Banned ordered edge pairs: having arrived along `turnRestrictionFromEdges[i]`,
+   * a vehicle may not continue along `turnRestrictionToEdges[i]`. Both arrays
+   * have the same length and are sorted by source edge.
+   */
+  turnRestrictionFromEdges?: Uint32Array;
+  turnRestrictionToEdges?: Uint32Array;
   spatialIndex?: NodeSpatialIndex;
+}
+
+/** Where a requested coordinate met the road network. */
+export interface RouteSnap {
+  /** The node snapped to, or -1 when the point landed part-way along an edge. */
+  node: number;
+  /** The directed edge snapped to, or -1 when the point landed on a node. */
+  edge: number;
+  /** The point on the road itself, which is where the route geometry starts or ends. */
+  point: Coordinate;
+  /** How far the requested coordinate was from that road. */
+  distanceMeters: number;
 }
 
 export interface RouteResult {
@@ -40,6 +59,15 @@ export interface RouteResult {
   distanceMeters: number;
   durationSeconds: number;
   nodeIds: number[];
+  /** The directed edges traversed, in order. `edgeIds[i]` joins `nodeIds[i]` to `nodeIds[i + 1]`. */
+  edgeIds: number[];
+  /**
+   * The partial edges a route enters and leaves on are not listed in `edgeIds`,
+   * because they are not hops between two nodes. These describe them, and the
+   * geometry always begins and ends at the snapped points rather than at a node.
+   */
+  originSnap: RouteSnap;
+  destinationSnap: RouteSnap;
 }
 
 export type RouterErrorCode = "ORIGIN_NOT_ON_GRAPH" | "DESTINATION_NOT_ON_GRAPH" | "NO_ROUTE" | "ROUTE_OUTSIDE_COVERAGE" | "ROUTE_ACROSS_TILES";
