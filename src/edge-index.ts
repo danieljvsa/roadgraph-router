@@ -12,7 +12,12 @@ import type { Coordinate, RoadGraph } from "./types";
 export type EdgeSpatialIndex = {
   cellSizeDegrees: number;
   cells: Map<string, Uint32Array>;
+  /** Edges whose extent covers too many cells to list individually. */
+  oversized: Uint32Array;
 };
+
+/** An edge spanning more cells than this is held aside rather than written into each one. */
+const MAX_CELLS_PER_EDGE = 4096;
 
 function cellKey(latitudeCell: number, longitudeCell: number) {
   return `${latitudeCell}:${longitudeCell}`;
@@ -48,6 +53,7 @@ export function createEdgeSpatialIndex(graph: RoadGraph, cellSizeDegrees = 0.02)
   if (!Number.isFinite(cellSizeDegrees) || cellSizeDegrees <= 0) throw new Error("Edge index cell size must be positive.");
   const scale = graph.coordinateScale ?? 1;
   const buckets = new Map<string, number[]>();
+  const oversized: number[] = [];
   const shapeOffsets = graph.edgeShapeOffsets;
   const shapeLatitudes = graph.edgeShapeLatitudes;
   const shapeLongitudes = graph.edgeShapeLongitudes;
@@ -72,6 +78,7 @@ export function createEdgeSpatialIndex(graph: RoadGraph, cellSizeDegrees = 0.02)
       const maxLatCell = Math.floor(maxLat / cellSizeDegrees);
       const minLngCell = Math.floor(minLng / cellSizeDegrees);
       const maxLngCell = Math.floor(maxLng / cellSizeDegrees);
+      if (!Number.isFinite(minLatCell) || !Number.isFinite(minLngCell) || (maxLatCell - minLatCell + 1) * (maxLngCell - minLngCell + 1) > MAX_CELLS_PER_EDGE) { oversized.push(edge); continue; }
       for (let latitudeCell = minLatCell; latitudeCell <= maxLatCell; latitudeCell += 1) {
         for (let longitudeCell = minLngCell; longitudeCell <= maxLngCell; longitudeCell += 1) {
           const key = cellKey(latitudeCell, longitudeCell);
@@ -82,7 +89,7 @@ export function createEdgeSpatialIndex(graph: RoadGraph, cellSizeDegrees = 0.02)
       }
     }
   }
-  return { cellSizeDegrees, cells: new Map([...buckets].map(([key, ids]) => [key, Uint32Array.from(ids)])) };
+  return { cellSizeDegrees, cells: new Map([...buckets].map(([key, ids]) => [key, Uint32Array.from(ids)])), oversized: Uint32Array.from(oversized) };
 }
 
 /**
@@ -107,7 +114,7 @@ export function nearbyEdgeIds(index: EdgeSpatialIndex, coordinate: Coordinate, m
   const maxLatitudeCell = Math.floor((coordinate.lat + latitudeDelta) / index.cellSizeDegrees);
   const minLongitudeCell = Math.floor((coordinate.lng - longitudeDelta) / index.cellSizeDegrees);
   const maxLongitudeCell = Math.floor((coordinate.lng + longitudeDelta) / index.cellSizeDegrees);
-  const ids = new Set<number>();
+  const ids = new Set<number>(index.oversized);
   for (let latitudeCell = minLatitudeCell; latitudeCell <= maxLatitudeCell; latitudeCell += 1) {
     for (let longitudeCell = minLongitudeCell; longitudeCell <= maxLongitudeCell; longitudeCell += 1) {
       const bucket = index.cells.get(cellKey(latitudeCell, longitudeCell));

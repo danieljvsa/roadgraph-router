@@ -1,8 +1,48 @@
 # @danieljvsa/roadgraph-router
 
-Browser-safe routing primitives for pre-built directed road graphs. The package calculates car routes locally with A*.
+Compile any OpenStreetMap `.osm.pbf` extract into a compact, range-addressable
+routing bundle, then route over it with A* — in Node.js or in the browser, with
+no routing service involved.
 
-It deliberately does not download OpenStreetMap data or call a directions service. Graph creation belongs to a separate Node-only importer.
+A 425 MB Portugal extract compiles to a 38 MB bundle. A city route downloads
+5 MB of it and takes about 200 ms end to end. The browser build is 18 kB
+gzipped and pulls in no Node built-ins.
+
+## Install
+
+```sh
+npm install @danieljvsa/roadgraph-router
+```
+
+**Requirements.** The routing engine runs on Node.js 18+ and in any browser
+with `fetch` and `DecompressionStream` (Chrome 103+, Firefox 113+, Safari 16.4+).
+The `roadgraph-compile` CLI needs **Node.js 22.5 or newer**, because it indexes
+coordinates through the built-in `node:sqlite` module.
+
+## Quick start
+
+Compile an extract, then route over it:
+
+```sh
+npx roadgraph-compile monaco.osm.pbf --output monaco.efrb
+```
+
+```ts
+import { RoadRouter } from "@danieljvsa/roadgraph-router";
+
+const router = await RoadRouter.open("/routing/monaco.efrb");
+const result = await router.route(
+  { lat: 43.7384, lng: 7.4246 },
+  { lat: 43.7325, lng: 7.4189 },
+);
+
+result.distanceMeters; // 1210.17
+result.durationSeconds; // 108.68
+result.geometry; // a GeoJSON LineString of 38 points following the roads
+```
+
+`RoadRouter.open()` also accepts an already-decoded `RoadGraph`, which is
+useful for embedded or application-managed data.
 
 ## Routing profile
 
@@ -157,20 +197,29 @@ streaming. Convert XML `.osm` extracts to PBF before compiling; this avoids
 loading a whole XML document into memory. The runtime format is unchanged:
 EFR2 chunks inside EFRB.
 
-## Usage
+## Using it in a browser
+
+The routing engine has no Node built-ins in it. Bundled for the browser it is
+about 18 kB gzipped, and it needs only `fetch` and `DecompressionStream`:
 
 ```ts
 import { RoadRouter } from "@danieljvsa/roadgraph-router";
 
-const router = await RoadRouter.open("/routing/manifest.json");
-const result = await router.route(
-  { lat: 37.0194, lng: -7.9304 },
-  { lat: 37.1023, lng: -8.6731 },
-);
+// Served as application/octet-stream, without whole-file content encoding,
+// so the byte offsets in the bundle directory stay valid.
+const router = await RoadRouter.open("/routing/region.efrb");
+const result = await router.route(origin, destination);
 ```
 
-`RoadRouter.open()` also accepts an already-decoded `RoadGraph`, which is useful
-for embedded or application-managed graph data.
+Routing a long distance merges a lot of tiles, so run it off the main thread
+when the region is large:
+
+```ts
+import RoutingWorker from "@danieljvsa/roadgraph-router/worker?worker";
+```
+
+The `roadgraph-compile` CLI is Node-only and is never imported by the browser
+entry point, so bundlers do not pull it in.
 
 ## How a chunk is stored
 
@@ -343,6 +392,42 @@ same search returns with the restrictions removed — so the restrictions are
 being enforced, not merely stored. Repeating it over two merged tiles (568k
 nodes, 11,604 banned pairs) also finds no violations, so restrictions survive
 the cross-tile merge.
+
+## Supported OSM features and limitations
+
+What the `car` profile reads, and what it deliberately does not.
+
+**Supported**
+
+| Area | Detail |
+| --- | --- |
+| Highway classes | `motorway` through `service` and `road`, including `_link` variants |
+| Access | `access`, `vehicle`, `motor_vehicle`, `motorcar`, most specific key wins |
+| Direction | `oneway=yes/no/-1/reverse/true/false/1/0`, `junction=roundabout/circular`, implicit one-way on motorways |
+| Speed | `maxspeed`, `maxspeed:forward`, `maxspeed:backward`; km/h, `mph`, `km/h`, `kmh`, `knots`, `walk` |
+| Turn restrictions | `no_left_turn`, `no_right_turn`, `no_straight_on`, `no_u_turn`, `no_entry`, `no_exit`, `only_left_turn`, `only_right_turn`, `only_straight_on`, `only_u_turn` |
+| Restriction scope | `via` node and `via` way; `restriction:motorcar`, `restriction:motor_vehicle` and `restriction:vehicle` override the generic key; `except` listing a car mode drops the relation |
+
+**Not supported**
+
+| Area | Behaviour |
+| --- | --- |
+| Profiles other than `car` | Only `car` ships. `getRoutingProfile` throws for anything else. |
+| Conditional restrictions | `restriction:conditional`, `access:conditional` and time-of-day rules are ignored, so a time-limited restriction is treated as absent. |
+| `via` ways longer than four edges | Skipped rather than approximated, and counted as `turnRestrictionsSkipped` in the compile report. |
+| Restrictions spanning a tile boundary | Dropped for tiles that do not hold every edge of the run, rather than enforced in a shortened form. |
+| Turn costs and traffic signals | Not modelled; a turn costs nothing beyond the roads it joins. |
+| Live traffic, elevation, ferries as a distinct mode | Not modelled. Ferry ways are excluded with everything that is not a road. |
+| `barrier`, `motor_vehicle:conditional`, toll avoidance | Not read. |
+| EFRT v1 | Carries topology only: encoding to it drops geometry and turn restrictions. Use EFR2 for anything that needs them. |
+
+The compiler reports what it skipped. `turnRestrictionsRead` against
+`turnRestrictionsSkipped` in `<output>.json` tells you how much of a region's
+restriction data was understood.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
 
 ## Benchmark a bundle
 

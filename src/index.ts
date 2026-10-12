@@ -17,7 +17,7 @@ export { buildTurnRestrictionIndex, buildTurnSequenceIndex, isTurnBanned, packTu
 export { carRoutingProfile, getRoutingProfile, parseMaxSpeedKph, routingProfiles } from "./routing-profile";
 export type { CompactGraphOptions } from "./compact";
 export type { BundleBounds, BundleEncodeOptions, BundleGraphTile, BundleTile, RoadGraphBundle } from "./bundle";
-export type { Coordinate, CoordinateStorage, RouteSnap, EdgeWeightStorage, NodeSpatialIndex, RoadGraph, RoutePreference, RouteResult, RouterErrorCode } from "./types";
+export type { Coordinate, CoordinateStorage, GeoJsonLineString, GeoJsonPosition, RouteSnap, EdgeWeightStorage, NodeSpatialIndex, RoadGraph, RoutePreference, RouteResult, RouterErrorCode } from "./types";
 export type { GraphBounds, GraphTile, RouteGraphLoader, RouteGraphManifest } from "./manifest";
 export type { TurnRestrictionIndex, TurnSequenceIndex } from "./turn-restrictions";
 export type { EdgeProjection, GraphSnap } from "./snap";

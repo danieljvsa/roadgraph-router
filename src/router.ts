@@ -1,5 +1,5 @@
 import { MinPriorityQueue } from "./priority-queue";
-import type { Coordinate, RoadGraph, RoutePreference, RouteResult, RouteSnap } from "./types";
+import type { Coordinate, GeoJsonPosition, RoadGraph, RoutePreference, RouteResult, RouteSnap } from "./types";
 import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
 import { buildTurnRestrictionIndex, buildTurnSequenceIndex, type TurnRestrictionIndex, type TurnSequenceIndex } from "./turn-restrictions";
@@ -342,7 +342,7 @@ export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     duration: fraction * graph.edgeDurationsSeconds[projection.edge] * durationScale,
   });
 
-  const coordinates: GeoJSON.Position[] = [];
+  const coordinates: GeoJsonPosition[] = [];
   const push = (point: Coordinate) => coordinates.push([point.lng, point.lat]);
   const nodeIds: number[] = [];
   let edgeIds: number[] = [];

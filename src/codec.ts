@@ -20,13 +20,19 @@ export function encodeGraph(graph: RoadGraph): ArrayBuffer {
   if (graph.nodeLongitudes.length !== nodes || graph.edgeOffsets.length !== nodes + 1 || graph.edgeDistancesMeters.length !== edges || graph.edgeDurationsSeconds.length !== edges || graph.edgeOffsets[nodes] !== edges) throw new Error("Invalid road graph");
   const buffer = new ArrayBuffer(HEADER_BYTES + nodes * 16 + (nodes + 1) * 4 + edges * 12);
   const view = new DataView(buffer); view.setUint32(0, MAGIC, true); view.setUint16(4, VERSION, true); view.setUint32(8, nodes, true); view.setUint32(12, edges, true);
+  // v1 stores plain degrees, metres and seconds. A graph that arrived in
+  // fixed-point form has to be converted back, or its coordinates would be
+  // written as raw integers and land far off the globe.
+  const coordinateScale = graph.coordinateScale ?? 1;
+  const distanceScale = graph.edgeDistanceScale ?? 1;
+  const durationScale = graph.edgeDurationScale ?? 1;
   let offset = HEADER_BYTES;
-  new Float64Array(buffer, offset, nodes).set(graph.nodeLatitudes); offset += nodes * 8;
-  new Float64Array(buffer, offset, nodes).set(graph.nodeLongitudes); offset += nodes * 8;
+  new Float64Array(buffer, offset, nodes).set(Float64Array.from(graph.nodeLatitudes, (value) => value / coordinateScale)); offset += nodes * 8;
+  new Float64Array(buffer, offset, nodes).set(Float64Array.from(graph.nodeLongitudes, (value) => value / coordinateScale)); offset += nodes * 8;
   new Uint32Array(buffer, offset, nodes + 1).set(graph.edgeOffsets); offset += (nodes + 1) * 4;
   new Uint32Array(buffer, offset, edges).set(graph.edgeTargets); offset += edges * 4;
-  new Float32Array(buffer, offset, edges).set(graph.edgeDistancesMeters); offset += edges * 4;
-  new Float32Array(buffer, offset, edges).set(graph.edgeDurationsSeconds);
+  new Float32Array(buffer, offset, edges).set(Float32Array.from(graph.edgeDistancesMeters, (value) => value * distanceScale)); offset += edges * 4;
+  new Float32Array(buffer, offset, edges).set(Float32Array.from(graph.edgeDurationsSeconds, (value) => value * durationScale));
   return buffer;
 }
 
@@ -44,6 +50,9 @@ export function decodeGraph(buffer: ArrayBuffer): RoadGraph {
   const edgeTargets = new Uint32Array(buffer.slice(offset, offset += edges * 4));
   const edgeDistancesMeters = new Float32Array(buffer.slice(offset, offset += edges * 4));
   const edgeDurationsSeconds = new Float32Array(buffer.slice(offset, offset += edges * 4));
+  assertGeographic(nodeLatitudes, nodeLongitudes, 1);
+  for (const target of edgeTargets) if (target >= nodes) throw new Error("Invalid routing graph: edge target outside the graph.");
+  assertOffsets(edgeOffsets, nodes, edges, "edge offsets");
   return { nodeLatitudes, nodeLongitudes, edgeOffsets, edgeTargets, edgeDistancesMeters, edgeDurationsSeconds };
 }
 
@@ -128,12 +137,19 @@ function decodeCompactGraph(buffer: ArrayBuffer): RoadGraph {
   const edgeTargets = new Uint32Array(buffer.slice(offset, offset += edges * 4));
   const edgeDistancesMeters = new Uint16Array(buffer.slice(offset, offset += edges * 2));
   const edgeDurationsSeconds = new Uint16Array(buffer.slice(offset, offset += edges * 2));
+  assertGeographic(nodeLatitudes, nodeLongitudes, coordinateScale);
+  for (const target of edgeTargets) if (target >= nodes) throw new Error("Invalid routing graph: edge target outside the graph.");
+  assertOffsets(edgeOffsets, nodes, edges, "edge offsets");
   const graph: RoadGraph = { nodeLatitudes, nodeLongitudes, edgeOffsets, edgeTargets, edgeDistancesMeters, edgeDurationsSeconds, coordinateScale, edgeDistanceScale, edgeDurationScale };
   if (!shaped) return graph;
   const edgeShapeOffsets = new Uint32Array(buffer.slice(offset, offset += (edges + 1) * 4));
   const edgeShapeLatitudes = new Int32Array(buffer.slice(offset, offset += points * 4));
   const edgeShapeLongitudes = new Int32Array(buffer.slice(offset, offset += points * 4));
-  if (points) Object.assign(graph, { edgeShapeOffsets, edgeShapeLatitudes, edgeShapeLongitudes });
+  if (points) {
+    assertOffsets(edgeShapeOffsets, edges, points, "shape offsets");
+    assertGeographic(edgeShapeLatitudes, edgeShapeLongitudes, coordinateScale);
+    Object.assign(graph, { edgeShapeOffsets, edgeShapeLatitudes, edgeShapeLongitudes });
+  }
   if (restrictions) {
     graph.turnRestrictionFromEdges = new Uint32Array(buffer.slice(offset, offset += restrictions * 4));
     graph.turnRestrictionToEdges = new Uint32Array(buffer.slice(offset, offset += restrictions * 4));
@@ -141,6 +157,10 @@ function decodeCompactGraph(buffer: ArrayBuffer): RoadGraph {
   if (sequences) {
     graph.turnRestrictionSequenceOffsets = new Uint32Array(buffer.slice(offset, offset += (sequences + 1) * 4));
     graph.turnRestrictionSequenceEdges = new Uint32Array(buffer.slice(offset, offset += sequenceEdges * 4));
+    assertOffsets(graph.turnRestrictionSequenceOffsets, sequences, sequenceEdges, "turn restriction offsets");
+  }
+  for (const edge of [...(graph.turnRestrictionFromEdges ?? []), ...(graph.turnRestrictionToEdges ?? []), ...(graph.turnRestrictionSequenceEdges ?? [])]) {
+    if (edge >= edges) throw new Error("Invalid routing graph: turn restriction references an edge outside the graph.");
   }
   return graph;
 }
@@ -152,6 +172,31 @@ const PACKED_HEADER_BYTES = 64;
 /** Variable-length sections end on any byte; typed-array views need a multiple of four. */
 function alignUp(offset: number) {
   return (offset + 3) & ~3;
+}
+
+/**
+ * Edge offsets must rise, and end exactly at the edge count. A corrupt value
+ * in the middle passes an end-only check yet makes the search walk millions of
+ * edges that are not there.
+ */
+function assertOffsets(offsets: ArrayLike<number>, entries: number, total: number, what: string) {
+  if (offsets.length !== entries + 1 || offsets[0] !== 0 || offsets[entries] !== total) throw new Error(`Invalid routing graph: ${what} do not span the data.`);
+  for (let index = 1; index <= entries; index += 1) {
+    if (offsets[index] < offsets[index - 1] || offsets[index] > total) throw new Error(`Invalid routing graph: ${what} are not ordered.`);
+  }
+}
+
+/**
+ * Coordinates outside the globe mean the chunk is corrupt. Catching it here
+ * keeps nonsense out of the spatial indexes, where a bounding box spanning
+ * half the coordinate space would otherwise cost unbounded memory to index.
+ */
+function assertGeographic(latitudes: ArrayLike<number>, longitudes: ArrayLike<number>, scale: number) {
+  for (let index = 0; index < latitudes.length; index += 1) {
+    if (!(Math.abs(latitudes[index] / scale) <= 90) || !(Math.abs(longitudes[index] / scale) <= 180)) {
+      throw new Error("Invalid routing graph: coordinate outside the world.");
+    }
+  }
 }
 
 /**
@@ -292,6 +337,10 @@ function decodePackedGraph(buffer: ArrayBuffer): RoadGraph {
   const restrictionsAt = alignUp(PACKED_HEADER_BYTES + nodes * 8 + edges * 4 + variableBytes);
   const expected = restrictionsAt + pairs * 8 + (runs ? (runs + 1) * 4 + runEdges * 4 : 0);
   if (!coordinateScale || !edgeDistanceScale || !edgeDurationScale || buffer.byteLength !== expected) throw new Error("Truncated compact routing graph");
+  // Counts that do not take part in the length check above are bounded by what
+  // the file could actually hold, so a corrupt header cannot ask for an
+  // allocation far larger than the chunk itself.
+  if (shapeCount > edges) throw new Error("Invalid compact routing graph: more shapes than edges.");
 
   let offset = PACKED_HEADER_BYTES;
   const nodeLatitudes = new Int32Array(buffer.slice(offset, offset += nodes * 4));
@@ -305,24 +354,44 @@ function decodePackedGraph(buffer: ArrayBuffer): RoadGraph {
 
   const edgeOffsets = new Uint32Array(nodes + 1);
   const degrees = new VarintReader(bytes, starts[0]);
-  for (let node = 0; node < nodes; node += 1) edgeOffsets[node + 1] = edgeOffsets[node] + degrees.read();
+  for (let node = 0; node < nodes; node += 1) {
+    const degree = degrees.read();
+    if (degree > edges - edgeOffsets[node]) throw new Error("Invalid compact routing graph: node degrees exceed the edge count.");
+    edgeOffsets[node + 1] = edgeOffsets[node] + degree;
+  }
+  if (edgeOffsets[nodes] !== edges) throw new Error("Invalid compact routing graph: node degrees do not sum to the edge count.");
   const edgeTargets = new Uint32Array(edges);
   const targets = new VarintReader(bytes, starts[1]);
   for (let node = 0; node < nodes; node += 1) {
-    for (let edge = edgeOffsets[node]; edge < edgeOffsets[node + 1]; edge += 1) edgeTargets[edge] = node + targets.readSigned();
+    for (let edge = edgeOffsets[node]; edge < edgeOffsets[node + 1]; edge += 1) {
+      const target = node + targets.readSigned();
+      if (target < 0 || target >= nodes) throw new Error("Invalid compact routing graph: edge target outside the graph.");
+      edgeTargets[edge] = target;
+    }
   }
 
+  assertGeographic(nodeLatitudes, nodeLongitudes, coordinateScale);
   const graph: RoadGraph = { nodeLatitudes, nodeLongitudes, edgeOffsets, edgeTargets, edgeDistancesMeters, edgeDurationsSeconds, coordinateScale, edgeDistanceScale, edgeDurationScale };
 
   // Rebuild the per-edge geometry the rest of the library expects, expanding
   // each shared shape back out and mirroring it where an edge asked for it.
   const references = new Uint32Array(edges);
   const shapeRefs = new VarintReader(bytes, starts[2]);
-  for (let edge = 0; edge < edges; edge += 1) references[edge] = shapeRefs.read();
+  for (let edge = 0; edge < edges; edge += 1) {
+    references[edge] = shapeRefs.read();
+    if ((references[edge] >>> 1) > shapeCount) throw new Error("Invalid compact routing graph: edge references a missing shape.");
+  }
   const shapeSizes = new VarintReader(bytes, starts[3]);
   const sizes = new Uint32Array(shapeCount);
+  // Every stored point costs at least two bytes of varint, so the point stream
+  // itself caps how many points the sizes may legitimately claim.
+  const pointCeiling = Math.floor(lengths[4] / 2);
   let totalPoints = 0;
-  for (let shape = 0; shape < shapeCount; shape += 1) { sizes[shape] = shapeSizes.read(); totalPoints += sizes[shape]; }
+  for (let shape = 0; shape < shapeCount; shape += 1) {
+    sizes[shape] = shapeSizes.read();
+    totalPoints += sizes[shape];
+    if (totalPoints > pointCeiling) throw new Error("Invalid compact routing graph: shape sizes exceed the stored geometry.");
+  }
   const tableLatitudes = new Int32Array(totalPoints);
   const tableLongitudes = new Int32Array(totalPoints);
   const tableStarts = new Uint32Array(shapeCount + 1);
@@ -365,6 +434,7 @@ function decodePackedGraph(buffer: ArrayBuffer): RoadGraph {
         edgeShapeLongitudes[to + point] = tableLongitudes[source];
       }
     }
+    assertGeographic(edgeShapeLatitudes, edgeShapeLongitudes, coordinateScale);
     Object.assign(graph, { edgeShapeOffsets, edgeShapeLatitudes, edgeShapeLongitudes });
   }
 
@@ -375,6 +445,10 @@ function decodePackedGraph(buffer: ArrayBuffer): RoadGraph {
   if (runs) {
     graph.turnRestrictionSequenceOffsets = new Uint32Array(buffer.slice(offset, offset += (runs + 1) * 4));
     graph.turnRestrictionSequenceEdges = new Uint32Array(buffer.slice(offset, offset += runEdges * 4));
+    assertOffsets(graph.turnRestrictionSequenceOffsets, runs, runEdges, "turn restriction offsets");
+    for (const edge of graph.turnRestrictionSequenceEdges) if (edge >= edges) throw new Error("Invalid routing graph: turn restriction references an edge outside the graph.");
   }
+  for (const edge of graph.turnRestrictionFromEdges ?? []) if (edge >= edges) throw new Error("Invalid routing graph: turn restriction references an edge outside the graph.");
+  for (const edge of graph.turnRestrictionToEdges ?? []) if (edge >= edges) throw new Error("Invalid routing graph: turn restriction references an edge outside the graph.");
   return graph;
 }

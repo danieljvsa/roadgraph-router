@@ -1,5 +1,14 @@
 export type Coordinate = { lat: number; lng: number };
 
+/**
+ * The GeoJSON shapes this package returns, declared here rather than taken
+ * from `@types/geojson`. They are structurally identical, so a consumer can
+ * still assign a result straight to a `GeoJSON.LineString`, but a plain
+ * JavaScript or TypeScript project needs no extra types package installed.
+ */
+export type GeoJsonPosition = number[];
+export type GeoJsonLineString = { type: "LineString"; coordinates: GeoJsonPosition[] };
+
 export type RoutePreference = "fastest" | "shortest";
 
 export type CoordinateStorage = Float64Array | Int32Array;
@@ -65,7 +74,7 @@ export interface RouteSnap {
 }
 
 export interface RouteResult {
-  geometry: GeoJSON.LineString;
+  geometry: GeoJsonLineString;
   distanceMeters: number;
   durationSeconds: number;
   nodeIds: number[];

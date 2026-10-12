@@ -1,22 +1,29 @@
 {
   "name": "@danieljvsa/roadgraph-router",
   "version": "0.1.0",
-  "description": "Browser-safe A* routing over pre-built directed road graphs.",
+  "description": "Compile any OpenStreetMap PBF extract into compact, range-addressable routing bundles and route over them with A* in Node.js or the browser.",
   "private": false,
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
+    "scripts/roadgraph-compile.mjs",
     "README.md",
-    "scripts/roadgraph-compile.mjs"
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "keywords": [
     "routing",
     "road-graph",
     "a-star",
+    "openstreetmap",
+    "osm",
+    "pbf",
     "offline",
-    "browser"
+    "browser",
+    "turn-restrictions",
+    "geojson"
   ],
   "repository": {
     "type": "git",
@@ -26,7 +33,7 @@
     "url": "https://github.com/danieljvsa/roadgraph-router/issues"
   },
   "homepage": "https://github.com/danieljvsa/roadgraph-router#readme",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "engines": {
     "node": ">=22.5"
   },
@@ -65,5 +72,6 @@
   "overrides": {
     "argparse": "^2.0.1",
     "esbuild": "^0.28.1"
-  }
+  },
+  "sideEffects": false
 }

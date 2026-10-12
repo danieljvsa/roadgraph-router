@@ -3,7 +3,7 @@
  * for usable ways, turn-restriction relations and topology, and once for the
  * coordinates of referenced nodes.  Every tag decision is delegated to a
  * routing profile, so nothing here is specific to a country or an extract. */
-import { createWriteStream, createReadStream } from "node:fs";
+import { createWriteStream, createReadStream, rmSync } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import { mkdir, mkdtemp, open as nodeOpen, rm, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
@@ -25,6 +25,9 @@ async function loadProfile(name) {
     throw error;
   }
 }
+
+/** Reports a problem the way a command-line tool should, without a stack trace. */
+function fail(message) { console.error(`roadgraph-compile: ${message}`); process.exit(1); }
 
 function usage() { console.error("Usage: roadgraph-compile input.osm.pbf --output region.efrb [--profile car] [--tile-size-km 120] [--padding-km 2] [--compression gzip|none] [--shape-tolerance-m 2] [--max-memory-mb 2048] [--bbox minLon,minLat,maxLon,maxLat]"); }
 function opt(name, fallback) { const i = process.argv.indexOf(name); return i < 0 ? fallback : process.argv[i + 1]; }
@@ -413,9 +416,20 @@ else if (!process.env.ROADGRAPH_HEAP_LIMITED) {
 }
 else {
   const profile = await loadProfile(profileName);
-  const started = performance.now(), file = resolve(process.cwd(), input), output = resolve(process.cwd(), outputOption), source = await stat(file); observedPeakRss = process.memoryUsage().rss;
-  if (!file.endsWith(".pbf")) throw new Error("roadgraph-compile accepts .osm.pbf files so compilation stays streaming at country scale.");
+  const started = performance.now(), file = resolve(process.cwd(), input), output = resolve(process.cwd(), outputOption);
+  if (!file.endsWith(".pbf")) fail("roadgraph-compile accepts .osm.pbf files so compilation stays streaming at country scale.");
+  const source = await stat(file).catch(() => fail(`Cannot read "${input}". Check the path and that the file exists.`));
+  // A PBF starts with a length-prefixed header block; anything this small
+  // cannot be one, and says so more clearly than the parser would.
+  if (source.size < 128) fail(`"${input}" is too small to be an OSM PBF file.`);
+  observedPeakRss = process.memoryUsage().rss;
   const workspace = await mkdtemp(resolve(tmpdir(), "roadgraph-"));
+  // The scratch directory holds hundreds of megabytes mid-compile. `finally`
+  // covers a thrown error, but not Ctrl-C, so the common interruptions clean
+  // up too rather than leaving the spill behind.
+  const sweep = () => { try { rmSync(workspace, { recursive: true, force: true }); } catch { /* best effort on the way out */ } };
+  const onSignal = (signal) => { sweep(); process.exit(signal === "SIGINT" ? 130 : 143); };
+  process.once("SIGINT", onSignal); process.once("SIGTERM", onSignal);
   try {
     const limitBytes = maxMemoryMb * 1024 * 1024, first = await firstPass(file, resolve(workspace, "ways.ndjson"), limitBytes, profile), relevantOsmNodes = first.required.count, bounds = requested ?? first.bounds, layout = tilesFor(bounds, tileSizeKm), coordinates = await secondPass(file, first.required, limitBytes, resolve(workspace, "coordinates.sqlite")); first.required.clear();
     const built = await build(resolve(workspace, "ways.ndjson"), coordinates, first, layout, bounds, tolerance, paddingKm, tileSizeKm, limitBytes); const storedNodes = coordinates.storedNodes; coordinates.close();
@@ -439,5 +453,10 @@ else {
     const report = { formatVersion: 1, input: file, inputBytes: source.size, profile: profile.name, compression: `${compression}-per-tile`, tileSizeKm, paddingKm, pbfPasses: 2, tiles: chunks.length, relevantOsmWays: first.ways, relevantOsmNodes, relevantOsmNodesExact: false, routingNodesBeforeSimplification: nodesBefore, routingNodesAfterSimplification: nodesAfter, reductionPercent: Number((100 * (1 - nodesAfter / Math.max(1, nodesBefore))).toFixed(2)), routingEdges: edges, turnRestrictionsRead: first.restrictions.length, turnRestrictionsSkipped: first.skippedRestrictions, bannedTurnPairs: built.bannedTurns, bannedTurnRuns: built.bannedRuns, uncompressedGraphBytes: rawBytes, bundleBytes, compressionRatio: Number((bundleBytes / Math.max(1, rawBytes)).toFixed(4)), peakRssBytes: Math.max(observedPeakRss, process.memoryUsage().rss), elapsedMilliseconds: Math.round(performance.now() - started) };
     await writeFile(`${output}.json`, `${JSON.stringify(report, null, 2)}\n`);
     console.table({ input_mb: (source.size / 1e6).toFixed(1), pbf_passes: report.pbfPasses, relevant_ways: first.ways.toLocaleString(), relevant_nodes: relevantOsmNodes.toLocaleString(), nodes_before: nodesBefore.toLocaleString(), nodes_after: nodesAfter.toLocaleString(), reduction_percent: report.reductionPercent, routing_edges: edges.toLocaleString(), turn_restrictions: first.restrictions.length.toLocaleString(), banned_turn_pairs: built.bannedTurns.toLocaleString(), banned_turn_runs: built.bannedRuns.toLocaleString(), tiles: chunks.length, raw_mb: (rawBytes / 1e6).toFixed(1), efrb_mb: (bundleBytes / 1e6).toFixed(1), compression_ratio: report.compressionRatio, peak_rss_mb: (report.peakRssBytes / 1e6).toFixed(1), elapsed_seconds: (report.elapsedMilliseconds / 1000).toFixed(1) });
+  } catch (error) {
+    // A truncated or non-PBF file surfaces as a parser or stream error deep in
+    // the pipeline; report it as a problem with the input, not as a crash.
+    sweep();
+    fail(`Could not compile "${input}": ${error instanceof Error ? error.message : error}`);
   } finally { await rm(workspace, { recursive: true, force: true }); }
 }
