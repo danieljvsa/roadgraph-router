@@ -3,6 +3,10 @@ export class MinPriorityQueue<T> {
 
   get size() { return this.values.length; }
 
+  /** The smallest priority still queued, or Infinity when empty. A* uses it to
+   *  stop once no queued state can beat the best finish found so far. */
+  get minimumPriority() { return this.values.length ? this.values[0].priority : Infinity; }
+
   push(value: T, priority: number) {
     const entry = { value, priority };
     this.values.push(entry);
