@@ -1,4 +1,4 @@
-# @danieljvsa/roadgraph-router
+# roadgraph-router
 
 Compile any OpenStreetMap `.osm.pbf` extract into a compact, range-addressable
 routing bundle, then route over it with A* — in Node.js or in the browser, with
@@ -11,7 +11,7 @@ gzipped and pulls in no Node built-ins.
 ## Install
 
 ```sh
-npm install @danieljvsa/roadgraph-router
+npm install roadgraph-router
 ```
 
 **Requirements.** The routing engine runs on Node.js 18+ and in any browser
@@ -28,7 +28,7 @@ npx roadgraph-compile monaco.osm.pbf --output monaco.efrb
 ```
 
 ```ts
-import { RoadRouter } from "@danieljvsa/roadgraph-router";
+import { RoadRouter } from "roadgraph-router";
 
 const router = await RoadRouter.open("/routing/monaco.efrb");
 const result = await router.route(
@@ -61,7 +61,7 @@ clamped to the profile range the A* heuristic assumes, so a mistagged
 `maxspeed=400` cannot make the heuristic inadmissible.
 
 ```ts
-import { carRoutingProfile } from "@danieljvsa/roadgraph-router";
+import { carRoutingProfile } from "roadgraph-router";
 
 carRoutingProfile.evaluateWay({ highway: "primary", maxspeed: "60 mph" });
 // { forward: true, backward: true, forwardSpeedKph: 96.56, backwardSpeedKph: 96.56 }
@@ -203,7 +203,7 @@ The routing engine has no Node built-ins in it. Bundled for the browser it is
 about 18 kB gzipped, and it needs only `fetch` and `DecompressionStream`:
 
 ```ts
-import { RoadRouter } from "@danieljvsa/roadgraph-router";
+import { RoadRouter } from "roadgraph-router";
 
 // Served as application/octet-stream, without whole-file content encoding,
 // so the byte offsets in the bundle directory stay valid.
@@ -215,7 +215,7 @@ Routing a long distance merges a lot of tiles, so run it off the main thread
 when the region is large:
 
 ```ts
-import RoutingWorker from "@danieljvsa/roadgraph-router/worker?worker";
+import RoutingWorker from "roadgraph-router/worker?worker";
 ```
 
 The `roadgraph-compile` CLI is Node-only and is never imported by the browser
@@ -261,7 +261,7 @@ represent it.
 For fast snapping, add a local index after loading a graph:
 
 ```ts
-import { withSpatialIndex } from "@danieljvsa/roadgraph-router";
+import { withSpatialIndex } from "roadgraph-router";
 
 const indexedGraph = withSpatialIndex(graph);
 ```

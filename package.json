@@ -1,5 +1,5 @@
 {
-  "name": "@danieljvsa/roadgraph-router",
+  "name": "roadgraph-router",
   "version": "0.1.0",
   "description": "Compile any OpenStreetMap PBF extract into compact, range-addressable routing bundles and route over them with A* in Node.js or the browser.",
   "private": false,
