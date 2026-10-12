@@ -59,6 +59,12 @@ export type TurnSequenceIndex = {
   sequences: number[][];
   /** Runs keyed by their first edge, so the hot loop only pays when one starts. */
   startingAt: Map<number, number[]>;
+  /**
+   * Multiplier used to pack a (run, position) pair into one number. It is
+   * derived from the longest run present rather than fixed, so a long run can
+   * never alias onto another run's identifier.
+   */
+  stride: number;
 };
 
 export function buildTurnSequenceIndex(graph: RoadGraph): TurnSequenceIndex | null {
@@ -76,7 +82,9 @@ export function buildTurnSequenceIndex(graph: RoadGraph): TurnSequenceIndex | nu
     if (bucket) bucket.push(id);
     else startingAt.set(sequence[0], [id]);
   }
-  return sequences.length ? { sequences, startingAt } : null;
+  if (!sequences.length) return null;
+  const stride = sequences.reduce((longest, sequence) => Math.max(longest, sequence.length), 0) + 1;
+  return { sequences, startingAt, stride };
 }
 
 /** Flattens banned runs into the two arrays the codec writes. */

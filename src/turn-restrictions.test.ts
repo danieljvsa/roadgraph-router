@@ -131,18 +131,36 @@ describe("only_* turn restrictions", () => {
   });
 });
 
-describe("EFR2 v4 round trip", () => {
-  it("writes a v4 chunk only when the graph carries bans", () => {
+describe("EFR2 round trip", () => {
+  it("writes the packed layout by default and the older one on request", () => {
     const shapes = { "W>C": [[0.001, 0.0005]] as [number, number][] };
-    const bare = encodeCompactGraph(compactGraph(buildGraph(crossroads)));
-    const shaped = encodeCompactGraph(compactGraph(buildGraph({ ...crossroads, shapes })));
-    const banned = encodeCompactGraph(compactGraph(buildGraph({ ...crossroads, shapes, bans: [["W>C", "C>N"]] })));
-    expect(new DataView(bare).getUint16(4, true)).toBe(2);
-    expect(new DataView(shaped).getUint16(4, true)).toBe(3);
+    const built = compactGraph(buildGraph({ ...crossroads, shapes, bans: [["W>C", "C>N"]] }));
+    expect(new DataView(encodeCompactGraph(built)).getUint16(4, true)).toBe(6);
+
+    const legacy = (spec: GraphSpec) => encodeCompactGraph(compactGraph(buildGraph(spec)), { layout: "legacy" });
+    expect(new DataView(legacy(crossroads)).getUint16(4, true)).toBe(2);
+    expect(new DataView(legacy({ ...crossroads, shapes })).getUint16(4, true)).toBe(3);
+    const banned = legacy({ ...crossroads, shapes, bans: [["W>C", "C>N"]] });
     expect(new DataView(banned).getUint16(4, true)).toBe(4);
     expect(new DataView(banned).getUint32(28, true)).toBe(1);
     // A banned pair costs exactly two Uint32 values on top of the v3 chunk.
-    expect(banned.byteLength).toBe(shaped.byteLength + 8);
+    expect(banned.byteLength).toBe(legacy({ ...crossroads, shapes }).byteLength + 8);
+  });
+
+  it("packs a graph smaller than the older layout did", () => {
+    const built = compactGraph(buildGraph({ ...crossroads, shapes: { "W>C": [[0.001, 0.0005]] as [number, number][] } }));
+    expect(encodeCompactGraph(built).byteLength).toBeLessThan(encodeCompactGraph(built, { layout: "legacy" }).byteLength);
+  });
+
+  it("reads back every layout it can write", () => {
+    const built = compactGraph(buildGraph({ ...crossroads, shapes: { "W>C": [[0.001, 0.0005]] as [number, number][] }, bans: [["W>C", "C>N"]] }));
+    for (const layout of ["packed", "legacy"] as const) {
+      const decoded = decodeGraph(encodeCompactGraph(built, { layout }));
+      expect(decoded.turnRestrictionFromEdges).toEqual(built.turnRestrictionFromEdges);
+      expect(decoded.edgeShapeLatitudes).toEqual(built.edgeShapeLatitudes);
+      expect(decoded.edgeTargets).toEqual(built.edgeTargets);
+      expect(decoded.edgeOffsets).toEqual(built.edgeOffsets);
+    }
   });
 
   it("decodes the same banned pairs it encoded", () => {

@@ -136,7 +136,9 @@ roadgraph-compile input.osm.pbf --output region.efrb \
   --profile car --tile-size-km 120 --compression gzip
 ```
 
-Use `--padding-km` to tune cross-tile overlap, `--shape-tolerance-m` to simplify
+Use `--padding-km` to tune cross-tile overlap (2 km by default; the router
+picks neighbouring tiles by ground distance, so a large overlap is no longer
+needed and mostly duplicated data), `--shape-tolerance-m` to simplify
 display-only shape points, and `--bbox minLon,minLat,maxLon,maxLat` to compile a
 smaller area from a larger extract. Compilation uses two PBF passes regardless
 of tile count: one global topology/way pass and one pass for referenced node
@@ -169,6 +171,31 @@ const result = await router.route(
 
 `RoadRouter.open()` also accepts an already-decoded `RoadGraph`, which is useful
 for embedded or application-managed graph data.
+
+## How a chunk is stored
+
+EFR2 v6 keeps the same graph as earlier versions but writes it far more
+tightly. Every choice below was measured on a compiled Portugal extract rather
+than assumed, by profiling which sections of a chunk actually cost bytes:
+
+- **Shared geometry.** A two-way road used to store its shape twice, once per
+  direction. 47.1% of all shape points were a mirror of the opposite
+  direction's, so each road's geometry is now stored once and mirrored back
+  when the reverse edge is read.
+- **Differences instead of positions.** Shape points are written as a step from
+  the previous point, and an edge's target as a step from its own source node.
+- **Variable-length integers.** Those steps are small, so they take one or two
+  bytes instead of four.
+- **Degrees instead of offsets.** The per-node edge offsets are a running total
+  rebuilt on load, so only each node's edge count is stored.
+
+Together these cut the uncompressed chunk by 46% and the gzipped bundle by 35%,
+with the decoded graph identical in every array. Decoding costs one pass of
+varint reads, which is more than paid back by having less to decompress: graph
+load time went down, not up.
+
+`encodeCompactGraph(graph, { layout: "legacy" })` still writes the older v2-v5
+layout, and every version from EFRT v1 onwards still decodes.
 
 ## Graph formats
 
@@ -218,50 +245,62 @@ ceiling; values above 3072 are intentionally rejected.
 ## Measured on a real extract
 
 Portugal from Geofabrik (`portugal-latest.osm.pbf`, 425 MB) compiled on one
-desktop machine with default settings (`--tile-size-km 120 --compression gzip`):
+desktop machine with default settings. "Before" is the same pipeline prior to
+the v6 storage layout and the smaller tile overlap:
 
-| | |
-| --- | --- |
-| Input PBF | 425.5 MB |
-| PBF passes | 2 |
-| Compile time | 7 min 36 s |
-| Peak RSS | 1.87 GB (ceiling 2 GB) |
-| Relevant OSM ways | 860,806 |
-| Relevant OSM nodes | 7,165,726 (Bloom estimate) |
-| Routing nodes before simplification | 7,768,351 |
-| Routing nodes after simplification | 1,243,981 |
-| Node reduction | 83.99% |
-| Routing edges | 2,757,265 |
-| Turn restrictions read / skipped (`via` way) | 24,855 / 1,684 |
-| Banned turn pairs emitted | 33,796 |
-| EFRB tiles | 28 |
-| Uncompressed graph | 114.8 MB |
-| Final compressed EFRB | 71.2 MB |
-| Compression ratio | 0.620 |
+| | Before | Now | |
+| --- | --- | --- | --- |
+| PBF passes | 2 | 2 | unchanged |
+| Compile time | 8 min 04 s | 7 min 46 s | −4% |
+| Peak RSS | 1.80 GB | **1.11 GB** | −38% |
+| Uncompressed graph | 114.85 MB | **51.17 MB** | −55% |
+| Final EFRB | 71.23 MB | **38.03 MB** | −47% |
+| Compression ratio | 0.620 | 0.743 | denser input compresses less |
+| Routing edges | 2,757,265 | 2,757,265 | identical graph |
+| Banned turn pairs / runs | 33,796 / 541 | 28,344 / 468 | fewer duplicate copies across tiles |
 
 Routes from that bundle, each measured against a fresh reader:
 
-| Route | Tiles | Range bytes | Graph load | A* | Heap | Distance | Duration |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Short urban (Lisbon) | 1 | 7.41 MB | 124 ms | 90 ms | 46 MB | 5.37 km | 5.9 min |
-| Medium regional (Lisbon–Setúbal) | 2 | 8.04 MB | 398 ms | 152 ms | 34 MB | 48.41 km | 32.4 min |
-| Long distance (Porto–Faro) | 16 | 68.34 MB | 2.61 s | 1.59 s | 34 MB | 553.20 km | 284.8 min |
-| Cross-tile (Braga–Évora) | 15 | 68.34 MB | 2.78 s | 1.51 s | 20 MB | 460.16 km | 244.3 min |
+| Route | Tiles | Range bytes | Graph load | A* | Distance | Duration |
+| --- | --- | --- | --- | --- | --- | --- |
+| Short urban (Lisbon) | 1 | **4.93 MB** | 118 ms | 86 ms | 5.37 km | 5.9 min |
+| Medium regional (Lisbon–Setúbal) | 2 | **5.00 MB** | 340 ms | 152 ms | 48.41 km | 32.4 min |
+| Long distance (Porto–Faro) | 15 | **36.41 MB** | 1.99 s | 1.47 s | 553.20 km | 284.8 min |
+| Cross-tile (Braga–Évora) | 15 | **36.41 MB** | 2.09 s | 1.35 s | 460.16 km | 244.3 min |
 
-Short and medium routes are essentially unchanged. A cross-country route now
-loads 68 MB rather than 43 MB, because proving no better road exists means
-considering most of a country-shaped region — and Portugal's dense tiles lie in
-every corridor, so capping `maxDetourFactor` to 1.15 still needs 15 tiles and
-67.7 MB. The honest summary is that tile-size independence costs bytes on long
-routes and almost nothing on short ones. Tiles are cached per bundle, so an
-application routing repeatedly in a region pays it once.
+Downloads are roughly 35% smaller for short routes and 47% smaller for long
+ones, and graph load is *faster* than before despite the varint decoding,
+because there is less to decompress.
 
-A* time includes building the edge index on a graph loaded for that one route;
-an application routing repeatedly in a region pays it once (see above). The
-short urban route is longer than the 3.60 km that node snapping used to report,
-because its destination sits two thirds of the way along a one-way street:
-reaching that point means approaching from the drivable end, where node
-snapping delivered you to a different junction 46 m away.
+### Nothing routes differently
+
+`tools/compare-bundles.mjs` routes the same random pairs through two bundles
+and reports any disagreement. Comparing the previous bundle against this one
+over 145 routes drawn from real node positions in the densest tile:
+
+```
+routes_compared 145   identical_duration 145   differing 0   worst_duration_drift 0.0000%
+```
+
+`scripts/validate-bundle.mjs` separately confirms that none of 300 sampled
+routes uses a banned turn pair or a banned via-way run.
+
+### Compression: gzip stays
+
+Measured on the three densest tiles (58.8 MB uncompressed):
+
+| Codec | Size | vs gzip | Compress | Decompress | Browser |
+| --- | --- | --- | --- | --- | --- |
+| gzip −9 (current) | 37.10 MB | — | 1.6 s | 285 ms | yes |
+| brotli q5 | 30.39 MB | −18.1% | 1.8 s | 294 ms | no |
+| brotli q11 | 25.37 MB | −31.6% | 140 s | 336 ms | no |
+| zstd level 3 | 37.79 MB | +1.8% | 0.3 s | 93 ms | no |
+| zstd level 19 | 32.47 MB | −12.5% | 14 s | 142 ms | no |
+
+Brotli and Zstandard both beat gzip on size, and Zstandard is three times
+faster to decode. Neither is reachable from `DecompressionStream`, which only
+offers gzip and deflate, so adopting one would mean shipping a decoder and
+giving up browser support for an 18% saving. gzip stays.
 
 ### Tile size is the main lever
 

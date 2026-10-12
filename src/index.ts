@@ -1,4 +1,6 @@
 export { decodeGraph, encodeCompactGraph, encodeGraph } from "./codec";
+export type { CompactEncodeOptions } from "./codec";
+export { VarintReader, VarintWriter, unzigzag, zigzag } from "./varint";
 export { compactGraph } from "./compact";
 export { findNearestNode, route } from "./router";
 export type { RouteOptions } from "./router";

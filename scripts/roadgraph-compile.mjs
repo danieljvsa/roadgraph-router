@@ -4,6 +4,7 @@
  * coordinates of referenced nodes.  Every tag decision is delegated to a
  * routing profile, so nothing here is specific to a country or an extract. */
 import { createWriteStream, createReadStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { mkdir, mkdtemp, open as nodeOpen, rm, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { dirname, resolve } from "node:path";
@@ -25,7 +26,7 @@ async function loadProfile(name) {
   }
 }
 
-function usage() { console.error("Usage: roadgraph-compile input.osm.pbf --output region.efrb [--profile car] [--tile-size-km 120] [--padding-km 8] [--compression gzip|none] [--shape-tolerance-m 2] [--max-memory-mb 2048] [--bbox minLon,minLat,maxLon,maxLat]"); }
+function usage() { console.error("Usage: roadgraph-compile input.osm.pbf --output region.efrb [--profile car] [--tile-size-km 120] [--padding-km 2] [--compression gzip|none] [--shape-tolerance-m 2] [--max-memory-mb 2048] [--bbox minLon,minLat,maxLon,maxLat]"); }
 function opt(name, fallback) { const i = process.argv.indexOf(name); return i < 0 ? fallback : process.argv[i + 1]; }
 function inputArg() { const values = process.argv.slice(2); for (let i = 0; i < values.length; i += 1) { if (values[i].startsWith("--")) { i += 1; continue; } return values[i]; } return undefined; }
 function parseBounds(value) { const p = value?.split(",").map(Number); return p?.length === 4 && p.every(Number.isFinite) && p[0] < p[2] && p[1] < p[3] ? { minLon: p[0], minLat: p[1], maxLon: p[2], maxLat: p[3] } : undefined; }
@@ -46,6 +47,32 @@ function approximateIds() { const bitCount = 1 << 29, mask = bitCount - 1; let w
  * equator. The returned grid lets a point be mapped to its tile arithmetically
  * instead of by scanning, which keeps build time flat as tile counts grow.
  */
+/** A growable typed array. Tile graphs hold millions of entries, and one JS
+ *  object per edge costs an order of magnitude more memory than four slots. */
+class Column {
+  constructor(Type, capacity = 1024) { this.Type = Type; this.values = new Type(capacity); this.length = 0; }
+  push(value) {
+    if (this.length === this.values.length) { const grown = new this.Type(this.values.length * 2); grown.set(this.values); this.values = grown; }
+    this.values[this.length++] = value;
+    return this.length - 1;
+  }
+  at(index) { return this.values[index]; }
+  view() { return this.values.subarray(0, this.length); }
+}
+
+function createTileGraph(tile) {
+  return {
+    tile,
+    ids: new Map(),
+    nodeLat: new Column(Int32Array), nodeLon: new Column(Int32Array),
+    edgeFrom: new Column(Uint32Array), edgeTo: new Column(Uint32Array),
+    edgeDistance: new Column(Float64Array), edgeDuration: new Column(Float64Array),
+    edgeWay: new Column(Float64Array), edgeShapeStart: new Column(Uint32Array),
+    shapeLat: new Column(Int32Array), shapeLon: new Column(Int32Array),
+    wayEdges: new Map(), restrictions: [], runs: [],
+  };
+}
+
 function tilesFor(bounds, km) {
   const latStep = km / 110.574, tiles = [], rows = [];
   for (let minLat = bounds.minLat, row = 0; minLat < bounds.maxLat; minLat += latStep, row += 1) {
@@ -71,33 +98,81 @@ function expand(bounds, km) { const latitude = km / 110.574, longitude = km / (1
 function scaleFor(values) { let greatest = 0; for (const value of values) greatest = Math.max(greatest, value); return Math.max(1, Math.ceil(greatest / 65535)); }
 
 /** Writes an EFR2 chunk: v3 when the tile has geometry only, v4 once it carries banned turns. */
-function encodeEfr2(graph) {
-  const nodes = graph.nodes.length, edges = graph.edges.length, distanceScale = scaleFor(graph.edges.map((edge) => edge.distance)), durationScale = scaleFor(graph.edges.map((edge) => edge.duration));
-  const offsets = new Uint32Array(nodes + 1); for (const edge of graph.edges) offsets[edge.from + 1] += 1; for (let i = 1; i < offsets.length; i += 1) offsets[i] += offsets[i - 1];
-  const order = offsets.slice(), targets = new Uint32Array(edges), distances = new Uint16Array(edges), durations = new Uint16Array(edges), shapes = new Array(edges), placement = new Uint32Array(edges);
-  for (let i = 0; i < edges; i += 1) { const edge = graph.edges[i], index = order[edge.from]++; placement[i] = index; targets[index] = edge.to; distances[index] = Math.round(edge.distance / distanceScale); durations[index] = Math.round(edge.duration / durationScale); shapes[index] = edge.shape; }
+/**
+ * Orders a tile's edges by source node and hands the result to the library
+ * encoder, so the compiler and the runtime cannot drift apart on the layout.
+ */
+function encodeEfr2(graph, encodeCompactGraph) {
+  const nodes = graph.nodeLat.length, edges = graph.edgeFrom.length;
+  const distances = graph.edgeDistance.view(), durations = graph.edgeDuration.view();
+  const distanceScale = scaleFor(distances), durationScale = scaleFor(durations);
+  const offsets = new Uint32Array(nodes + 1);
+  for (let i = 0; i < edges; i += 1) offsets[graph.edgeFrom.at(i) + 1] += 1;
+  for (let i = 1; i < offsets.length; i += 1) offsets[i] += offsets[i - 1];
+  const order = offsets.slice(), targets = new Uint32Array(edges), placement = new Uint32Array(edges);
+  const packedDistances = new Uint16Array(edges), packedDurations = new Uint16Array(edges);
+  const shapeOffsets = new Uint32Array(edges + 1);
+  for (let i = 0; i < edges; i += 1) {
+    const index = order[graph.edgeFrom.at(i)]++;
+    placement[i] = index;
+    targets[index] = graph.edgeTo.at(i);
+    packedDistances[index] = Math.round(distances[i] / distanceScale);
+    packedDurations[index] = Math.round(durations[i] / durationScale);
+  }
+  // Shape runs are stored per source edge, so copy them into CSR order.
+  const shapeStart = graph.edgeShapeStart.view(), totalPoints = graph.shapeLat.length;
+  const lengthOf = (i) => (i + 1 < edges ? shapeStart[i + 1] : totalPoints) - shapeStart[i];
+  const sourceOf = new Uint32Array(edges);
+  for (let i = 0; i < edges; i += 1) sourceOf[placement[i]] = i;
+  for (let index = 0; index < edges; index += 1) shapeOffsets[index + 1] = shapeOffsets[index] + lengthOf(sourceOf[index]);
+  const shapeLat = new Int32Array(totalPoints), shapeLon = new Int32Array(totalPoints);
+  const sourceLat = graph.shapeLat.view(), sourceLon = graph.shapeLon.view();
+  for (let index = 0; index < edges; index += 1) {
+    const source = sourceOf[index], from = shapeStart[source], count = lengthOf(source);
+    for (let point = 0; point < count; point += 1) { shapeLat[shapeOffsets[index] + point] = sourceLat[from + point]; shapeLon[shapeOffsets[index] + point] = sourceLon[from + point]; }
+  }
   // Restrictions are collected against pre-grouping edge positions, so they
   // follow each edge into the CSR layout through the same permutation.
-  const banned = [...new Set((graph.restrictions ?? []).map(([from, to]) => `${placement[from]}:${placement[to]}`))].map((pair) => pair.split(":").map(Number)).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const runs = [...new Set((graph.runs ?? []).map((run) => run.map((edge) => placement[edge]).join(",")))].map((run) => run.split(",").map(Number)).filter((run) => run.length >= 3).sort((a, b) => a[0] - b[0] || a.length - b.length || a[1] - b[1]);
-  const runEdges = runs.reduce((sum, run) => sum + run.length, 0);
-  const shapeOffsets = new Uint32Array(edges + 1); for (let i = 0; i < edges; i += 1) shapeOffsets[i + 1] = shapeOffsets[i] + shapes[i].length;
-  const points = shapeOffsets[edges], version = runs.length ? 5 : banned.length ? 4 : 3;
-  const bytes = 40 + nodes * 8 + (nodes + 1) * 4 + edges * 8 + (edges + 1) * 4 + points * 8 + banned.length * 8 + (runs.length ? (runs.length + 1) * 4 + runEdges * 4 : 0), buffer = new ArrayBuffer(bytes), view = new DataView(buffer);
-  view.setUint32(0, EFR2_MAGIC, true); view.setUint16(4, version, true); view.setUint32(8, nodes, true); view.setUint32(12, edges, true); view.setUint32(16, SCALE, true); view.setUint16(20, distanceScale, true); view.setUint16(22, durationScale, true); view.setUint32(24, points, true); view.setUint32(28, banned.length, true); view.setUint32(32, runs.length, true); view.setUint32(36, runEdges, true);
-  let offset = 40; const latitudes = new Int32Array(buffer, offset, nodes); offset += latitudes.byteLength; const longitudes = new Int32Array(buffer, offset, nodes); offset += longitudes.byteLength; for (let i = 0; i < nodes; i += 1) { latitudes[i] = fixed(graph.nodes[i].lat); longitudes[i] = fixed(graph.nodes[i].lon); }
-  new Uint32Array(buffer, offset, nodes + 1).set(offsets); offset += (nodes + 1) * 4; new Uint32Array(buffer, offset, edges).set(targets); offset += edges * 4; new Uint16Array(buffer, offset, edges).set(distances); offset += edges * 2; new Uint16Array(buffer, offset, edges).set(durations); offset += edges * 2; new Uint32Array(buffer, offset, edges + 1).set(shapeOffsets); offset += (edges + 1) * 4;
-  const shapeLatitudes = new Int32Array(buffer, offset, points); offset += points * 4; const shapeLongitudes = new Int32Array(buffer, offset, points); offset += points * 4; let point = 0; for (const shape of shapes) for (const coordinate of shape) { shapeLatitudes[point] = fixed(coordinate.lat); shapeLongitudes[point++] = fixed(coordinate.lon); }
-  if (banned.length) { new Uint32Array(buffer, offset, banned.length).set(banned.map((pair) => pair[0])); offset += banned.length * 4; new Uint32Array(buffer, offset, banned.length).set(banned.map((pair) => pair[1])); offset += banned.length * 4; }
-  if (runs.length) {
-    const runOffsets = new Uint32Array(runs.length + 1);
-    for (let i = 0; i < runs.length; i += 1) runOffsets[i + 1] = runOffsets[i] + runs[i].length;
-    new Uint32Array(buffer, offset, runs.length + 1).set(runOffsets); offset += (runs.length + 1) * 4;
-    new Uint32Array(buffer, offset, runEdges).set(runs.flat());
-  }
-  return buffer;
+  const banned = [...new Set(graph.restrictions.map(([from, to]) => `${placement[from]}:${placement[to]}`))].map((pair) => pair.split(":").map(Number)).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const runs = [...new Set(graph.runs.map((run) => run.map((edge) => placement[edge]).join(",")))].map((run) => run.split(",").map(Number)).filter((run) => run.length >= 3).sort((a, b) => a[0] - b[0] || a.length - b.length || a[1] - b[1]);
+  const runOffsets = new Uint32Array(runs.length + 1);
+  for (let i = 0; i < runs.length; i += 1) runOffsets[i + 1] = runOffsets[i] + runs[i].length;
+  return encodeCompactGraph({
+    nodeLatitudes: graph.nodeLat.view(), nodeLongitudes: graph.nodeLon.view(),
+    edgeOffsets: offsets, edgeTargets: targets,
+    edgeDistancesMeters: packedDistances, edgeDurationsSeconds: packedDurations,
+    coordinateScale: SCALE, edgeDistanceScale: distanceScale, edgeDurationScale: durationScale,
+    edgeShapeOffsets: shapeOffsets, edgeShapeLatitudes: shapeLat, edgeShapeLongitudes: shapeLon,
+    ...(banned.length ? { turnRestrictionFromEdges: Uint32Array.from(banned, (pair) => pair[0]), turnRestrictionToEdges: Uint32Array.from(banned, (pair) => pair[1]) } : {}),
+    ...(runs.length ? { turnRestrictionSequenceOffsets: runOffsets, turnRestrictionSequenceEdges: Uint32Array.from(runs.flat()) } : {}),
+  });
 }
-function assemble(chunks, compression) { let offset = HEADER + chunks.length * DIRECTORY, size = offset + chunks.reduce((sum, chunk) => sum + chunk.data.byteLength, 0), out = new ArrayBuffer(size), view = new DataView(out); view.setUint32(0, EFRB_MAGIC, true); view.setUint16(4, 1, true); view.setUint16(6, HEADER, true); view.setUint32(8, chunks.length, true); view.setUint32(12, HEADER, true); view.setUint32(16, chunks.length * DIRECTORY, true); for (let i = 0; i < chunks.length; i += 1) { const chunk = chunks[i], at = HEADER + i * DIRECTORY, b = chunk.tile.bounds; view.setUint32(at, chunk.tile.id, true); view.setInt32(at + 4, fixed(b.minLat), true); view.setInt32(at + 8, fixed(b.minLon), true); view.setInt32(at + 12, fixed(b.maxLat), true); view.setInt32(at + 16, fixed(b.maxLon), true); view.setUint32(at + 20, offset, true); view.setUint32(at + 24, chunk.data.byteLength, true); view.setUint32(at + 28, chunk.rawBytes, true); view.setUint16(at + 32, compression === "gzip" ? 1 : 0, true); new Uint8Array(out, offset, chunk.data.byteLength).set(chunk.data); offset += chunk.data.byteLength; } return out; }
+
+/** Writes the fixed-size directory, then streams each chunk straight from the
+ *  spill file. Neither the chunk list nor the finished bundle is ever held in
+ *  memory, so output size no longer bounds how large a region can be built. */
+async function writeBundle(output, chunks, compression, spillPath) {
+  const directoryBytes = chunks.length * DIRECTORY;
+  const head = Buffer.alloc(HEADER + directoryBytes);
+  head.writeUInt32LE(EFRB_MAGIC, 0); head.writeUInt16LE(1, 4); head.writeUInt16LE(HEADER, 6);
+  head.writeUInt32LE(chunks.length, 8); head.writeUInt32LE(HEADER, 12); head.writeUInt32LE(directoryBytes, 16);
+  let offset = HEADER + directoryBytes;
+  for (let i = 0; i < chunks.length; i += 1) {
+    const chunk = chunks[i], at = HEADER + i * DIRECTORY, b = chunk.tile.bounds;
+    head.writeUInt32LE(chunk.tile.id, at);
+    head.writeInt32LE(fixed(b.minLat), at + 4); head.writeInt32LE(fixed(b.minLon), at + 8);
+    head.writeInt32LE(fixed(b.maxLat), at + 12); head.writeInt32LE(fixed(b.maxLon), at + 16);
+    head.writeUInt32LE(offset, at + 20); head.writeUInt32LE(chunk.byteLength, at + 24);
+    head.writeUInt32LE(chunk.rawBytes, at + 28); head.writeUInt16LE(compression === "gzip" ? 1 : 0, at + 32);
+    offset += chunk.byteLength;
+  }
+  await mkdir(dirname(output), { recursive: true });
+  const out = createWriteStream(output);
+  await new Promise((resolve, reject) => { out.on("error", reject); out.write(head, (error) => error ? reject(error) : resolve()); });
+  await pipeline(createReadStream(spillPath), out, { end: true });
+  return offset;
+}
+
 
 /**
  * Reads the bundle back with the package's own reader before reporting
@@ -209,11 +284,11 @@ function viaChains(graph, outgoing, start, viaWays) {
   const walk = (node, chain) => {
     if (chain.length >= MAX_VIA_EDGES || chains.length >= MAX_VIA_CHAINS) return;
     for (const edge of outgoing.get(node) ?? []) {
-      if (!viaWays.has(graph.edges[edge].way) || used.has(edge)) continue;
+      if (!viaWays.has(graph.edgeWay.at(edge)) || used.has(edge)) continue;
       const extended = [...chain, edge];
       chains.push(extended);
       used.add(edge);
-      walk(graph.edges[edge].to, extended);
+      walk(graph.edgeTo.at(edge), extended);
       used.delete(edge);
     }
   };
@@ -230,9 +305,9 @@ function viaChains(graph, outgoing, start, viaWays) {
 function resolveRestrictions(graph, restrictions) {
   if (!graph.wayEdges.size) return { banned: [], runs: [] };
   const outgoing = new Map();
-  for (let index = 0; index < graph.edges.length; index += 1) {
-    const list = outgoing.get(graph.edges[index].from);
-    if (list) list.push(index); else outgoing.set(graph.edges[index].from, [index]);
+  for (let index = 0; index < graph.edgeFrom.length; index += 1) {
+    const list = outgoing.get(graph.edgeFrom.at(index));
+    if (list) list.push(index); else outgoing.set(graph.edgeFrom.at(index), [index]);
   }
   const banned = [], runs = [];
   for (const restriction of restrictions) {
@@ -243,8 +318,8 @@ function resolveRestrictions(graph, restrictions) {
     if (!restriction.viaWays) {
       const via = graph.ids.get(restriction.via);
       if (via === undefined) continue;
-      const fromEdges = fromAll.filter((index) => graph.edges[index].to === via);
-      const toEdges = toAll.filter((index) => graph.edges[index].from === via);
+      const fromEdges = fromAll.filter((index) => graph.edgeTo.at(index) === via);
+      const toEdges = toAll.filter((index) => graph.edgeFrom.at(index) === via);
       if (!fromEdges.length || !toEdges.length) continue;
       if (restriction.kind === "no") { for (const from of fromEdges) for (const to of toEdges) banned.push([from, to]); continue; }
       const mandatory = new Set(toEdges);
@@ -254,10 +329,10 @@ function resolveRestrictions(graph, restrictions) {
 
     const viaWays = new Set(restriction.viaWays);
     for (const from of fromAll) {
-      for (const chain of viaChains(graph, outgoing, graph.edges[from].to, viaWays)) {
+      for (const chain of viaChains(graph, outgoing, graph.edgeTo.at(from), viaWays)) {
         if (chain.includes(from)) continue;
-        const end = graph.edges[chain[chain.length - 1]].to;
-        const toEdges = toAll.filter((index) => graph.edges[index].from === end && !chain.includes(index));
+        const end = graph.edgeTo.at(chain[chain.length - 1]);
+        const toEdges = toAll.filter((index) => graph.edgeFrom.at(index) === end && !chain.includes(index));
         if (!toEdges.length) continue;
         if (restriction.kind === "no") { for (const to of toEdges) runs.push([from, ...chain, to]); continue; }
         const mandatory = new Set(toEdges);
@@ -270,8 +345,12 @@ function resolveRestrictions(graph, restrictions) {
 
 async function build(roadFile, coordinates, topology, layout, bounds, tolerance, paddingKm, tileSizeKm, limitBytes) {
   const { tiles, grid } = layout, ring = Math.max(1, Math.ceil(paddingKm / tileSizeKm));
-  const graphs = new Map(tiles.map((tile) => [tile.id, { tile, ids: new Map(), nodes: [], edges: [], wayEdges: new Map() }]));
-  const add = (graph, id, point) => { let index = graph.ids.get(id); if (index === undefined) { index = graph.nodes.length; graph.ids.set(id, index); graph.nodes.push(point); } return index; };
+  const graphs = new Map(tiles.map((tile) => [tile.id, createTileGraph(tile)]));
+  const add = (graph, id, point) => {
+    let index = graph.ids.get(id);
+    if (index === undefined) { index = graph.nodeLat.push(fixed(point.lat)); graph.nodeLon.push(fixed(point.lon)); graph.ids.set(id, index); }
+    return index;
+  };
   let routingEdges = 0;
   const addSegment = (wayId, ids, points, velocity) => {
     let distance = 0; for (let i = 1; i < points.length; i += 1) distance += metres(points[i - 1], points[i]);
@@ -281,8 +360,13 @@ async function build(roadFile, coordinates, topology, layout, bounds, tolerance,
     for (const tile of tilesNear(points[0], grid, ring)) {
       if (!inside(points[0], expand(tile.bounds, paddingKm))) continue;
       const graph = graphs.get(tile.id), from = add(graph, ids[0], points[0]), to = add(graph, ids[ids.length - 1], points[points.length - 1]);
-      const index = graph.edges.length;
-      graph.edges.push({ from, to, distance, duration: distance / (velocity * (1000 / 3600)), shape, way: tracked ? wayId : 0 });
+      const index = graph.edgeFrom.push(from);
+      graph.edgeTo.push(to);
+      graph.edgeDistance.push(distance);
+      graph.edgeDuration.push(distance / (velocity * (1000 / 3600)));
+      graph.edgeWay.push(tracked ? wayId : 0);
+      graph.edgeShapeStart.push(graph.shapeLat.length);
+      for (const coordinate of shape) { graph.shapeLat.push(fixed(coordinate.lat)); graph.shapeLon.push(fixed(coordinate.lon)); }
       // Only ways named by a restriction need a reverse index, which keeps the
       // lookup table proportional to the restrictions rather than to the graph.
       if (tracked) { const list = graph.wayEdges.get(wayId); if (list) list.push(index); else graph.wayEdges.set(wayId, [index]); }
@@ -314,12 +398,13 @@ async function build(roadFile, coordinates, topology, layout, bounds, tolerance,
     bannedTurns += resolved.banned.length;
     bannedRuns += resolved.runs.length;
   }
-  const result = [...graphs.values()].filter((graph) => graph.edges.length), routingNodeIds = new Set();
+  const result = [...graphs.values()].filter((graph) => graph.edgeFrom.length), routingNodeIds = new Set();
   for (const graph of result) for (const id of graph.ids.keys()) routingNodeIds.add(id);
+  for (const graph of graphs.values()) { graph.ids = new Map(); graph.wayEdges = new Map(); graph.edgeWay = null; }
   return { graphs: result, routingEdges, routingNodes: routingNodeIds.size, bannedTurns, bannedRuns };
 }
 
-const input = inputArg(), outputOption = opt("--output"), profileName = opt("--profile", "car"), compression = opt("--compression", "gzip"), tileSizeKm = Number(opt("--tile-size-km", "120")), paddingKm = Number(opt("--padding-km", "8")), tolerance = Number(opt("--shape-tolerance-m", "2")), requested = parseBounds(opt("--bbox"));
+const input = inputArg(), outputOption = opt("--output"), profileName = opt("--profile", "car"), compression = opt("--compression", "gzip"), tileSizeKm = Number(opt("--tile-size-km", "120")), paddingKm = Number(opt("--padding-km", "2")), tolerance = Number(opt("--shape-tolerance-m", "2")), requested = parseBounds(opt("--bbox"));
 const maxMemoryMb = Number(opt("--max-memory-mb", "2048"));
 if (!input || !outputOption || !["gzip", "none"].includes(compression) || !(tileSizeKm > 0) || !(paddingKm >= 0) || !(tolerance >= 0) || !(maxMemoryMb > 0 && maxMemoryMb <= 3072) || (opt("--bbox") && !requested)) { usage(); process.exitCode = 1; }
 else if (!process.env.ROADGRAPH_HEAP_LIMITED) {
@@ -333,13 +418,26 @@ else {
   const workspace = await mkdtemp(resolve(tmpdir(), "roadgraph-"));
   try {
     const limitBytes = maxMemoryMb * 1024 * 1024, first = await firstPass(file, resolve(workspace, "ways.ndjson"), limitBytes, profile), relevantOsmNodes = first.required.count, bounds = requested ?? first.bounds, layout = tilesFor(bounds, tileSizeKm), coordinates = await secondPass(file, first.required, limitBytes, resolve(workspace, "coordinates.sqlite")); first.required.clear();
-    const built = await build(resolve(workspace, "ways.ndjson"), coordinates, first, layout, bounds, tolerance, paddingKm, tileSizeKm, limitBytes); const storedNodes = coordinates.storedNodes; coordinates.close(); const chunks = [];
-    for (const graph of built.graphs) { const raw = new Uint8Array(encodeEfr2(graph)), data = compression === "gzip" ? gzipSync(raw, { level: constants.Z_BEST_COMPRESSION }) : raw; chunks.push({ tile: graph.tile, data, rawBytes: raw.byteLength }); }
-    const bundle = assemble(chunks, compression); await mkdir(dirname(output), { recursive: true }); await writeFile(output, new Uint8Array(bundle));
+    const built = await build(resolve(workspace, "ways.ndjson"), coordinates, first, layout, bounds, tolerance, paddingKm, tileSizeKm, limitBytes); const storedNodes = coordinates.storedNodes; coordinates.close();
+    // Encode, compress and spill each tile in turn, releasing it immediately,
+    // so peak memory tracks the largest single tile rather than the region.
+    const { encodeCompactGraph } = await import(new URL("../dist/index.js", import.meta.url).href);
+    const spillPath = resolve(workspace, "chunks.bin"), spill = createWriteStream(spillPath), chunks = [];
+    for (let index = 0; index < built.graphs.length; index += 1) {
+      const graph = built.graphs[index];
+      const raw = new Uint8Array(encodeEfr2(graph, encodeCompactGraph));
+      const data = compression === "gzip" ? gzipSync(raw, { level: constants.Z_BEST_COMPRESSION }) : raw;
+      chunks.push({ tile: graph.tile, byteLength: data.byteLength, rawBytes: raw.byteLength });
+      if (!spill.write(data)) await new Promise((done) => spill.once("drain", done));
+      built.graphs[index] = null;
+      memoryGuard(limitBytes, "writing compressed tiles", 1000);
+    }
+    await new Promise((done, fail) => spill.end((error) => error ? fail(error) : done()));
+    const bundleBytes = await writeBundle(output, chunks, compression, spillPath);
     await verifyBundle(output, chunks.length);
     const nodesBefore = storedNodes, nodesAfter = built.routingNodes, edges = built.routingEdges, rawBytes = chunks.reduce((sum, chunk) => sum + chunk.rawBytes, 0);
-    const report = { formatVersion: 1, input: file, inputBytes: source.size, profile: profile.name, compression: `${compression}-per-tile`, tileSizeKm, paddingKm, pbfPasses: 2, tiles: chunks.length, relevantOsmWays: first.ways, relevantOsmNodes, relevantOsmNodesExact: false, routingNodesBeforeSimplification: nodesBefore, routingNodesAfterSimplification: nodesAfter, reductionPercent: Number((100 * (1 - nodesAfter / Math.max(1, nodesBefore))).toFixed(2)), routingEdges: edges, turnRestrictionsRead: first.restrictions.length, turnRestrictionsSkipped: first.skippedRestrictions, bannedTurnPairs: built.bannedTurns, bannedTurnRuns: built.bannedRuns, uncompressedGraphBytes: rawBytes, bundleBytes: bundle.byteLength, compressionRatio: Number((bundle.byteLength / Math.max(1, rawBytes)).toFixed(4)), peakRssBytes: Math.max(observedPeakRss, process.memoryUsage().rss), elapsedMilliseconds: Math.round(performance.now() - started) };
+    const report = { formatVersion: 1, input: file, inputBytes: source.size, profile: profile.name, compression: `${compression}-per-tile`, tileSizeKm, paddingKm, pbfPasses: 2, tiles: chunks.length, relevantOsmWays: first.ways, relevantOsmNodes, relevantOsmNodesExact: false, routingNodesBeforeSimplification: nodesBefore, routingNodesAfterSimplification: nodesAfter, reductionPercent: Number((100 * (1 - nodesAfter / Math.max(1, nodesBefore))).toFixed(2)), routingEdges: edges, turnRestrictionsRead: first.restrictions.length, turnRestrictionsSkipped: first.skippedRestrictions, bannedTurnPairs: built.bannedTurns, bannedTurnRuns: built.bannedRuns, uncompressedGraphBytes: rawBytes, bundleBytes, compressionRatio: Number((bundleBytes / Math.max(1, rawBytes)).toFixed(4)), peakRssBytes: Math.max(observedPeakRss, process.memoryUsage().rss), elapsedMilliseconds: Math.round(performance.now() - started) };
     await writeFile(`${output}.json`, `${JSON.stringify(report, null, 2)}\n`);
-    console.table({ input_mb: (source.size / 1e6).toFixed(1), pbf_passes: report.pbfPasses, relevant_ways: first.ways.toLocaleString(), relevant_nodes: relevantOsmNodes.toLocaleString(), nodes_before: nodesBefore.toLocaleString(), nodes_after: nodesAfter.toLocaleString(), reduction_percent: report.reductionPercent, routing_edges: edges.toLocaleString(), turn_restrictions: first.restrictions.length.toLocaleString(), banned_turn_pairs: built.bannedTurns.toLocaleString(), banned_turn_runs: built.bannedRuns.toLocaleString(), tiles: chunks.length, raw_mb: (rawBytes / 1e6).toFixed(1), efrb_mb: (bundle.byteLength / 1e6).toFixed(1), compression_ratio: report.compressionRatio, peak_rss_mb: (report.peakRssBytes / 1e6).toFixed(1), elapsed_seconds: (report.elapsedMilliseconds / 1000).toFixed(1) });
+    console.table({ input_mb: (source.size / 1e6).toFixed(1), pbf_passes: report.pbfPasses, relevant_ways: first.ways.toLocaleString(), relevant_nodes: relevantOsmNodes.toLocaleString(), nodes_before: nodesBefore.toLocaleString(), nodes_after: nodesAfter.toLocaleString(), reduction_percent: report.reductionPercent, routing_edges: edges.toLocaleString(), turn_restrictions: first.restrictions.length.toLocaleString(), banned_turn_pairs: built.bannedTurns.toLocaleString(), banned_turn_runs: built.bannedRuns.toLocaleString(), tiles: chunks.length, raw_mb: (rawBytes / 1e6).toFixed(1), efrb_mb: (bundleBytes / 1e6).toFixed(1), compression_ratio: report.compressionRatio, peak_rss_mb: (report.peakRssBytes / 1e6).toFixed(1), elapsed_seconds: (report.elapsedMilliseconds / 1000).toFixed(1) });
   } finally { await rm(workspace, { recursive: true, force: true }); }
 }

@@ -133,7 +133,8 @@ function searchByEdge(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Fi
   const partialCost: number[] = [];
   const partialPrevious: number[] = [];
   const partialIds = new Map<string, number>();
-  const encode = (sequence: number, position: number) => sequence * 256 + position;
+  const stride = sequenceIndex?.stride ?? 1;
+  const encode = (sequence: number, position: number) => sequence * stride + position;
 
   const edgeOf = (state: number) => state < edgeCount ? state : partialEdge[state - edgeCount];
   const matchesOf = (state: number) => state < edgeCount ? undefined : partialMatches[state - edgeCount];
@@ -177,11 +178,11 @@ function searchByEdge(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Fi
     const carried: number[] = [];
     if (matches) {
       for (const match of matches) {
-        const sequence = sequences[Math.floor(match / 256)];
-        const position = match % 256;
+        const sequence = sequences[Math.floor(match / stride)];
+        const position = match % stride;
         if (sequence[position + 1] !== next) continue;
         if (position + 2 === sequence.length) return null;
-        carried.push(encode(Math.floor(match / 256), position + 1));
+        carried.push(encode(Math.floor(match / stride), position + 1));
       }
     }
     for (const id of startingAt?.get(edge) ?? []) {

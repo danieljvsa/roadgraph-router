@@ -132,10 +132,10 @@ describe("only_* restrictions with a via way", () => {
 });
 
 describe("via-way runs survive storage and merging", () => {
-  it("round-trips through an EFR2 v5 chunk", () => {
+  it.each(["packed", "legacy"] as const)("round-trips a run through the %s layout", (layout) => {
     const built = buildGraph({ ...slipRoad, bannedRuns: bannedRun });
-    const encoded = encodeCompactGraph(compactGraph(built));
-    expect(new DataView(encoded).getUint16(4, true)).toBe(5);
+    const encoded = encodeCompactGraph(compactGraph(built), { layout });
+    expect(new DataView(encoded).getUint16(4, true)).toBe(layout === "packed" ? 6 : 5);
     expect(new DataView(encoded).getUint32(32, true)).toBe(1);
     expect(new DataView(encoded).getUint32(36, true)).toBe(3);
     const decoded = decodeGraph(encoded);
@@ -143,8 +143,8 @@ describe("via-way runs survive storage and merging", () => {
     expect(decoded.turnRestrictionSequenceOffsets).toEqual(built.turnRestrictionSequenceOffsets);
   });
 
-  it("stays on v4 when only pair restrictions are present", () => {
-    const pairsOnly = encodeCompactGraph(compactGraph(buildGraph({ ...slipRoad, bans: [["A>J1", "J1>J2"]] })));
+  it("stays on v4 in the legacy layout when only pair restrictions are present", () => {
+    const pairsOnly = encodeCompactGraph(compactGraph(buildGraph({ ...slipRoad, bans: [["A>J1", "J1>J2"]] })), { layout: "legacy" });
     expect(new DataView(pairsOnly).getUint16(4, true)).toBe(4);
   });
 

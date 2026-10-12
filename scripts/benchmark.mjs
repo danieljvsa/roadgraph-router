@@ -84,11 +84,11 @@ for (let index = 0; index < tileCount; index += 1) {
   const raw = compressed ? gunzipSync(chunk) : chunk;
   const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
   const version = view.getUint16(4, true);
-  if (view.getUint32(0, true) !== EFR2_MAGIC || version < 2 || version > 5) throw new Error(`Tile ${index} is not a supported EFR2 graph.`);
+  if (view.getUint32(0, true) !== EFR2_MAGIC || version < 2 || version > 6) throw new Error(`Tile ${index} is not a supported EFR2 graph.`);
   totalNodes += view.getUint32(8, true);
   totalEdges += view.getUint32(12, true);
   if (version >= 4) totalRestrictions += view.getUint32(28, true);
-  if (version >= 5) totalRuns += view.getUint32(32, true);
+  if (version >= 5) totalRuns += view.getUint32(version === 6 ? 32 : 32, true);
   rawBytes += raw.byteLength;
 }
 

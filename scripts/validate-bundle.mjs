@@ -60,7 +60,11 @@ let seed = 0x2f6e2b1;
 const nextRandom = () => ((seed = (Math.imul(seed, 48271) >>> 0) % 0x7fffffff) / 0x7fffffff);
 const pick = (list) => list[Math.floor(nextRandom() * list.length)];
 
-const unrestricted = { ...graph, turnRestrictionFromEdges: undefined, turnRestrictionToEdges: undefined };
+const unrestricted = {
+  ...graph,
+  turnRestrictionFromEdges: undefined, turnRestrictionToEdges: undefined,
+  turnRestrictionSequenceOffsets: undefined, turnRestrictionSequenceEdges: undefined,
+};
 let routed = 0;
 let violations = 0;
 let runViolations = 0;
