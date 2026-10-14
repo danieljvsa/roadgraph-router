@@ -118,7 +118,7 @@ roadgraph-compile portugal.osm.pbf --output portugal.efrb --profile car,truck,mo
 
 The extract is read once however many vehicles are asked for, and a reader
 downloads the shared half of a tile plus the one vehicle it wants. On Portugal
-that is 42.9 MB for three vehicles where three separate bundles would be about
+that is 40.2 MB for three vehicles where three separate bundles would be about
 114 MB, and switching vehicle mid-session costs about 2 MB rather than another
 38.
 
@@ -609,13 +609,14 @@ Portugal, `portugal-latest.osm.pbf` at 425 MB, on one machine:
 
 | | 0.1.0 car | 0.2.0 car | 0.2.0 car + truck + motorcycle |
 | --- | --- | --- | --- |
-| Bundle | 38.03 MB | 38.04 MB | **42.90 MB** |
-| Peak compile memory | 1.11 GB | 1.10 GB | 1.39 GB |
-| Compile time | 7m 46s | 7m 58s | 7m 53s |
+| Bundle | 38.03 MB | 38.04 MB | **40.17 MB** |
+| Peak compile memory | 1.11 GB | 1.10 GB | 1.64 GB |
+| Compile time | 7m 46s | 7m 58s | 7m 48s |
 | Routing nodes | 1,244,119 | 1,244,119 | 1,244,263 |
-| Routing edges | 2,757,478 | 2,757,478 | 2,757,819 |
+| Routing edges | 2,757,478 | 2,757,478 | 2,760,171 |
+| Barriers read | — | — | 33,236, giving 8,790 bans |
 
-Three vehicles cost 12.8% more than one and compile in the same time, because
+Three vehicles cost 5.6% more than one and compile in the same time, because
 the extract is read once however many are asked for. The same three as separate
 bundles would be about 114 MB.
 
@@ -637,11 +638,11 @@ Porto to Lisbon over the three-vehicle bundle, cold:
 
 | Vehicle | Distance | Duration | Downloaded |
 | --- | --- | --- | --- |
-| car | 313.10 km | 164.8 min | 31.5 MB |
-| truck | 313.10 km | 213.4 min | 2.0 MB |
-| motorcycle | 313.10 km | 164.8 min | 2.0 MB |
+| car | 313.10 km | 165.5 min | 29.2 MB |
+| truck | 313.10 km | 217.6 min | 2.0 MB |
+| motorcycle | 313.10 km | 165.5 min | 2.0 MB |
 
-The lorry is 29.5% slower over the same roads, which is the 90 km/h cap on
+The lorry is 31.5% slower over the same roads, which is the 90 km/h cap on
 motorways. The second and third vehicles cost 2 MB each because the road
 network was already downloaded.
 
