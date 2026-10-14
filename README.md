@@ -698,8 +698,14 @@ holds far more than a tile of roads.
 
 Tile size is the lever: `--tile-size-km` trades a larger file, from more
 overlap between tiles, against a smaller first download. The default of 120 km
-suits a road network. An active-travel bundle for a city is better served by
-something smaller.
+suits a road network, and an active-travel bundle for a city is better served
+by something smaller.
+
+At country scale this is currently out of reach. Compiling Portugal for
+walking and cycling at 40 km tiles exceeds the compiler's memory ceiling of
+3 GB and is refused rather than attempted — the guard does its job, but the
+measurement is one this release cannot make. A city-sized extract has no such
+trouble.
 
 ## Licence
 

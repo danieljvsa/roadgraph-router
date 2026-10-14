@@ -101,6 +101,14 @@ ship too, in a bundle of their own. Alternative routes moved to 0.3.0.
 - A truck bundle written in the single-chunk layout, which has nowhere to keep
   limits, is refused rather than routed with the dimensions silently ignored.
 
+### Known limitations
+
+- An active-travel bundle at country scale cannot be compiled with small
+  tiles: Portugal for walking and cycling at 40 km tiles exceeds the
+  compiler's 3 GB ceiling and is refused. The default 120 km works, at the
+  cost of a larger first download for a short urban route.
+- Alternative routes are not in this release; they are planned for 0.3.0.
+
 ### Compatibility
 
 Bundles compiled by 0.1.0 open and route identically. A single-vehicle compile
