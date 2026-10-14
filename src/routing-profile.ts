@@ -27,8 +27,25 @@ export type ParsedTurnRestriction = {
   value: string;
 };
 
+/**
+ * Stable numeric ids written into compiled graphs. They are part of the file
+ * format, so a value is never reused for a different profile; 0 is reserved
+ * for graphs compiled before profiles were recorded, which were all cars.
+ */
+export const ProfileId = {
+  unspecified: 0,
+  car: 1,
+  truck: 2,
+  motorcycle: 3,
+  bicycle: 4,
+  pedestrian: 5,
+} as const;
+export type ProfileId = (typeof ProfileId)[keyof typeof ProfileId];
+
 export interface RoutingProfile {
   readonly name: string;
+  /** The id this profile is stored under. See `ProfileId`. */
+  readonly id: ProfileId;
   /** Way tag keys the compiler must request from the PBF reader. */
   readonly wayTagKeys: readonly string[];
   /** Relation tag keys the compiler must request from the PBF reader. */
@@ -143,6 +160,7 @@ function onewayDirections(tags: OsmTags, highway: string | undefined) {
 
 export const carRoutingProfile: RoutingProfile = {
   name: "car",
+  id: ProfileId.car,
   wayTagKeys: ["highway", "oneway", "junction", "access", "vehicle", "motor_vehicle", "motorcar", "maxspeed", "maxspeed:forward", "maxspeed:backward"],
   relationTagKeys: ["type", "except", ...CAR_RESTRICTION_KEYS],
   maxSpeedKph: MAXIMUM_SPEED_KPH,
@@ -180,4 +198,27 @@ export function getRoutingProfile(name: string): RoutingProfile {
   const profile = routingProfiles[name];
   if (!profile) throw new Error(`Unknown routing profile "${name}". Available: ${Object.keys(routingProfiles).join(", ")}.`);
   return profile;
+}
+
+/** The profile a stored id refers to, or null when this build does not know it. */
+export function getRoutingProfileById(id: number): RoutingProfile | null {
+  if (id === ProfileId.unspecified) return carRoutingProfile;
+  return Object.values(routingProfiles).find((profile) => profile.id === id) ?? null;
+}
+
+/**
+ * A graph compiled before profiles were recorded is a car graph, which is what
+ * every bundle published up to v0.1.0 holds.
+ */
+export function profileOf(graph: { profileId?: number }): RoutingProfile {
+  return getRoutingProfileById(graph.profileId ?? ProfileId.unspecified) ?? carRoutingProfile;
+}
+
+/**
+ * The speed ceiling a search may assume, in metres per second. The value
+ * stored in the graph wins over this build's table, so a bundle compiled by a
+ * newer version still bounds an older reader's heuristic correctly.
+ */
+export function maxSpeedMpsFor(graph: { profileId?: number; maxSpeedKph?: number }) {
+  return ((graph.maxSpeedKph ?? profileOf(graph).maxSpeedKph) * 1000) / 3600;
 }

@@ -3,11 +3,8 @@ import type { Coordinate, GeoJsonPosition, RoadGraph, RoutePreference, RouteResu
 import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
 import { buildTurnRestrictionIndex, buildTurnSequenceIndex, type TurnRestrictionIndex, type TurnSequenceIndex } from "./turn-restrictions";
-import { carRoutingProfile } from "./routing-profile";
+import { maxSpeedMpsFor, profileOf } from "./routing-profile";
 import { coordinateFor, geometryAfter, geometryBefore, geometryBetween, haversineMeters, snapToGraph, type EdgeProjection, type GraphSnap } from "./snap";
-
-/** Matches the profile's speed ceiling so the fastest-route heuristic stays admissible. */
-const MAX_CAR_SPEED_MPS = (carRoutingProfile.maxSpeedKph * 1000) / 3600;
 
 /** Entering the graph: traverse the tail of `edge` to reach `node`. `edge` is -1 at a junction. */
 type Seed = { node: number; edge: number; cost: number };
@@ -49,11 +46,15 @@ export function findNearestNode(graph: RoadGraph, coordinate: Coordinate, maxDis
 function searchContext(graph: RoadGraph, destinationPoint: Coordinate, preference: RoutePreference) {
   const distanceScale = graph.edgeDistanceScale ?? 1;
   const durationScale = graph.edgeDurationScale ?? 1;
+  // The ceiling comes from the graph, not from this file: dividing a walking
+  // route's remaining distance by a car's top speed keeps the heuristic
+  // admissible but drives it to nearly zero, which turns A* into Dijkstra.
+  const maxSpeedMps = maxSpeedMpsFor(graph);
   return {
     costOf: (edge: number) => preference === "fastest" ? graph.edgeDurationsSeconds[edge] * durationScale : graph.edgeDistancesMeters[edge] * distanceScale,
     heuristicFor: (node: number) => {
       const remaining = haversineMeters(coordinateFor(graph, node), destinationPoint);
-      return preference === "fastest" ? remaining / MAX_CAR_SPEED_MPS : remaining;
+      return preference === "fastest" ? remaining / maxSpeedMps : remaining;
     },
   };
 }
@@ -334,7 +335,7 @@ export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
       ? searchByEdge(graph, seeds, finishers, destinationSnap.point, preference, restrictions, sequenceIndex, costBound)
       : searchByNode(graph, seeds, finishers, destinationSnap.point, preference, costBound);
   if (direct && direct.cost >= costBound) direct = null;
-  if (!outcome && !direct) throw new RouterError("NO_ROUTE", "No car route connects the selected points.");
+  if (!outcome && !direct) throw new RouterError("NO_ROUTE", `No ${profileOf(graph).name} route connects the selected points.`);
 
   const searchCost = outcome ? outcome.seed.cost + outcome.edges.reduce((sum, edge) => sum + costOf(edge), 0) + outcome.finisher.cost : Infinity;
   const partial = (projection: EdgeProjection, fraction: number) => ({

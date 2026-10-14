@@ -1,5 +1,6 @@
 import type { RoadGraph } from "./types";
 import { VarintReader, VarintWriter } from "./varint";
+import { getRoutingProfileById } from "./routing-profile";
 
 const MAGIC = 0x45465254;
 const VERSION = 1;
@@ -76,6 +77,9 @@ export function encodeCompactGraph(graph: RoadGraph, options: CompactEncodeOptio
 }
 
 function encodeLegacyCompactGraph(graph: RoadGraph): ArrayBuffer {
+  // v2-v5 have no room for profile metadata. Writing a non-car graph into one
+  // would produce a file that reads back as a car graph, so it is refused.
+  if (graph.profileId) throw new Error("The legacy EFR2 layout cannot store a routing profile. Use the packed layout.");
   if (!(graph.nodeLatitudes instanceof Int32Array) || !(graph.nodeLongitudes instanceof Int32Array) || !(graph.edgeDistancesMeters instanceof Uint16Array) || !(graph.edgeDurationsSeconds instanceof Uint16Array)) throw new Error("Compact graphs require Int32 coordinates and Uint16 edge weights.");
   const coordinateScale = graph.coordinateScale ?? 0, edgeDistanceScale = graph.edgeDistanceScale ?? 1, edgeDurationScale = graph.edgeDurationScale ?? 1;
   if (!Number.isInteger(coordinateScale) || !Number.isInteger(edgeDistanceScale) || !Number.isInteger(edgeDurationScale) || coordinateScale <= 0 || edgeDistanceScale <= 0 || edgeDurationScale <= 0 || edgeDistanceScale > 65535 || edgeDurationScale > 65535) throw new Error("Invalid compact graph scales.");
@@ -140,6 +144,7 @@ function decodeCompactGraph(buffer: ArrayBuffer): RoadGraph {
   assertGeographic(nodeLatitudes, nodeLongitudes, coordinateScale);
   for (const target of edgeTargets) if (target >= nodes) throw new Error("Invalid routing graph: edge target outside the graph.");
   assertOffsets(edgeOffsets, nodes, edges, "edge offsets");
+  // v2-v5 predate profile metadata, so every such graph is a car graph.
   const graph: RoadGraph = { nodeLatitudes, nodeLongitudes, edgeOffsets, edgeTargets, edgeDistancesMeters, edgeDurationsSeconds, coordinateScale, edgeDistanceScale, edgeDurationScale };
   if (!shaped) return graph;
   const edgeShapeOffsets = new Uint32Array(buffer.slice(offset, offset += (edges + 1) * 4));
@@ -168,6 +173,8 @@ function decodeCompactGraph(buffer: ArrayBuffer): RoadGraph {
 /** v6 keeps the same graph but stores it far more tightly. */
 const PACKED_COMPACT_VERSION = 6;
 const PACKED_HEADER_BYTES = 64;
+/** Nothing this library routes travels faster than this; a larger value means a corrupt header. */
+const MAX_PLAUSIBLE_SPEED_KPH = 400;
 
 /** Variable-length sections end on any byte; typed-array views need a multiple of four. */
 function alignUp(offset: number) {
@@ -301,6 +308,11 @@ function encodePackedGraph(graph: RoadGraph): ArrayBuffer {
   view.setUint32(32, runs, true);
   view.setUint32(36, runEdges, true);
   for (let index = 0; index < sections.length; index += 1) view.setUint32(40 + index * 4, sections[index].byteLength, true);
+  // Bytes 60-63 were spare in every v6 chunk written so far, and a chunk that
+  // never set them reads back as zero — which is exactly "unspecified", so
+  // existing bundles keep decoding as the car graphs they are.
+  view.setUint8(60, graph.profileId ?? 0);
+  view.setUint16(62, Math.round(graph.maxSpeedKph ?? 0), true);
 
   let offset = PACKED_HEADER_BYTES;
   new Int32Array(buffer, offset, nodes).set(graph.nodeLatitudes); offset += nodes * 4;
@@ -341,6 +353,12 @@ function decodePackedGraph(buffer: ArrayBuffer): RoadGraph {
   // the file could actually hold, so a corrupt header cannot ask for an
   // allocation far larger than the chunk itself.
   if (shapeCount > edges) throw new Error("Invalid compact routing graph: more shapes than edges.");
+  const profileId = view.getUint8(60);
+  const maxSpeedKph = view.getUint16(62, true);
+  // A profile this build does not know about would route with the wrong rules
+  // rather than fail, so an unknown id is refused rather than ignored.
+  if (profileId && !getRoutingProfileById(profileId)) throw new Error(`Routing graph was compiled for an unsupported profile (id ${profileId}).`);
+  if (maxSpeedKph > MAX_PLAUSIBLE_SPEED_KPH) throw new Error("Invalid compact routing graph: implausible profile speed ceiling.");
 
   let offset = PACKED_HEADER_BYTES;
   const nodeLatitudes = new Int32Array(buffer.slice(offset, offset += nodes * 4));
@@ -372,6 +390,8 @@ function decodePackedGraph(buffer: ArrayBuffer): RoadGraph {
 
   assertGeographic(nodeLatitudes, nodeLongitudes, coordinateScale);
   const graph: RoadGraph = { nodeLatitudes, nodeLongitudes, edgeOffsets, edgeTargets, edgeDistancesMeters, edgeDurationsSeconds, coordinateScale, edgeDistanceScale, edgeDurationScale };
+  if (profileId) graph.profileId = profileId;
+  if (maxSpeedKph) graph.maxSpeedKph = maxSpeedKph;
 
   // Rebuild the per-edge geometry the rest of the library expects, expanding
   // each shared shape back out and mirroring it where an edge asked for it.

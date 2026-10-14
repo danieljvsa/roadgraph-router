@@ -53,6 +53,9 @@ export function compactGraph(graph: RoadGraph, options: CompactGraphOptions = {}
     coordinateScale,
     edgeDistanceScale,
     edgeDurationScale,
+    // Quantising the weights does not change which vehicle the graph is for.
+    ...(graph.profileId ? { profileId: graph.profileId } : {}),
+    ...(graph.maxSpeedKph ? { maxSpeedKph: graph.maxSpeedKph } : {}),
     ...(edgeShapeOffsets && edgeShapeLatitudes && edgeShapeLongitudes ? { edgeShapeOffsets, edgeShapeLatitudes, edgeShapeLongitudes } : {}),
     ...(graph.turnRestrictionFromEdges && graph.turnRestrictionToEdges
       ? { turnRestrictionFromEdges: graph.turnRestrictionFromEdges.slice(), turnRestrictionToEdges: graph.turnRestrictionToEdges.slice() }

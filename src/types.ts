@@ -37,6 +37,19 @@ export interface RoadGraph {
   edgeDistanceScale?: number;
   /** Edge duration values are multiplied by this scale. Omitted means seconds. */
   edgeDurationScale?: number;
+  /**
+   * The routing profile this graph was compiled for, as a `ProfileId`. Absent
+   * means the graph predates profile metadata, and every such graph is a car
+   * graph. A graph only answers for the vehicle it was compiled for: a car
+   * graph has no footpaths in it to walk along.
+   */
+  profileId?: number;
+  /**
+   * The profile's speed ceiling in km/h, carried so a reader can bound its A*
+   * heuristic and its tile budget without knowing the profile's rules. Absent
+   * falls back to the profile's own ceiling.
+   */
+  maxSpeedKph?: number;
   /** Optional intermediate vertices per directed edge, stored using coordinateScale. */
   edgeShapeOffsets?: Uint32Array;
   edgeShapeLatitudes?: Int32Array;

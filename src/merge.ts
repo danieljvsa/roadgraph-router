@@ -30,6 +30,12 @@ function nodeKey(latitude: number, longitude: number) {
 export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
   if (!graphs.length) throw new Error("At least one road graph is required.");
   if (graphs.length === 1) return graphs[0];
+  // Merging graphs compiled for different vehicles would produce a network
+  // that is legal for neither, so the profiles have to agree.
+  const profileId = graphs[0].profileId;
+  for (const graph of graphs) {
+    if (graph.profileId !== profileId) throw new Error("Cannot merge road graphs compiled for different routing profiles.");
+  }
 
   // 1. Stitch the node tables on shared coordinates.
   const nodeIds = new Map<string, number>();
@@ -190,6 +196,8 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
     edgeTargets,
     edgeDistancesMeters,
     edgeDurationsSeconds,
+    ...(profileId ? { profileId } : {}),
+    ...(graphs[0].maxSpeedKph ? { maxSpeedKph: graphs[0].maxSpeedKph } : {}),
     ...(pointCount ? { edgeShapeOffsets, edgeShapeLatitudes, edgeShapeLongitudes } : {}),
     ...(bannedPairs.length ? packTurnRestrictions(bannedPairs) : {}),
     ...(bannedSequences.length ? packTurnSequences(bannedSequences) : {}),

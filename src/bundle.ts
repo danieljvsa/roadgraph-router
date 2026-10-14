@@ -23,6 +23,14 @@ export type BundleTile = { id: number; bounds: BundleBounds; offset: number; byt
 export type RoadGraphBundle = {
   url: string;
   tiles: BundleTile[];
+  /**
+   * The profile every tile in this bundle was compiled for, read from the
+   * header so a caller knows the vehicle before downloading a single tile.
+   * `0` means a bundle written before profiles were recorded: a car bundle.
+   */
+  profileId: number;
+  /** The profile's speed ceiling in km/h, or 0 when the bundle predates it. */
+  maxSpeedKph: number;
   loadForRoute(origin: Coordinate, destination: Coordinate): Promise<RoadGraph>;
   loadExpandedForRoute(origin: Coordinate, destination: Coordinate): Promise<RoadGraph>;
   /**
@@ -102,6 +110,19 @@ async function gzipChunk(buffer: ArrayBuffer): Promise<ArrayBuffer> {
   return new Response(stream).arrayBuffer();
 }
 
+/**
+ * Every tile must describe the same vehicle: a bundle is one graph split up,
+ * and a corridor merged from a car tile and a bicycle tile is neither.
+ */
+function profileOfTiles(tiles: BundleGraphTile[]) {
+  const profileId = tiles[0].graph.profileId ?? 0;
+  const maxSpeedKph = tiles[0].graph.maxSpeedKph ?? 0;
+  for (const tile of tiles) {
+    if ((tile.graph.profileId ?? 0) !== profileId) throw new Error("A routing bundle cannot mix tiles compiled for different profiles.");
+  }
+  return { profileId, maxSpeedKph };
+}
+
 function createBundle(tiles: BundleGraphTile[], chunks: BundleChunk[]): ArrayBuffer {
   const directoryBytes = tiles.length * DIRECTORY_ENTRY_BYTES;
   let offset = HEADER_BYTES + directoryBytes;
@@ -114,6 +135,11 @@ function createBundle(tiles: BundleGraphTile[], chunks: BundleChunk[]): ArrayBuf
   view.setUint32(8, tiles.length, true);
   view.setUint32(12, HEADER_BYTES, true);
   view.setUint32(16, directoryBytes, true);
+  // Bytes 20-31 have been spare since the format was written, and an older
+  // bundle reads them back as zero, which is "unspecified" and so a car.
+  const profile = profileOfTiles(tiles);
+  view.setUint8(20, profile.profileId);
+  view.setUint16(22, Math.round(profile.maxSpeedKph), true);
   for (let index = 0; index < tiles.length; index += 1) {
     const tile = tiles[index];
     const chunk = chunks[index];
@@ -160,6 +186,8 @@ export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetc
   if (headerView.getUint32(0, true) !== MAGIC || headerView.getUint16(4, true) !== VERSION || headerView.getUint16(6, true) !== HEADER_BYTES) {
     throw new Error("Unsupported routing bundle format.");
   }
+  const profileId = headerView.getUint8(20);
+  const maxSpeedKph = headerView.getUint16(22, true);
   const tileCount = headerView.getUint32(8, true);
   const directoryOffset = headerView.getUint32(12, true);
   const directoryLength = headerView.getUint32(16, true);
@@ -216,6 +244,8 @@ export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetc
   return {
     url,
     tiles,
+    profileId,
+    maxSpeedKph,
     tilesWithinBudget(origin, destination, budgetMeters) {
       // A tile holding either endpoint is always a candidate: the route has to
       // start and finish somewhere even when the budget is tiny.

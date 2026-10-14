@@ -1,14 +1,11 @@
 import { createRouteGraphLoader, type RouteGraphLoader } from "./manifest";
 import { openRoadGraphBundle, type BundleTile, type RoadGraphBundle } from "./bundle";
 import { route } from "./router";
-import { carRoutingProfile } from "./routing-profile";
+import { maxSpeedMpsFor } from "./routing-profile";
 import { RouterError, type Coordinate, type RoadGraph, type RoutePreference, type RouteResult } from "./types";
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type RouteLoader = Pick<RouteGraphLoader | RoadGraphBundle, "loadForRoute"> & Partial<Pick<RoadGraphBundle, "loadExpandedForRoute">>;
-
-/** The fastest any edge can be travelled, which bounds how far a given duration can reach. */
-const MAX_SPEED_MPS = (carRoutingProfile.maxSpeedKph * 1000) / 3600;
 
 /**
  * How much further than the straight line the first attempt is willing to look.
@@ -80,7 +77,11 @@ export class RoadRouter {
   private async routeOverBundle(bundle: RoadGraphBundle, from: Coordinate, to: Coordinate, preference: RoutePreference) {
     const straightLine = haversineMeters(from, to);
     const ceiling = straightLine * (this.options.maxDetourFactor ?? Infinity);
-    const reachFor = (result: RouteResult) => Math.min(ceiling, preference === "fastest" ? result.durationSeconds * MAX_SPEED_MPS : result.distanceMeters);
+    // How far a given duration can reach depends on the vehicle. Sizing a
+    // walk's tile budget with a car's top speed would ask for a radius of
+    // tiles forty times larger than the walk can cross.
+    const maxSpeedMps = maxSpeedMpsFor({ profileId: bundle.profileId, maxSpeedKph: bundle.maxSpeedKph || undefined });
+    const reachFor = (result: RouteResult) => Math.min(ceiling, preference === "fastest" ? result.durationSeconds * maxSpeedMps : result.distanceMeters);
     let budget = Math.max(MINIMUM_BUDGET_METERS, Math.min(ceiling, straightLine * INITIAL_DETOUR_FACTOR));
 
     let loaded: BundleTile[] = [];
@@ -110,7 +111,7 @@ export class RoadRouter {
         if ((error as { code?: string }).code !== "NO_ROUTE") throw error;
       }
     }
-    if (!best) throw failure ?? new RouterError("NO_ROUTE", "No car route connects the selected points.");
+    if (!best) throw failure ?? new RouterError("NO_ROUTE", "No route connects the selected points.");
 
     // Phase 2: confirm it against every tile that could still beat it. The
     // bound makes each pass cheap, since anything no better is abandoned early.

@@ -14,7 +14,7 @@ export { RouterError } from "./types";
 export { createRouteGraphLoader } from "./manifest";
 export { mergeRoadGraphs } from "./merge";
 export { buildTurnRestrictionIndex, buildTurnSequenceIndex, isTurnBanned, packTurnRestrictions, packTurnSequences } from "./turn-restrictions";
-export { carRoutingProfile, getRoutingProfile, parseMaxSpeedKph, routingProfiles } from "./routing-profile";
+export { ProfileId, carRoutingProfile, getRoutingProfile, getRoutingProfileById, maxSpeedMpsFor, parseMaxSpeedKph, profileOf, routingProfiles } from "./routing-profile";
 export type { CompactGraphOptions } from "./compact";
 export type { BundleBounds, BundleEncodeOptions, BundleGraphTile, BundleTile, RoadGraphBundle } from "./bundle";
 export type { Coordinate, CoordinateStorage, GeoJsonLineString, GeoJsonPosition, RouteSnap, EdgeWeightStorage, NodeSpatialIndex, RoadGraph, RoutePreference, RouteResult, RouterErrorCode } from "./types";
