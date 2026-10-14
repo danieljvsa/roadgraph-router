@@ -409,8 +409,21 @@ async function build(roadFile, coordinates, topology, layout, bounds, tolerance,
 
 const input = inputArg(), outputOption = opt("--output"), profileName = opt("--profile", "car"), compression = opt("--compression", "gzip"), tileSizeKm = Number(opt("--tile-size-km", "120")), paddingKm = Number(opt("--padding-km", "2")), tolerance = Number(opt("--shape-tolerance-m", "2")), requested = parseBounds(opt("--bbox"));
 const maxMemoryMb = Number(opt("--max-memory-mb", "2048"));
+/**
+ * The coordinate index needs `node:sqlite`, which arrived in Node 22.5. The
+ * import itself sits in the second pass, by which point the first pass has
+ * already streamed the whole extract — minutes of work before an older Node
+ * is told it cannot finish. Ask here instead, before anything is read.
+ */
+async function assertCompilerRuntime() {
+  try { await import("node:sqlite"); } catch {
+    fail(`The roadgraph-compile CLI needs Node.js 22.5 or newer for its built-in SQLite coordinate index; this is ${process.version}. The routing library itself runs on Node.js 18 and in the browser.`);
+  }
+}
+
 if (!input || !outputOption || !["gzip", "none"].includes(compression) || !(tileSizeKm > 0) || !(paddingKm >= 0) || !(tolerance >= 0) || !(maxMemoryMb > 0 && maxMemoryMb <= 3072) || (opt("--bbox") && !requested)) { usage(); process.exitCode = 1; }
 else if (!process.env.ROADGRAPH_HEAP_LIMITED) {
+  await assertCompilerRuntime();
   const result = spawnSync(process.execPath, [`--max-old-space-size=${Math.floor(maxMemoryMb)}`, import.meta.filename, ...process.argv.slice(2)], { stdio: "inherit", env: { ...process.env, ROADGRAPH_HEAP_LIMITED: "1" } });
   process.exitCode = result.status ?? 1;
 }

@@ -19,6 +19,11 @@ with `fetch` and `DecompressionStream` (Chrome 103+, Firefox 113+, Safari 16.4+)
 The `roadgraph-compile` CLI needs **Node.js 22.5 or newer**, because it indexes
 coordinates through the built-in `node:sqlite` module.
 
+The package's `engines` field states the lower of the two, because installing
+this package usually means using the library. Running the CLI on an older Node
+is refused at startup with that explanation rather than part-way through an
+extract.
+
 ## Quick start
 
 Compile an extract, then route over it:
