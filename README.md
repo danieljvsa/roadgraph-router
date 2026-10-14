@@ -5,8 +5,48 @@ routing bundle, then route over it with A* — in Node.js or in the browser, wit
 no routing service involved.
 
 A 425 MB Portugal extract compiles to a 38 MB bundle. A city route downloads
-5 MB of it and takes about 200 ms end to end. The browser build is 18 kB
+4.3 MB of it and takes about 270 ms end to end. The browser build is 28 kB
 gzipped and pulls in no Node built-ins.
+
+## What a route here does and does not mean
+
+A route is a path over roads that the compiled OpenStreetMap data **does not
+say are forbidden** to the chosen vehicle. That is weaker than a statement
+that the route is legal, or that the vehicle will physically fit, and the gap
+matters most for a lorry.
+
+Three kinds of rule are read and obeyed: tags on the way, such as access,
+direction and signed limits; turn restriction relations; and barriers on
+nodes. Everything below is **not read at all**, and a road governed only by
+one of them is treated as open:
+
+- **Time-dependent access.** `access:conditional`, `restriction:conditional`,
+  `hgv:conditional` and every other time-of-day or day-of-week rule. A street
+  closed to lorries overnight, a bus lane that is shared outside peak hours,
+  a market square pedestrianised on Sundays — all appear permanently open.
+- **Seasonal and weather rules.** Winter closures, snow-chain requirements,
+  flood gates.
+- **Temporary closures.** Roadworks, events, landslides. Nothing in a compiled
+  bundle changes after the compile, so a bundle is as current as the extract
+  it was built from and no more.
+- **Legal limits not expressed on the way.** National or urban default speed
+  limits, lorry bans covering a zone rather than a road, designated freight
+  routes, low-emission zones, tolls, permits.
+- **Axle load, hazardous goods and trailer rules.** `maxaxleload`, `hazmat`
+  and trailer-specific access are not read.
+- **An untagged limit.** `maxheight` is tagged on a minority of bridges
+  worldwide. Absence of a tag is not a measurement, and a road stating no
+  limit is treated as passable by any vehicle.
+
+For a lorry this means a route may pass under a bridge too low for it, over a
+structure too weak for it, or along a street it is banned from at the hour you
+travel. **Do not use this engine as the sole basis for dispatching a heavy
+vehicle.** Anything safety-critical needs a surveyed freight dataset and a
+routing engine that reads conditional restrictions.
+
+The compiler reports what it understood. `turnRestrictionsRead` against
+`turnRestrictionsSkipped`, and `barriersRead`, in `<output>.json` tell you how
+much of a region's restriction data was used.
 
 ## Install
 
@@ -183,9 +223,12 @@ North American extract say so once, knowingly, instead of the library guessing
 from the bounding box. A truck does not change shape when it crosses a border.
 
 > **A truck route here is a route over roads not known to forbid the vehicle,
-> which is weaker than a guarantee of legality.** `maxheight` is tagged on a
-> minority of bridges worldwide, and an untagged road is treated as open.
-> Anything safety-critical needs a surveyed freight dataset.
+> which is weaker than a guarantee of legality or of physical fit.**
+> `maxheight` is tagged on a minority of bridges worldwide and an untagged
+> road is treated as open; time-dependent lorry bans, zone restrictions, axle
+> load and hazardous goods rules are not read at all. See
+> [What a route here does and does not mean](#what-a-route-here-does-and-does-not-mean)
+> before relying on one of these routes for a heavy vehicle.
 
 ## Turn restrictions
 
@@ -567,7 +610,9 @@ What the bundled profiles read, and what they deliberately do not.
 | Alternative routes | Not in 0.2.0. `routeAlternatives` is planned for 0.3.0. |
 | Untagged limits | A road stating no `maxheight` or `maxweight` is treated as open to any lorry. Absence of a tag is not a measurement. |
 | Axle load, trailer and hazmat rules | `maxaxleload`, `hazmat` and trailer-specific access are not read. |
-| Conditional restrictions | `restriction:conditional`, `access:conditional` and time-of-day rules are ignored, so a time-limited restriction is treated as absent. |
+| Conditional restrictions | `restriction:conditional`, `access:conditional`, `hgv:conditional` and every time-of-day, day-of-week or seasonal rule are ignored, so a time-limited restriction is treated as absent. See [What a route here does and does not mean](#what-a-route-here-does-and-does-not-mean). |
+| Temporary closures | Roadworks, events and incidents are not modelled. A bundle is as current as the extract it was compiled from. |
+| Zone-level rules | Lorry bans, low-emission zones, permit areas and tolls that apply to an area rather than to a way are not read. |
 | `via` ways longer than four edges | Skipped rather than approximated, and counted as `turnRestrictionsSkipped` in the compile report. |
 | Restrictions spanning a tile boundary | Dropped for tiles that do not hold every edge of the run, rather than enforced in a shortened form. |
 | Turn costs and traffic signals | Not modelled; a turn costs nothing beyond the roads it joins. |

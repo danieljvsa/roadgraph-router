@@ -101,6 +101,17 @@ ship too, in a bundle of their own. Alternative routes moved to 0.3.0.
 - A truck bundle written in the single-chunk layout, which has nowhere to keep
   limits, is refused rather than routed with the dimensions silently ignored.
 
+### Documentation
+
+- **The README now states plainly what a route does not guarantee.** A route
+  is a path over roads the data does not say are forbidden, which is weaker
+  than legal or physical suitability. Time-dependent access, seasonal and
+  weather rules, temporary closures, zone-level lorry bans and low-emission
+  zones, axle load and hazardous goods rules, and untagged limits are all
+  listed as unread, with the consequence for a heavy vehicle said directly:
+  a route may pass under a bridge too low for it or along a street it is
+  banned from at the hour you travel.
+
 ### Known limitations
 
 - An active-travel bundle at country scale cannot be compiled with small
@@ -148,6 +159,17 @@ package does rather than how it changed.
   behind a fixed directory, so a route downloads only the tiles it needs.
 - **Formats.** Reads EFRT v1 and EFR2 v2 through v6; writes EFR2 v6 by default
   and the v2-v5 layout on request.
+
+### Documentation
+
+- **The README now states plainly what a route does not guarantee.** A route
+  is a path over roads the data does not say are forbidden, which is weaker
+  than legal or physical suitability. Time-dependent access, seasonal and
+  weather rules, temporary closures, zone-level lorry bans and low-emission
+  zones, axle load and hazardous goods rules, and untagged limits are all
+  listed as unread, with the consequence for a heavy vehicle said directly:
+  a route may pass under a bridge too low for it or along a street it is
+  banned from at the hour you travel.
 
 ### Known limitations
 
