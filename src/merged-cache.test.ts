@@ -50,6 +50,31 @@ describe("the stitched-corridor cache", () => {
     expect(reversedPair).toBe(both);
   });
 
+  it("keeps one corridor per vehicle a bundle offers", async () => {
+    const { encodeProfiledRoadGraphBundle } = await import("./bundle");
+    const { ProfileId } = await import("./routing-profile");
+    const graph = compactGraph(buildGraph({
+      nodes: { A: [41.0, -8.04], B: [41.0, -8.02], C: [41.0, -8.0] },
+      roads: ["A-B", "B-C"],
+    }));
+    const columns = (profileId: number, maxSpeedKph: number) => ({
+      profileId, maxSpeedKph, edgeDurationScale: graph.edgeDurationScale ?? 1,
+      edgeDurationsSeconds: graph.edgeDurationsSeconds as Uint16Array,
+    });
+    const file = await encodeProfiledRoadGraphBundle([
+      { id: 1, bounds: { minLat: 40.99, minLng: -8.05, maxLat: 41.01, maxLng: -8.019 }, graph, profiles: [columns(ProfileId.car, 150), columns(ProfileId.truck, 90), columns(ProfileId.motorcycle, 150)] },
+      { id: 2, bounds: { minLat: 40.99, minLng: -8.021, maxLat: 41.01, maxLng: -7.99 }, graph, profiles: [columns(ProfileId.car, 150), columns(ProfileId.truck, 90), columns(ProfileId.motorcycle, 150)] },
+    ], { compression: "none" });
+    const bundle = await openRoadGraphBundle("https://example.test/p.efrb", rangeFetcher(file).fetcher);
+
+    // Visiting every vehicle and coming back must not have discarded the
+    // first one's stitching, or switching would re-stitch the corridor each
+    // time it is used.
+    const first = await bundle.loadTiles(bundle.tiles, ProfileId.car);
+    for (const id of [ProfileId.truck, ProfileId.motorcycle]) await bundle.loadTiles(bundle.tiles, id);
+    expect(await bundle.loadTiles(bundle.tiles, ProfileId.car)).toBe(first);
+  });
+
   it("keeps the cached corridor usable for routing", async () => {
     const bundle = await openRoadGraphBundle("https://example.test/b.efrb", rangeFetcher(twoTileBundle()).fetcher);
     const graph = await bundle.loadTiles(bundle.tiles);

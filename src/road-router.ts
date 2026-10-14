@@ -66,13 +66,14 @@ function haversineMeters(a: Coordinate, b: Coordinate) {
 export class RoadRouter {
   private constructor(private readonly graph?: RoadGraph, private readonly loader?: RouteLoader, private readonly options: RoadRouterOptions = {}, private readonly profileId?: number, private readonly bundleVehicle?: string) {
     const profile = getRoutingProfileById(profileId ?? 0);
-    if (options.vehicle !== undefined && options.vehicle !== null && profile && !profile.usesPhysicalLimits) {
-      // Accepting dimensions a bundle cannot act on would look like they were
-      // applied. A car graph holds no limits to apply them against.
-      throw new Error(`The "${profile.name}" profile does not use vehicle dimensions; only a profile that stores physical limits does.`);
-    }
-    // Caller first, then whatever the bundle was compiled to suggest, then
-    // the library's own default. Each layer is visible rather than guessed at.
+    // Caller first, then whatever the bundle was compiled to suggest, then the
+    // library's own default. Each layer is visible rather than guessed at.
+    //
+    // Dimensions are carried past the vehicles that cannot act on them, which
+    // is what lets a reader move from a lorry to a car and back: they wait,
+    // unused, and apply again on the way back. Pairing them with a vehicle
+    // that cannot use them is refused in open(), where the caller made the
+    // pairing, rather than here, where carrying them is the point.
     this.vehicle = profile?.usesPhysicalLimits && options.vehicle !== null
       ? resolveVehicle(options.vehicle ?? undefined, bundleVehicle ?? DEFAULT_VEHICLE_PRESET)
       : undefined;
@@ -85,10 +86,28 @@ export class RoadRouter {
     return new RoadRouter(graph);
   }
 
+  /**
+   * Asking for dimensions a profile cannot act on is a mistake worth saying
+   * out loud: accepting them silently would look like they had been applied.
+   * It is checked where the caller made the pairing, not when switching
+   * profiles, where carrying them over is deliberate.
+   */
+  private static assertVehicleApplies(profileId: number, options: RoadRouterOptions) {
+    if (options.vehicle === undefined || options.vehicle === null) return;
+    const profile = getRoutingProfileById(profileId);
+    if (profile && !profile.usesPhysicalLimits) {
+      throw new Error(`The "${profile.name}" profile does not use vehicle dimensions; only a profile that stores physical limits does.`);
+    }
+  }
+
   static async open(source: string | RoadGraph, fetcher?: FetchLike, options: RoadRouterOptions = {}) {
-    if (typeof source !== "string") return RoadRouter.fromGraph(source);
+    if (typeof source !== "string") {
+      RoadRouter.assertVehicleApplies(source.profileId ?? 0, options);
+      return new RoadRouter(source, undefined, options, source.profileId);
+    }
     if (source.endsWith(".efrb")) {
       const bundle = await openRoadGraphBundle(source, fetcher, { mergedCacheSize: options.mergedCacheSize, profile: options.profile });
+      RoadRouter.assertVehicleApplies(bundle.profileId, options);
       return new RoadRouter(undefined, bundle, options, bundle.profileId, bundle.defaultVehicle);
     }
     return new RoadRouter(undefined, await createRouteGraphLoader(source, fetcher), options);

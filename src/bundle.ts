@@ -24,7 +24,10 @@ const COORDINATE_SCALE = 10_000_000;
  * Two, because answering one route stitches two corridors: the first guess,
  * and the wider one the confirmation pass asks for. Holding only the second
  * makes the next identical route miss on the first, and measurements on a
- * country-sized bundle show no further gain past two.
+ * country-sized bundle show no further gain past two for one vehicle. A
+ * multi-vehicle bundle raises it to the number of vehicles it holds, since
+ * each keeps its own corridor and switching between them would otherwise
+ * discard the stitching every time.
  */
 const DEFAULT_MERGED_CACHE_SIZE = 2;
 
@@ -422,7 +425,10 @@ export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetc
   };
   // Decoded chunks are already cached, but stitching them together is the
   // larger cost and was being repeated for every route over the same corridor.
-  const mergedLimit = Math.max(0, Math.trunc(options.mergedCacheSize ?? DEFAULT_MERGED_CACHE_SIZE));
+  // One corridor per vehicle the bundle offers, so moving between them does
+  // not throw away the stitching each time; never fewer than the two an
+  // ordinary route needs for its own widening.
+  const mergedLimit = Math.max(0, Math.trunc(options.mergedCacheSize ?? Math.max(DEFAULT_MERGED_CACHE_SIZE, available.length)));
   const merged = new Map<string, Promise<RoadGraph>>();
   const loadTiles = async (routeTiles: BundleTile[], profileId = chosenId) => {
     if (!routeTiles.length) throw new RouterError("ROUTE_ACROSS_TILES", "No local graph tiles cover the route corridor.");
