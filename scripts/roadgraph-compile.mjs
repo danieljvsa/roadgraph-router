@@ -73,6 +73,8 @@ function createTileGraph(tile) {
     edgeWay: new Column(Float64Array), edgeShapeStart: new Column(Uint32Array),
     shapeLat: new Column(Int32Array), shapeLon: new Column(Int32Array),
     wayEdges: new Map(), restrictions: [], runs: [],
+    // Sparse: almost no road states a height or a weight.
+    edgeLimits: new Map(),
   };
 }
 
@@ -105,7 +107,8 @@ function scaleFor(values) { let greatest = 0; for (const value of values) greate
  * Orders a tile's edges by source node and hands the result to the library
  * encoder, so the compiler and the runtime cannot drift apart on the layout.
  */
-function encodeEfr2(graph, encodeCompactGraph, profile) {
+function encodeEfr2(graph, library, profile) {
+  const { encodeCompactGraph } = library;
   const nodes = graph.nodeLat.length, edges = graph.edgeFrom.length;
   const distances = graph.edgeDistance.view(), durations = graph.edgeDuration.view();
   const distanceScale = scaleFor(distances), durationScale = scaleFor(durations);
@@ -140,7 +143,7 @@ function encodeEfr2(graph, encodeCompactGraph, profile) {
   const runs = [...new Set(graph.runs.map((run) => run.map((edge) => placement[edge]).join(",")))].map((run) => run.split(",").map(Number)).filter((run) => run.length >= 3).sort((a, b) => a[0] - b[0] || a.length - b.length || a[1] - b[1]);
   const runOffsets = new Uint32Array(runs.length + 1);
   for (let i = 0; i < runs.length; i += 1) runOffsets[i + 1] = runOffsets[i] + runs[i].length;
-  return encodeCompactGraph({
+  const assembled = {
     nodeLatitudes: graph.nodeLat.view(), nodeLongitudes: graph.nodeLon.view(),
     edgeOffsets: offsets, edgeTargets: targets,
     edgeDistancesMeters: packedDistances, edgeDurationsSeconds: packedDurations,
@@ -151,21 +154,40 @@ function encodeEfr2(graph, encodeCompactGraph, profile) {
     edgeShapeOffsets: shapeOffsets, edgeShapeLatitudes: shapeLat, edgeShapeLongitudes: shapeLon,
     ...(banned.length ? { turnRestrictionFromEdges: Uint32Array.from(banned, (pair) => pair[0]), turnRestrictionToEdges: Uint32Array.from(banned, (pair) => pair[1]) } : {}),
     ...(runs.length ? { turnRestrictionSequenceOffsets: runOffsets, turnRestrictionSequenceEdges: Uint32Array.from(runs.flat()) } : {}),
-  });
+  };
+  if (!profile.usesPhysicalLimits) return { shared: encodeCompactGraph(assembled), profiles: [], limitedEdges: 0 };
+
+  // Physical limits only fit in the split layout, so a vehicle whose routes
+  // depend on its size is always written as a shared chunk plus its own.
+  const entries = [];
+  for (const [edge, limits] of graph.edgeLimits) entries.push({ edge: placement[edge], limits });
+  const edgeLimits = library.packEdgeLimits(entries);
+  return {
+    shared: library.encodeSharedGraph(assembled),
+    limitedEdges: edgeLimits?.edges.length ?? 0,
+    profiles: [library.encodeProfileChunk({
+      profileId: profile.id,
+      maxSpeedKph: profile.maxSpeedKph,
+      edgeDurationScale: durationScale,
+      edgeDurationsSeconds: packedDurations,
+      edgeLimits,
+    })],
+  };
 }
 
 /** Writes the fixed-size directory, then streams each chunk straight from the
  *  spill file. Neither the chunk list nor the finished bundle is ever held in
  *  memory, so output size no longer bounds how large a region can be built. */
-async function writeBundle(output, chunks, compression, spillPath, profile) {
+async function writeBundle(output, chunks, compression, spillPath, profile, split) {
   const directoryBytes = chunks.length * DIRECTORY;
   const head = Buffer.alloc(HEADER + directoryBytes);
-  head.writeUInt32LE(EFRB_MAGIC, 0); head.writeUInt16LE(1, 4); head.writeUInt16LE(HEADER, 6);
+  head.writeUInt32LE(EFRB_MAGIC, 0); head.writeUInt16LE(split ? 2 : 1, 4); head.writeUInt16LE(HEADER, 6);
   head.writeUInt32LE(chunks.length, 8); head.writeUInt32LE(HEADER, 12); head.writeUInt32LE(directoryBytes, 16);
   // The vehicle, in the header as well as in every chunk, so a reader knows it
   // before downloading a tile and can size its tile budget accordingly.
   head.writeUInt8(profile.id, 20); head.writeUInt16LE(Math.round(profile.maxSpeedKph), 22);
-  head.writeUInt32LE(1 << (profile.id - 1), 24); head.writeUInt32LE(chunks.length, 28);
+  head.writeUInt32LE(1 << (profile.id - 1), 24);
+  head.writeUInt32LE(split ? chunks.length / 2 : chunks.length, 28);
   let offset = HEADER + directoryBytes;
   for (let i = 0; i < chunks.length; i += 1) {
     const chunk = chunks[i], at = HEADER + i * DIRECTORY, b = chunk.tile.bounds;
@@ -174,6 +196,7 @@ async function writeBundle(output, chunks, compression, spillPath, profile) {
     head.writeInt32LE(fixed(b.maxLat), at + 12); head.writeInt32LE(fixed(b.maxLon), at + 16);
     head.writeUInt32LE(offset, at + 20); head.writeUInt32LE(chunk.byteLength, at + 24);
     head.writeUInt32LE(chunk.rawBytes, at + 28); head.writeUInt16LE(compression === "gzip" ? 1 : 0, at + 32);
+    head.writeUInt8(chunk.profileId ?? 0, at + 34);
     offset += chunk.byteLength;
   }
   await mkdir(dirname(output), { recursive: true });
@@ -251,7 +274,13 @@ async function firstPass(file, roadFile, limitBytes, profile) {
     ways += 1;
     for (const id of refs) { if (required.has(id)) keeperNodes.add(id); else required.add(id); }
     keeperNodes.add(refs[0]); keeperNodes.add(refs[refs.length - 1]);
-    await write(stream, { id: entity.id, refs, forward: traversal.forward, reverse: traversal.backward, forwardSpeed: traversal.forwardSpeedKph, reverseSpeed: traversal.backwardSpeedKph });
+    await write(stream, {
+      id: entity.id, refs,
+      forward: traversal.forward, reverse: traversal.backward,
+      forwardSpeed: traversal.forwardSpeedKph, reverseSpeed: traversal.backwardSpeedKph,
+      ...(traversal.forwardLimits ? { forwardLimits: traversal.forwardLimits } : {}),
+      ...(traversal.backwardLimits ? { reverseLimits: traversal.backwardLimits } : {}),
+    });
   }
   await new Promise((resolve, reject) => stream.end((error) => error ? reject(error) : resolve()));
   if (!Number.isFinite(bounds.minLat)) throw new Error("The input contains no OSM nodes.");
@@ -362,7 +391,7 @@ async function build(roadFile, coordinates, topology, layout, bounds, tolerance,
     return index;
   };
   let routingEdges = 0;
-  const addSegment = (wayId, ids, points, velocity) => {
+  const addSegment = (wayId, ids, points, velocity, limits) => {
     let distance = 0; for (let i = 1; i < points.length; i += 1) distance += metres(points[i - 1], points[i]);
     if (distance < .2) return;
     routingEdges += 1;
@@ -375,6 +404,7 @@ async function build(roadFile, coordinates, topology, layout, bounds, tolerance,
       graph.edgeDistance.push(distance);
       graph.edgeDuration.push(distance / (velocity * (1000 / 3600)));
       graph.edgeWay.push(tracked ? wayId : 0);
+      if (limits) graph.edgeLimits.set(index, limits);
       graph.edgeShapeStart.push(graph.shapeLat.length);
       for (const coordinate of shape) { graph.shapeLat.push(fixed(coordinate.lat)); graph.shapeLon.push(fixed(coordinate.lon)); }
       // Only ways named by a restriction need a reverse index, which keeps the
@@ -394,8 +424,8 @@ async function build(roadFile, coordinates, topology, layout, bounds, tolerance,
       if (!keep(way.refs[i], points[i], i, way.refs.length - 1)) continue;
       const ids = way.refs.slice(start, i + 1), segment = points.slice(start, i + 1);
       if (inside(segment[0], bounds)) {
-        if (way.forward) addSegment(way.id, ids, segment, way.forwardSpeed);
-        if (way.reverse) addSegment(way.id, ids.slice().reverse(), segment.slice().reverse(), way.reverseSpeed);
+        if (way.forward) addSegment(way.id, ids, segment, way.forwardSpeed, way.forwardLimits);
+        if (way.reverse) addSegment(way.id, ids.slice().reverse(), segment.slice().reverse(), way.reverseSpeed, way.reverseLimits);
       }
       start = i;
     }
@@ -455,24 +485,32 @@ else {
     const built = await build(resolve(workspace, "ways.ndjson"), coordinates, first, layout, bounds, tolerance, paddingKm, tileSizeKm, limitBytes); const storedNodes = coordinates.storedNodes; coordinates.close();
     // Encode, compress and spill each tile in turn, releasing it immediately,
     // so peak memory tracks the largest single tile rather than the region.
-    const { encodeCompactGraph } = await import(new URL("../dist/index.js", import.meta.url).href);
+    const library = await import(new URL("../dist/index.js", import.meta.url).href);
     const spillPath = resolve(workspace, "chunks.bin"), spill = createWriteStream(spillPath), chunks = [];
+    let limitedEdges = 0;
     for (let index = 0; index < built.graphs.length; index += 1) {
       const graph = built.graphs[index];
-      const raw = new Uint8Array(encodeEfr2(graph, encodeCompactGraph, profile));
-      const data = compression === "gzip" ? gzipSync(raw, { level: constants.Z_BEST_COMPRESSION }) : raw;
-      chunks.push({ tile: graph.tile, byteLength: data.byteLength, rawBytes: raw.byteLength });
-      if (!spill.write(data)) await new Promise((done) => spill.once("drain", done));
+      const encoded = encodeEfr2(graph, library, profile);
+      // The shared half first, then each vehicle's: the reader needs a tile's
+      // shared row before the rows that depend on it.
+      limitedEdges += encoded.limitedEdges ?? 0;
+      for (const [profileId, buffer] of [[0, encoded.shared], ...encoded.profiles.map((chunk) => [profile.id, chunk])]) {
+        const raw = new Uint8Array(buffer);
+        const data = compression === "gzip" ? gzipSync(raw, { level: constants.Z_BEST_COMPRESSION }) : raw;
+        chunks.push({ tile: graph.tile, profileId, byteLength: data.byteLength, rawBytes: raw.byteLength });
+        if (!spill.write(data)) await new Promise((done) => spill.once("drain", done));
+      }
       built.graphs[index] = null;
       memoryGuard(limitBytes, "writing compressed tiles", 1000);
     }
     await new Promise((done, fail) => spill.end((error) => error ? fail(error) : done()));
-    const bundleBytes = await writeBundle(output, chunks, compression, spillPath, profile);
-    await verifyBundle(output, chunks.length);
+    const split = Boolean(profile.usesPhysicalLimits);
+    const bundleBytes = await writeBundle(output, chunks, compression, spillPath, profile, split);
+    await verifyBundle(output, built.graphs.length);
     const nodesBefore = storedNodes, nodesAfter = built.routingNodes, edges = built.routingEdges, rawBytes = chunks.reduce((sum, chunk) => sum + chunk.rawBytes, 0);
-    const report = { formatVersion: 1, input: file, inputBytes: source.size, profile: profile.name, compression: `${compression}-per-tile`, tileSizeKm, paddingKm, pbfPasses: 2, tiles: chunks.length, relevantOsmWays: first.ways, relevantOsmNodes, relevantOsmNodesExact: false, routingNodesBeforeSimplification: nodesBefore, routingNodesAfterSimplification: nodesAfter, reductionPercent: Number((100 * (1 - nodesAfter / Math.max(1, nodesBefore))).toFixed(2)), routingEdges: edges, turnRestrictionsRead: first.restrictions.length, turnRestrictionsSkipped: first.skippedRestrictions, bannedTurnPairs: built.bannedTurns, bannedTurnRuns: built.bannedRuns, uncompressedGraphBytes: rawBytes, bundleBytes, compressionRatio: Number((bundleBytes / Math.max(1, rawBytes)).toFixed(4)), peakRssBytes: Math.max(observedPeakRss, process.memoryUsage().rss), elapsedMilliseconds: Math.round(performance.now() - started) };
+    const report = { formatVersion: 1, input: file, inputBytes: source.size, profile: profile.name, compression: `${compression}-per-tile`, tileSizeKm, paddingKm, pbfPasses: 2, tiles: built.graphs.length, relevantOsmWays: first.ways, relevantOsmNodes, relevantOsmNodesExact: false, routingNodesBeforeSimplification: nodesBefore, routingNodesAfterSimplification: nodesAfter, reductionPercent: Number((100 * (1 - nodesAfter / Math.max(1, nodesBefore))).toFixed(2)), routingEdges: edges, turnRestrictionsRead: first.restrictions.length, turnRestrictionsSkipped: first.skippedRestrictions, bannedTurnPairs: built.bannedTurns, bannedTurnRuns: built.bannedRuns, layout: split ? "shared-plus-profile" : "single-chunk", edgesWithPhysicalLimits: limitedEdges, uncompressedGraphBytes: rawBytes, bundleBytes, compressionRatio: Number((bundleBytes / Math.max(1, rawBytes)).toFixed(4)), peakRssBytes: Math.max(observedPeakRss, process.memoryUsage().rss), elapsedMilliseconds: Math.round(performance.now() - started) };
     await writeFile(`${output}.json`, `${JSON.stringify(report, null, 2)}\n`);
-    console.table({ input_mb: (source.size / 1e6).toFixed(1), pbf_passes: report.pbfPasses, relevant_ways: first.ways.toLocaleString(), relevant_nodes: relevantOsmNodes.toLocaleString(), nodes_before: nodesBefore.toLocaleString(), nodes_after: nodesAfter.toLocaleString(), reduction_percent: report.reductionPercent, routing_edges: edges.toLocaleString(), turn_restrictions: first.restrictions.length.toLocaleString(), banned_turn_pairs: built.bannedTurns.toLocaleString(), banned_turn_runs: built.bannedRuns.toLocaleString(), tiles: chunks.length, raw_mb: (rawBytes / 1e6).toFixed(1), efrb_mb: (bundleBytes / 1e6).toFixed(1), compression_ratio: report.compressionRatio, peak_rss_mb: (report.peakRssBytes / 1e6).toFixed(1), elapsed_seconds: (report.elapsedMilliseconds / 1000).toFixed(1) });
+    console.table({ input_mb: (source.size / 1e6).toFixed(1), pbf_passes: report.pbfPasses, relevant_ways: first.ways.toLocaleString(), relevant_nodes: relevantOsmNodes.toLocaleString(), nodes_before: nodesBefore.toLocaleString(), nodes_after: nodesAfter.toLocaleString(), reduction_percent: report.reductionPercent, routing_edges: edges.toLocaleString(), turn_restrictions: first.restrictions.length.toLocaleString(), banned_turn_pairs: built.bannedTurns.toLocaleString(), banned_turn_runs: built.bannedRuns.toLocaleString(), tiles: built.graphs.length, raw_mb: (rawBytes / 1e6).toFixed(1), efrb_mb: (bundleBytes / 1e6).toFixed(1), compression_ratio: report.compressionRatio, peak_rss_mb: (report.peakRssBytes / 1e6).toFixed(1), elapsed_seconds: (report.elapsedMilliseconds / 1000).toFixed(1) });
   } catch (error) {
     // A truncated or non-PBF file surfaces as a parser or stream error deep in
     // the pipeline; report it as a problem with the input, not as a crash.

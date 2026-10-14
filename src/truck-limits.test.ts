@@ -176,3 +176,47 @@ describe("the vehicle option on a router", () => {
       .rejects.toThrow(/does not use vehicle dimensions/i);
   });
 });
+
+describe("merging tiles that carry limits", () => {
+  it("keeps them, rebased onto the merged edge numbering", async () => {
+    const { mergeRoadGraphs } = await import("./merge");
+    const built = network();
+    const graph = compactGraph(built);
+    const chunk = truckChunk(graph, built.nodeNames, "B-C", { heightMeters: 3.5 });
+    const tile = combineProfiledGraph(decodeSharedGraph(encodeSharedGraph(graph)), decodeProfileChunk(encodeProfileChunk(chunk)));
+    const merged = mergeRoadGraphs([tile, tile]);
+    expect(merged.edgeLimits?.edges.length).toBe(2);
+    // A corridor that lost them would route a lorry under a bridge it does
+    // not fit through, which is the whole failure this guards against.
+    expect(countBlocked(merged, resolveVehicle({ heightMeters: 4.0 }))).toBe(2);
+    expect(pathOf(built, route(merged, { lat: 41.0, lng: -8.0 }, { lat: 41.0, lng: -7.96 }, "fastest", { vehicle: resolveVehicle({ heightMeters: 4.0 }) }).nodeIds)).toBe("A>D>C");
+  });
+
+  it("keeps the stricter limit when two tiles disagree", async () => {
+    const { mergeRoadGraphs } = await import("./merge");
+    const built = network();
+    const graph = compactGraph(built);
+    const low = combineProfiledGraph(decodeSharedGraph(encodeSharedGraph(graph)), decodeProfileChunk(encodeProfileChunk(truckChunk(graph, built.nodeNames, "B-C", { heightMeters: 3.0 }))));
+    const high = combineProfiledGraph(decodeSharedGraph(encodeSharedGraph(graph)), decodeProfileChunk(encodeProfileChunk(truckChunk(graph, built.nodeNames, "B-C", { heightMeters: 4.5 }))));
+    const merged = mergeRoadGraphs([high, low]);
+    expect([...merged.edgeLimits!.heightDecimetres]).toEqual([30, 30]);
+  });
+
+  it("keeps a road one tile closes closed", async () => {
+    const { mergeRoadGraphs } = await import("./merge");
+    const { accessMaskFor } = await import("./access");
+    const built = network();
+    const graph = compactGraph(built);
+    const columns = (edgeAccess?: Uint8Array) => combineProfiledGraph(
+      decodeSharedGraph(encodeSharedGraph(graph)),
+      decodeProfileChunk(encodeProfileChunk({
+        profileId: ProfileId.truck, maxSpeedKph: 90, edgeDurationScale: graph.edgeDurationScale ?? 1,
+        edgeDurationsSeconds: graph.edgeDurationsSeconds as Uint16Array, edgeAccess,
+      })),
+    );
+    const closed = accessMaskFor(graph.edgeTargets.length, (edge) => edge !== 0);
+    const merged = mergeRoadGraphs([columns(), columns(closed)]);
+    expect(merged.edgeAccess).toBeDefined();
+    expect(countBlocked(merged, resolveVehicle("articulated"))).toBe(1);
+  });
+});

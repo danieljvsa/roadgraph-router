@@ -1,6 +1,8 @@
 import type { RoadGraph } from "./types";
 import { withSpatialIndex } from "./spatial-index";
 import { packTurnRestrictions, packTurnSequences } from "./turn-restrictions";
+import { accessMaskFor, edgeAllowed } from "./access";
+import { packEdgeLimits, fromDecimetres, fromHalfTonnes } from "./limits";
 
 const COORDINATE_SCALE = 10_000_000;
 /** Two edges count as the same road when their lengths agree to the centimetre. */
@@ -195,16 +197,53 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
     }
   }
 
-  // 5. Rebase every tile's restrictions onto the merged edge numbering.
+  // 5. Rebase every tile's restrictions, access and limits onto the merged
+  //    edge numbering. All three are written against edge numbers that the
+  //    merge has just changed, and a corridor that lost them would route a
+  //    lorry under a bridge it does not fit through.
   const bannedPairs: [number, number][] = [];
   const bannedSequences: number[][] = [];
+  const hasAccess = graphs.some((graph) => graph.edgeAccess);
+  const mergedAccess = hasAccess ? accessMaskFor(edgeCount, () => true) : undefined;
+  const limitRows = new Map<number, { heightMeters?: number; widthMeters?: number; lengthMeters?: number; weightTonnes?: number }>();
   for (let index = 0; index < graphs.length; index += 1) {
     const graph = graphs[index];
     const edgeMap = edgeMaps[index];
     const rebase = (edge: number) => slotToEdge[edgeMap[edge]];
+
+    if (mergedAccess) {
+      // A road one tile says this vehicle may not use is one it may not use,
+      // whichever tile the merge happened to take the edge from.
+      for (let edge = 0; edge < graph.edgeTargets.length; edge += 1) {
+        if (edgeAllowed(graph.edgeAccess, edge)) continue;
+        const merged = rebase(edge);
+        if (merged >= 0) mergedAccess[merged >> 3] &= ~(1 << (merged & 7));
+      }
+    }
+
+    const limits = graph.edgeLimits;
+    if (limits) {
+      for (let row = 0; row < limits.edges.length; row += 1) {
+        const merged = rebase(limits.edges[row]);
+        if (merged < 0) continue;
+        const existing = limitRows.get(merged) ?? {};
+        // Two tiles describing the same road must agree; where they do not,
+        // the stricter limit is the safe one to keep.
+        const stricter = (left: number | undefined, right: number) => (left === undefined ? right : Math.min(left, right));
+        if (limits.heightDecimetres[row]) existing.heightMeters = stricter(existing.heightMeters, fromDecimetres(limits.heightDecimetres[row]));
+        if (limits.widthDecimetres[row]) existing.widthMeters = stricter(existing.widthMeters, fromDecimetres(limits.widthDecimetres[row]));
+        if (limits.lengthDecimetres[row]) existing.lengthMeters = stricter(existing.lengthMeters, fromDecimetres(limits.lengthDecimetres[row]));
+        if (limits.weightHalfTonnes[row]) existing.weightTonnes = stricter(existing.weightTonnes, fromHalfTonnes(limits.weightHalfTonnes[row]));
+        limitRows.set(merged, existing);
+      }
+    }
+
     const { turnRestrictionFromEdges: fromEdges, turnRestrictionToEdges: toEdges } = graph;
     if (fromEdges && toEdges) {
       for (let pair = 0; pair < fromEdges.length; pair += 1) {
+        // A restriction this vehicle is excepted from is dropped here rather
+        // than carried as a mask, so the merged graph needs no mask at all.
+        if (!edgeAllowed(graph.restrictionMask, pair)) continue;
         const fromEdge = rebase(fromEdges[pair]);
         const toEdge = rebase(toEdges[pair]);
         if (fromEdge >= 0 && toEdge >= 0) bannedPairs.push([fromEdge, toEdge]);
@@ -213,7 +252,9 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
     const offsets = graph.turnRestrictionSequenceOffsets;
     const sequenceEdges = graph.turnRestrictionSequenceEdges;
     if (!offsets || !sequenceEdges) continue;
+    const pairCount = fromEdges?.length ?? 0;
     for (let sequence = 0; sequence + 1 < offsets.length; sequence += 1) {
+      if (!edgeAllowed(graph.restrictionMask, pairCount + sequence)) continue;
       const rebased: number[] = [];
       for (let at = offsets[sequence]; at < offsets[sequence + 1]; at += 1) rebased.push(rebase(sequenceEdges[at]));
       // A run that lost an edge to clipping cannot be enforced, and keeping a
@@ -221,6 +262,7 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
       if (rebased.every((edge) => edge >= 0)) bannedSequences.push(rebased);
     }
   }
+  const mergedLimits = packEdgeLimits([...limitRows].map(([edge, limits]) => ({ edge, limits })));
 
   return withSpatialIndex({
     nodeLatitudes: mergedLatitudes.slice(0, nodeCount),
@@ -232,6 +274,8 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
     edgeDurationsSeconds,
     ...(profileId ? { profileId } : {}),
     ...(graphs[0].maxSpeedKph ? { maxSpeedKph: graphs[0].maxSpeedKph } : {}),
+    ...(mergedAccess ? { edgeAccess: mergedAccess } : {}),
+    ...(mergedLimits ? { edgeLimits: mergedLimits } : {}),
     ...(pointCount ? { edgeShapeOffsets, edgeShapeLatitudes, edgeShapeLongitudes } : {}),
     ...(bannedPairs.length ? packTurnRestrictions(bannedPairs) : {}),
     ...(bannedSequences.length ? packTurnSequences(bannedSequences) : {}),
