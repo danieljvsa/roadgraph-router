@@ -14,6 +14,10 @@ ship too, in a bundle of their own. Alternative routes moved to 0.3.0.
 
 ### Added
 
+- **Coordinates in a shared chunk are written as differences**, which takes
+  about 6% off a multi-vehicle bundle and loses nothing: Portugal for walking
+  and cycling went from 102.3 MB to 96.1 MB. The single-chunk layout a
+  one-vehicle bundle uses is untouched, so those stay readable by 0.1.0.
 - **Barriers.** A gate, bollard or stile across a road is read from the node
   and becomes a ban on passing through it, which still lets you turn back the
   way you came. The same barrier stops different travellers differently: a

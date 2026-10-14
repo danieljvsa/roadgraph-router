@@ -94,6 +94,47 @@ describe("the shared and profile chunks", () => {
   });
 });
 
+describe("a shared chunk carrying a lot of geometry", () => {
+  /** One long road with many shape points: plenty of geometry, few shapes. */
+  const winding = () => {
+    const shape: [number, number][] = [];
+    for (let step = 1; step < 400; step += 1) shape.push([41 + step * 0.00002, -8 + step * 0.00003]);
+    return buildGraph({
+      nodes: { A: [41.0, -8.0], B: [41.008, -7.988] },
+      roads: ["A-B"],
+      shapes: { "A>B": shape, "B>A": [...shape].reverse() },
+    });
+  };
+
+  it("round trips, with the point stream read from the right section", () => {
+    // The shared layout has six sections where the single-chunk one has five.
+    // Reading the point stream by a fixed index finds the shape sizes instead,
+    // which is small here and makes the geometry look impossible.
+    const graph = compactGraph(winding());
+    const rebuilt = combineProfiledGraph(
+      decodeSharedGraph(encodeSharedGraph(graph)),
+      decodeProfileChunk(encodeProfileChunk({
+        profileId: ProfileId.car, maxSpeedKph: 150,
+        edgeDurationScale: graph.edgeDurationScale ?? 1,
+        edgeDurationsSeconds: graph.edgeDurationsSeconds as Uint16Array,
+      })),
+    );
+    expect(rebuilt.edgeShapeLatitudes?.length).toBe(graph.edgeShapeLatitudes?.length);
+    expect(rebuilt.edgeShapeLatitudes).toEqual(graph.edgeShapeLatitudes);
+    expect(rebuilt.nodeLatitudes).toEqual(graph.nodeLatitudes);
+  });
+
+  it("keeps coordinates exact through the difference coding", () => {
+    const graph = compactGraph(buildGraph({
+      nodes: { A: [41.1579, -8.6291], B: [38.7223, -9.1393], C: [-33.8688, 151.2093], D: [0, 0] },
+      roads: ["A-B", "B-C", "C-D"],
+    }));
+    const rebuilt = decodeSharedGraph(encodeSharedGraph(graph));
+    expect(rebuilt.nodeLatitudes).toEqual(graph.nodeLatitudes);
+    expect(rebuilt.nodeLongitudes).toEqual(graph.nodeLongitudes);
+  });
+});
+
 describe("the per-profile access mask", () => {
   const built = network();
   const graph = compactGraph(built);

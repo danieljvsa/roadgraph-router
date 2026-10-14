@@ -318,12 +318,28 @@ function encodePackedGraph(graph: RoadGraph, version: number = PACKED_COMPACT_VE
   const pairs = graph.turnRestrictionFromEdges?.length ?? 0;
   const runs = graph.turnRestrictionSequenceEdges?.length ? (graph.turnRestrictionSequenceOffsets?.length ?? 1) - 1 : 0;
   const runEdges = graph.turnRestrictionSequenceEdges?.length ?? 0;
-  const sections = [degrees, targets, shapeRefs, shapeSizes, shapePoints];
-  const variableBytes = sections.reduce((sum, section) => sum + section.byteLength, 0);
   const shared = version === SPLIT_COMPACT_VERSION;
-  // A shared chunk carries distances but not durations.
+
+  // Nodes are numbered with locality, so each sits close to the one before:
+  // writing the difference costs a few bytes where the coordinate itself
+  // costs eight. Only the shared chunk does this, because the single-chunk
+  // layout is the one older readers still open.
+  const coordinates = new VarintWriter(nodes * 4 + 16);
+  if (shared) {
+    let previous = 0;
+    for (let node = 0; node < nodes; node += 1) { coordinates.pushSigned(graph.nodeLatitudes[node] - previous); previous = graph.nodeLatitudes[node]; }
+    previous = 0;
+    for (let node = 0; node < nodes; node += 1) { coordinates.pushSigned(graph.nodeLongitudes[node] - previous); previous = graph.nodeLongitudes[node]; }
+  }
+
+  const sections = shared
+    ? [coordinates, degrees, targets, shapeRefs, shapeSizes, shapePoints]
+    : [degrees, targets, shapeRefs, shapeSizes, shapePoints];
+  const variableBytes = sections.reduce((sum, section) => sum + section.byteLength, 0);
+  // A shared chunk carries distances but not durations, and keeps its
+  // coordinates among the variable sections rather than as a fixed block.
   const weightBytes = edges * (shared ? 2 : 4);
-  const restrictionsAt = alignUp(PACKED_HEADER_BYTES + nodes * 8 + weightBytes + variableBytes);
+  const restrictionsAt = alignUp(PACKED_HEADER_BYTES + (shared ? 0 : nodes * 8) + weightBytes + variableBytes);
   const buffer = new ArrayBuffer(restrictionsAt + pairs * 8 + (runs ? (runs + 1) * 4 + runEdges * 4 : 0));
   const view = new DataView(buffer);
   view.setUint32(0, COMPACT_MAGIC, true);
@@ -342,12 +358,18 @@ function encodePackedGraph(graph: RoadGraph, version: number = PACKED_COMPACT_VE
   // Bytes 60-63 were spare in every v6 chunk written so far, and a chunk that
   // never set them reads back as zero — which is exactly "unspecified", so
   // existing bundles keep decoding as the car graphs they are.
-  view.setUint8(60, graph.profileId ?? 0);
-  view.setUint16(62, Math.round(graph.maxSpeedKph ?? 0), true);
+  if (!shared) {
+    // A shared chunk spends bytes 60-63 on its sixth section length and has
+    // no profile of its own to name; the profile chunk carries that.
+    view.setUint8(60, graph.profileId ?? 0);
+    view.setUint16(62, Math.round(graph.maxSpeedKph ?? 0), true);
+  }
 
   let offset = PACKED_HEADER_BYTES;
-  new Int32Array(buffer, offset, nodes).set(graph.nodeLatitudes); offset += nodes * 4;
-  new Int32Array(buffer, offset, nodes).set(graph.nodeLongitudes); offset += nodes * 4;
+  if (!shared) {
+    new Int32Array(buffer, offset, nodes).set(graph.nodeLatitudes); offset += nodes * 4;
+    new Int32Array(buffer, offset, nodes).set(graph.nodeLongitudes); offset += nodes * 4;
+  }
   new Uint16Array(buffer, offset, edges).set(graph.edgeDistancesMeters); offset += edges * 2;
   if (!shared) { new Uint16Array(buffer, offset, edges).set(graph.edgeDurationsSeconds); offset += edges * 2; }
   const bytes = new Uint8Array(buffer);
@@ -375,25 +397,31 @@ function decodePackedGraph(buffer: ArrayBuffer, shared = false): RoadGraph {
   const pairs = view.getUint32(28, true);
   const runs = view.getUint32(32, true);
   const runEdges = view.getUint32(36, true);
-  const lengths = Array.from({ length: 5 }, (_, index) => view.getUint32(40 + index * 4, true));
+  // A shared chunk has a sixth section — its coordinates — in the bytes a
+  // single-chunk graph spends on naming its profile.
+  const lengths = Array.from({ length: shared ? 6 : 5 }, (_, index) => view.getUint32(40 + index * 4, true));
   const variableBytes = lengths.reduce((sum, length) => sum + length, 0);
-  const restrictionsAt = alignUp(PACKED_HEADER_BYTES + nodes * 8 + edges * (shared ? 2 : 4) + variableBytes);
+  const restrictionsAt = alignUp(PACKED_HEADER_BYTES + (shared ? 0 : nodes * 8) + edges * (shared ? 2 : 4) + variableBytes);
   const expected = restrictionsAt + pairs * 8 + (runs ? (runs + 1) * 4 + runEdges * 4 : 0);
   if (!coordinateScale || !edgeDistanceScale || !edgeDurationScale || buffer.byteLength !== expected) throw new Error("Truncated compact routing graph");
   // Counts that do not take part in the length check above are bounded by what
   // the file could actually hold, so a corrupt header cannot ask for an
   // allocation far larger than the chunk itself.
   if (shapeCount > edges) throw new Error("Invalid compact routing graph: more shapes than edges.");
-  const profileId = view.getUint8(60);
-  const maxSpeedKph = view.getUint16(62, true);
+  const profileId = shared ? 0 : view.getUint8(60);
+  const maxSpeedKph = shared ? 0 : view.getUint16(62, true);
   // A profile this build does not know about would route with the wrong rules
   // rather than fail, so an unknown id is refused rather than ignored.
   if (profileId && !getRoutingProfileById(profileId)) throw new Error(`Routing graph was compiled for an unsupported profile (id ${profileId}).`);
   if (maxSpeedKph > MAX_PLAUSIBLE_SPEED_KPH) throw new Error("Invalid compact routing graph: implausible profile speed ceiling.");
 
   let offset = PACKED_HEADER_BYTES;
-  const nodeLatitudes = new Int32Array(buffer.slice(offset, offset += nodes * 4));
-  const nodeLongitudes = new Int32Array(buffer.slice(offset, offset += nodes * 4));
+  const nodeLatitudes = new Int32Array(nodes);
+  const nodeLongitudes = new Int32Array(nodes);
+  if (!shared) {
+    nodeLatitudes.set(new Int32Array(buffer.slice(offset, offset += nodes * 4)));
+    nodeLongitudes.set(new Int32Array(buffer.slice(offset, offset += nodes * 4)));
+  }
   const edgeDistancesMeters = new Uint16Array(buffer.slice(offset, offset += edges * 2));
   // A shared chunk has no duration column: that is the one per-edge value the
   // vehicle changes, and it lives in the profile chunk instead. The zeroes
@@ -403,6 +431,17 @@ function decodePackedGraph(buffer: ArrayBuffer, shared = false): RoadGraph {
   const starts: number[] = [];
   for (const length of lengths) { starts.push(offset); offset += length; }
   offset = restrictionsAt;
+
+  // The shared chunk's coordinates are the first of its sections, each node
+  // written as its distance from the one before.
+  if (shared) {
+    const reader = new VarintReader(bytes, starts[0]);
+    let previous = 0;
+    for (let node = 0; node < nodes; node += 1) { previous += reader.readSigned(); nodeLatitudes[node] = previous; }
+    previous = 0;
+    for (let node = 0; node < nodes; node += 1) { previous += reader.readSigned(); nodeLongitudes[node] = previous; }
+    starts.shift();
+  }
 
   const edgeOffsets = new Uint32Array(nodes + 1);
   const degrees = new VarintReader(bytes, starts[0]);
@@ -439,7 +478,9 @@ function decodePackedGraph(buffer: ArrayBuffer, shared = false): RoadGraph {
   const sizes = new Uint32Array(shapeCount);
   // Every stored point costs at least two bytes of varint, so the point stream
   // itself caps how many points the sizes may legitimately claim.
-  const pointCeiling = Math.floor(lengths[4] / 2);
+  // The point stream is the last section whichever layout this is: a shared
+  // chunk has six, with its coordinates first, and a single-chunk graph five.
+  const pointCeiling = Math.floor(lengths[lengths.length - 1] / 2);
   let totalPoints = 0;
   for (let shape = 0; shape < shapeCount; shape += 1) {
     sizes[shape] = shapeSizes.read();

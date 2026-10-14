@@ -128,8 +128,8 @@ it always has, byte for byte.
 **Walking and cycling need their own bundle.** They use footways, paths, steps
 and cycleways that a road graph correctly leaves out, so they are not another
 column on the same network but a larger network. Compiled together, Portugal is
-102.3 MB against 42.8 MB for the three motor vehicles — putting them in the
-same file would have made every driver download the footpaths.
+96.1 MB against 42.8 MB for the three motor vehicles — putting them in the same
+file would have made every driver download the footpaths.
 
 ```sh
 roadgraph-compile portugal.osm.pbf --output portugal-active.efrb --profile bicycle,pedestrian --max-memory-mb 3000
@@ -357,6 +357,17 @@ import RoutingWorker from "roadgraph-router/worker?worker";
 
 The `roadgraph-compile` CLI is Node-only and is never imported by the browser
 entry point, so bundlers do not pull it in.
+
+### Coordinates in a shared chunk
+
+Nodes are numbered with locality, so each sits close to the one before. A
+shared chunk writes the difference rather than the coordinate, which costs a
+few bytes where the coordinate itself costs eight, and takes 6% off a
+multi-vehicle bundle with nothing lost — the coordinates come back exactly.
+
+The single-chunk layout a car bundle still uses is untouched, so a bundle
+compiled for one vehicle stays byte-comparable and a 0.1.0 reader still opens
+it.
 
 ## How a chunk is stored
 
@@ -612,11 +623,12 @@ Walking and cycling, compiled together into their own bundle:
 
 | | bicycle + pedestrian |
 | --- | --- |
-| Bundle | 102.32 MB |
-| Peak compile memory | 2.21 GB |
-| Compile time | 17m 00s |
+| Bundle | 96.10 MB |
+| Peak compile memory | 2.71 GB |
+| Compile time | 16m 54s |
 | Routing nodes | 2,721,847 |
-| Routing edges | 6,866,866 |
+| Routing edges | 6,870,455 |
+| Barriers read | 13,102, giving 9,409 bans |
 
 Two and a half times the edges of the motor-vehicle bundle, because footways
 and paths exist where roads do not. It needs `--max-memory-mb 3000`.
