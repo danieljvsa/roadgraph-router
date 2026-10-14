@@ -1,6 +1,6 @@
 {
   "name": "roadgraph-router",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Compile any OpenStreetMap PBF extract into compact, range-addressable routing bundles and route over them with A* in Node.js or the browser.",
   "private": false,
   "type": "module",

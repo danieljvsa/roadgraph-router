@@ -100,6 +100,16 @@ export class RoadRouter {
   }
 
   /**
+   * Every vehicle this source can be read as, so a caller can offer a choice
+   * without knowing how the bundle was compiled. A bundle holding one vehicle
+   * reports that one, and a plain graph reports none.
+   */
+  get profiles(): string[] {
+    if (!isBundle(this.loader)) return this.profile ? [this.profile] : [];
+    return this.loader.profiles.map((id) => getRoutingProfileById(id)?.name).filter((name): name is string => Boolean(name));
+  }
+
+  /**
    * The same bundle read as another vehicle. The shared half of every tile is
    * already downloaded and stays so, which is the point of storing the road
    * network once: switching vehicle costs only the small per-vehicle chunks.

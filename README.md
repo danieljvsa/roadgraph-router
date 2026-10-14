@@ -49,14 +49,24 @@ result.geometry; // a GeoJSON LineString of 38 points following the roads
 `RoadRouter.open()` also accepts an already-decoded `RoadGraph`, which is
 useful for embedded or application-managed data.
 
-## Routing profile
+## Vehicles
 
 Every tag decision lives behind a `RoutingProfile` rather than in the compiler.
-The bundled `car` profile resolves the OSM access hierarchy
-(`access` < `vehicle` < `motor_vehicle` < `motorcar`, most specific wins),
-direction (`oneway=yes|-1|reverse|no|reversible`, `junction=roundabout|circular`,
-and the implicit one-way default on `motorway`/`motorway_link`), and speed from
-`maxspeed`, `maxspeed:forward` and `maxspeed:backward`.
+Three ship: `car`, `motorcycle` and `truck`. They read the same tags in the
+same order and differ in the mode name at the bottom of each hierarchy, so a
+car resolves `motorcar` where a motorcycle resolves `motorcycle` and a lorry
+resolves `hgv`.
+
+| | `car` | `motorcycle` | `truck` |
+| --- | --- | --- | --- |
+| Access key | `motorcar` | `motorcycle` | `hgv` |
+| Speed ceiling | 150 km/h | 150 km/h | **90 km/h**, applied to every road |
+| Mode-specific tags | `oneway:motorcar`, `maxspeed:motorcar`, `restriction:motorcar` | `oneway:motorcycle`, `maxspeed:motorcycle`, `restriction:motorcycle` | `oneway:hgv`, `maxspeed:hgv`, `restriction:hgv` |
+| Physical limits | — | — | `maxheight`, `maxwidth`, `maxlength`, `maxweight` |
+
+A lorry is capped below the posted limit nearly everywhere, so `truck` caps
+every speed rather than only bounding the A* heuristic: a truck graph reusing
+car durations would give wrong arrival times on roads it is entitled to use.
 
 `maxspeed` accepts plain km/h, `mph`, `km/h`, `kmh` and `knots`. Any value that
 is not a number with an optional unit — `none`, `signals`, `variable`, or a
@@ -66,11 +76,86 @@ clamped to the profile range the A* heuristic assumes, so a mistagged
 `maxspeed=400` cannot make the heuristic inadmissible.
 
 ```ts
-import { carRoutingProfile } from "roadgraph-router";
+import { carRoutingProfile, truckRoutingProfile } from "roadgraph-router";
 
 carRoutingProfile.evaluateWay({ highway: "primary", maxspeed: "60 mph" });
 // { forward: true, backward: true, forwardSpeedKph: 96.56, backwardSpeedKph: 96.56 }
+
+truckRoutingProfile.evaluateWay({ highway: "motorway", maxheight: "4.2" });
+// { ..., forwardSpeedKph: 90, forwardLimits: { heightMeters: 4.2 }, ... }
 ```
+
+### Compiling for several vehicles
+
+One bundle can serve several vehicles. Nearly nine tenths of a compiled tile —
+geometry, node coordinates, topology and distances — is the same whichever
+vehicle is routing, so it is stored once and each vehicle adds only its own
+durations, access mask, restriction mask and limits.
+
+```sh
+roadgraph-compile portugal.osm.pbf --output portugal.efrb --profile car,truck,motorcycle
+```
+
+The extract is read once however many vehicles are asked for, and a reader
+downloads the shared half of a tile plus the one vehicle it wants. On Portugal
+that is 42.9 MB for three vehicles where three separate bundles would be about
+114 MB, and switching vehicle mid-session costs about 2 MB rather than another
+38.
+
+A single vehicle with no physical limits still compiles to the one-chunk layout
+it always has, byte for byte.
+
+### Choosing a vehicle at runtime
+
+```ts
+const router = await RoadRouter.open("portugal.efrb");
+router.profiles;            // ["car", "truck", "motorcycle"]
+router.profile;             // "car"
+
+const lorry = router.withProfile("truck");
+await lorry.route(origin, destination);
+```
+
+`withProfile` reuses every shared chunk already downloaded, which is what makes
+switching cheap.
+
+### Lorry size and weight
+
+A truck bundle carries the height, width, length and weight limits its roads
+state, and the vehicle decides which roads are usable. Limits are quantised
+downwards, so a stored limit never permits what the sign forbids, and roads
+stating no limit stay open.
+
+```ts
+await RoadRouter.open("portugal.efrb", undefined, { profile: "truck", vehicle: "us-semi" });
+await RoadRouter.open("portugal.efrb", undefined, { profile: "truck", vehicle: { preset: "articulated", heightMeters: 4.3 } });
+await RoadRouter.open("portugal.efrb", undefined, { profile: "truck", vehicle: null }); // no filtering
+```
+
+| Preset | Height | Width | Length | Weight |
+| --- | --- | --- | --- | --- |
+| `van` | 2.6 m | 2.1 m | 6.0 m | 3.5 t |
+| `rigid` | 3.8 m | 2.55 m | 10.0 m | 18 t |
+| `articulated` *(default)* | 4.0 m | 2.55 m | 16.5 m | 40 t |
+| `road-train` | 4.0 m | 2.55 m | 18.75 m | 44 t |
+| `us-semi` | 4.11 m | 2.59 m | 22.0 m | 36.3 t |
+
+A caller who says nothing still gets a vehicle, because refusing to route until
+four dimensions are filled in is worse than routing for a stated default. The
+resolved dimensions are on `router.vehicle`, so the default is visible rather
+than hidden. The order is: whatever the caller passed, then whatever the bundle
+was compiled to suggest with `--default-vehicle`, then `articulated`.
+
+There is no globally neutral lorry — EU general circulation is 2.55 m wide,
+16.5 m long and 40 t at no more than 4 m tall, while a US semi is wider and
+taller but lighter — so `--default-vehicle us-semi` lets whoever compiles a
+North American extract say so once, knowingly, instead of the library guessing
+from the bounding box. A truck does not change shape when it crosses a border.
+
+> **A truck route here is a route over roads not known to forbid the vehicle,
+> which is weaker than a guarantee of legality.** `maxheight` is tagged on a
+> minority of bridges worldwide, and an untagged road is treated as open.
+> Anything safety-critical needs a surveyed freight dataset.
 
 ## Turn restrictions
 
@@ -400,35 +485,104 @@ the cross-tile merge.
 
 ## Supported OSM features and limitations
 
-What the `car` profile reads, and what it deliberately does not.
+What the bundled profiles read, and what they deliberately do not.
 
 **Supported**
 
 | Area | Detail |
 | --- | --- |
 | Highway classes | `motorway` through `service` and `road`, including `_link` variants |
-| Access | `access`, `vehicle`, `motor_vehicle`, `motorcar`, most specific key wins |
+| Access | `access`, `vehicle`, `motor_vehicle`, then the vehicle's own key (`motorcar`, `motorcycle`, `hgv`); most specific wins |
 | Direction | `oneway=yes/no/-1/reverse/true/false/1/0`, `junction=roundabout/circular`, implicit one-way on motorways |
-| Speed | `maxspeed`, `maxspeed:forward`, `maxspeed:backward`; km/h, `mph`, `km/h`, `kmh`, `knots`, `walk` |
+| Speed | `maxspeed`, `maxspeed:forward`, `maxspeed:backward`, `maxspeed:<mode>`; km/h, `mph`, `km/h`, `kmh`, `knots`, `walk` |
+| Lorry limits | `maxheight`, `maxwidth`, `maxlength`, `maxweight`, each with `:forward`, `:backward` and `:hgv` forms, plus `maxheight:physical` and `maxwidth:physical`; metric and feet-and-inches |
 | Turn restrictions | `no_left_turn`, `no_right_turn`, `no_straight_on`, `no_u_turn`, `no_entry`, `no_exit`, `only_left_turn`, `only_right_turn`, `only_straight_on`, `only_u_turn` |
-| Restriction scope | `via` node and `via` way; `restriction:motorcar`, `restriction:motor_vehicle` and `restriction:vehicle` override the generic key; `except` listing a car mode drops the relation |
+| Restriction scope | `via` node and `via` way; `restriction:<mode>`, `restriction:motor_vehicle` and `restriction:vehicle` override the generic key; `except` listing one of this vehicle's modes drops the relation for that vehicle alone |
 
 **Not supported**
 
 | Area | Behaviour |
 | --- | --- |
-| Profiles other than `car` | Only `car` ships. `getRoutingProfile` throws for anything else. |
+| Bicycle and pedestrian | Not implemented. They need footways, cycleways and paths that a motor-vehicle graph correctly omits, which is a different compile rather than another column. `getRoutingProfile` throws for them. |
+| Alternative routes | Not in 0.2.0. `routeAlternatives` is planned for 0.3.0. |
+| Untagged limits | A road stating no `maxheight` or `maxweight` is treated as open to any lorry. Absence of a tag is not a measurement. |
+| Axle load, trailer and hazmat rules | `maxaxleload`, `hazmat` and trailer-specific access are not read. |
 | Conditional restrictions | `restriction:conditional`, `access:conditional` and time-of-day rules are ignored, so a time-limited restriction is treated as absent. |
 | `via` ways longer than four edges | Skipped rather than approximated, and counted as `turnRestrictionsSkipped` in the compile report. |
 | Restrictions spanning a tile boundary | Dropped for tiles that do not hold every edge of the run, rather than enforced in a shortened form. |
 | Turn costs and traffic signals | Not modelled; a turn costs nothing beyond the roads it joins. |
 | Live traffic, elevation, ferries as a distinct mode | Not modelled. Ferry ways are excluded with everything that is not a road. |
-| `barrier`, `motor_vehicle:conditional`, toll avoidance | Not read. |
+| `barrier`, `motor_vehicle:conditional`, toll avoidance | Not read. Node tags are not requested from the PBF at all, so gates, bollards and height restrictors are invisible to every vehicle. |
 | EFRT v1 | Carries topology only: encoding to it drops geometry and turn restrictions. Use EFR2 for anything that needs them. |
 
 The compiler reports what it skipped. `turnRestrictionsRead` against
 `turnRestrictionsSkipped` in `<output>.json` tells you how much of a region's
 restriction data was understood.
+
+## Upgrading from 0.1.0
+
+Nothing in the 0.1.0 API changed, and bundles compiled by 0.1.0 still open and
+route identically — the published Portugal bundle was re-read under 0.2.0 and
+returns the same 313.10 km Porto-to-Lisbon route.
+
+What is worth knowing:
+
+- **`engines.node` is now `>=18`**, matching the library rather than the
+  compiler. The CLI still needs Node 22.5 for `node:sqlite` and says so at
+  startup instead of part-way through an extract.
+- **Repeated routes are about four times faster.** The stitched corridor is
+  cached between routes; `mergedCacheSize: 0` restores the old behaviour of
+  holding nothing, at the cost of re-stitching every time.
+- **Car graphs are unchanged.** A single-vehicle compile with no physical
+  limits still writes the one-chunk layout, byte for byte.
+- **New formats are additive.** EFR2 v7 and EFRB v2 appear only when a bundle
+  holds several vehicles or a vehicle whose routes depend on its size; a 0.1.0
+  reader cannot open those, which is why single-vehicle output stays v1.
+- **The car profile reads a few more tags** — `oneway:motor_vehicle`,
+  `oneway:motorcar`, `maxspeed:motorcar` — so a route changes only where the
+  data said it should all along.
+
+## Benchmarks
+
+Portugal, `portugal-latest.osm.pbf` at 425 MB, on one machine:
+
+| | 0.1.0 car | 0.2.0 car | 0.2.0 car + truck + motorcycle |
+| --- | --- | --- | --- |
+| Bundle | 38.03 MB | 38.04 MB | **42.90 MB** |
+| Peak compile memory | 1.11 GB | 1.10 GB | 1.39 GB |
+| Compile time | 7m 46s | 7m 58s | 7m 53s |
+| Routing nodes | 1,244,119 | 1,244,119 | 1,244,263 |
+| Routing edges | 2,757,478 | 2,757,478 | 2,757,819 |
+
+Three vehicles cost 12.8% more than one and compile in the same time, because
+the extract is read once however many are asked for. The same three as separate
+bundles would be about 114 MB.
+
+Porto to Lisbon over the three-vehicle bundle, cold:
+
+| Vehicle | Distance | Duration | Downloaded |
+| --- | --- | --- | --- |
+| car | 313.10 km | 164.8 min | 31.5 MB |
+| truck | 313.10 km | 213.4 min | 2.0 MB |
+| motorcycle | 313.10 km | 164.8 min | 2.0 MB |
+
+The lorry is 29.5% slower over the same roads, which is the 90 km/h cap on
+motorways. The second and third vehicles cost 2 MB each because the road
+network was already downloaded.
+
+Repeated routes, nothing left to fetch:
+
+| | 0.1.0 | 0.2.0 |
+| --- | --- | --- |
+| Porto to Lisbon | 2107 ms | **534 ms** |
+| Lisbon to Faro | 2170 ms | **452 ms** |
+
+Stitching the corridor was 1293 ms of the old figure and the A* search about
+500 ms; the search was never the bottleneck.
+
+Physical limits on Portugal: 7,652 of 2,757,819 edges state one, which is
+0.28%. That is why they are a side table rather than four columns — columns
+would cost about 11 MB to say nothing almost everywhere, against 61 KB.
 
 ## Licence
 
