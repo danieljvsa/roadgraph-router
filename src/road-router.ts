@@ -21,7 +21,11 @@ const INITIAL_DETOUR_FACTOR = 1.4;
  * graph holds; a finite value trades that proof for a smaller download and
  * still ignores tile size, since the limit is a ground distance.
  */
-export type RoadRouterOptions = { maxDetourFactor?: number };
+export type RoadRouterOptions = {
+  maxDetourFactor?: number;
+  /** How many stitched corridors a bundle keeps; see `BundleOpenOptions`. */
+  mergedCacheSize?: number;
+};
 const MINIMUM_BUDGET_METERS = 5_000;
 
 /** Widening steps used only while no route has been found at all. */
@@ -55,7 +59,7 @@ export class RoadRouter {
 
   static async open(source: string | RoadGraph, fetcher?: FetchLike, options: RoadRouterOptions = {}) {
     if (typeof source !== "string") return RoadRouter.fromGraph(source);
-    if (source.endsWith(".efrb")) return new RoadRouter(undefined, await openRoadGraphBundle(source, fetcher), options);
+    if (source.endsWith(".efrb")) return new RoadRouter(undefined, await openRoadGraphBundle(source, fetcher, { mergedCacheSize: options.mergedCacheSize }), options);
     return new RoadRouter(undefined, await createRouteGraphLoader(source, fetcher), options);
   }
 

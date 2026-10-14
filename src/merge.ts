@@ -38,24 +38,59 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
   }
 
   // 1. Stitch the node tables on shared coordinates.
-  const nodeIds = new Map<string, number>();
-  const latitudes: number[] = [];
-  const longitudes: number[] = [];
+  //
+  // A country-sized corridor stitches well over a million node copies, so this
+  // loop is the merge. Tiles compiled together share a coordinate scale, which
+  // means their stored integers can be compared directly: no divide, no round
+  // and no string key per copy. The integers are packed into one number
+  // relative to the region's own corner, and that only works while the region
+  // is small enough for the product to stay exact, so the general path stays
+  // for anything larger or for tiles that disagree on a scale.
+  const scale = graphs[0].coordinateScale ?? 1;
+  const uniformScale = graphs.every((graph) => (graph.coordinateScale ?? 1) === scale);
+  let minLatitude = Infinity;
+  let minLongitude = Infinity;
+  let span = Infinity;
+  if (uniformScale) {
+    let maxLatitude = -Infinity;
+    let maxLongitude = -Infinity;
+    for (const graph of graphs) {
+      for (let index = 0; index < graph.nodeLatitudes.length; index += 1) {
+        const latitude = graph.nodeLatitudes[index];
+        const longitude = graph.nodeLongitudes[index];
+        if (latitude < minLatitude) minLatitude = latitude;
+        if (latitude > maxLatitude) maxLatitude = latitude;
+        if (longitude < minLongitude) minLongitude = longitude;
+        if (longitude > maxLongitude) maxLongitude = longitude;
+      }
+    }
+    span = maxLongitude - minLongitude + 1;
+    if ((maxLatitude - minLatitude + 1) * span > Number.MAX_SAFE_INTEGER) span = Infinity;
+  }
+  const packed = Number.isFinite(span);
+
+  const totalNodes = graphs.reduce((sum, graph) => sum + graph.nodeLatitudes.length, 0);
+  const mergedLatitudes = new Int32Array(totalNodes);
+  const mergedLongitudes = new Int32Array(totalNodes);
+  let nodeCount = 0;
+  const nodeIds = new Map<number | string, number>();
   const nodeMaps: Uint32Array[] = [];
   let candidateEdges = 0;
   for (const graph of graphs) {
-    const coordinateScale = graph.coordinateScale ?? 1;
+    const graphScale = graph.coordinateScale ?? 1;
     const nodeMap = new Uint32Array(graph.nodeLatitudes.length);
     for (let index = 0; index < graph.nodeLatitudes.length; index += 1) {
-      const lat = graph.nodeLatitudes[index] / coordinateScale;
-      const lng = graph.nodeLongitudes[index] / coordinateScale;
-      const key = nodeKey(lat, lng);
+      const rawLatitude = graph.nodeLatitudes[index];
+      const rawLongitude = graph.nodeLongitudes[index];
+      const key = packed
+        ? (rawLatitude - minLatitude) * span + (rawLongitude - minLongitude)
+        : nodeKey(rawLatitude / graphScale, rawLongitude / graphScale);
       let mergedIndex = nodeIds.get(key);
       if (mergedIndex === undefined) {
-        mergedIndex = latitudes.length;
+        mergedIndex = nodeCount++;
         nodeIds.set(key, mergedIndex);
-        latitudes.push(lat);
-        longitudes.push(lng);
+        mergedLatitudes[mergedIndex] = graphScale === COORDINATE_SCALE ? rawLatitude : Math.round((rawLatitude / graphScale) * COORDINATE_SCALE);
+        mergedLongitudes[mergedIndex] = graphScale === COORDINATE_SCALE ? rawLongitude : Math.round((rawLongitude / graphScale) * COORDINATE_SCALE);
       }
       nodeMap[index] = mergedIndex;
     }
@@ -63,7 +98,6 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
     candidateEdges += graph.edgeTargets.length;
   }
   nodeIds.clear();
-  const nodeCount = latitudes.length;
 
   // 2. Reserve one slot per incoming copy, grouped by source node, so each
   //    node's copies sit together and can be deduplicated by a short scan.
@@ -189,8 +223,8 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
   }
 
   return withSpatialIndex({
-    nodeLatitudes: Int32Array.from(latitudes, (value) => Math.round(value * COORDINATE_SCALE)),
-    nodeLongitudes: Int32Array.from(longitudes, (value) => Math.round(value * COORDINATE_SCALE)),
+    nodeLatitudes: mergedLatitudes.slice(0, nodeCount),
+    nodeLongitudes: mergedLongitudes.slice(0, nodeCount),
     coordinateScale: COORDINATE_SCALE,
     edgeOffsets,
     edgeTargets,

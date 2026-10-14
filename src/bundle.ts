@@ -9,6 +9,13 @@ const VERSION = 1;
 const HEADER_BYTES = 32;
 const DIRECTORY_ENTRY_BYTES = 40;
 const COORDINATE_SCALE = 10_000_000;
+/**
+ * Two, because answering one route stitches two corridors: the first guess,
+ * and the wider one the confirmation pass asks for. Holding only the second
+ * makes the next identical route miss on the first, and measurements on a
+ * country-sized bundle show no further gain past two.
+ */
+const DEFAULT_MERGED_CACHE_SIZE = 2;
 
 export const BundleCompression = {
   none: 0,
@@ -46,6 +53,14 @@ export type RoadGraphBundle = {
 };
 
 export type BundleGraphTile = { id: number; bounds: BundleBounds; graph: RoadGraph };
+/**
+ * `mergedCacheSize` is how many stitched corridors to keep. Stitching is the
+ * most expensive part of answering a route, and consecutive routes usually ask
+ * for the same tiles, so one is worth holding. Each entry is a whole merged
+ * corridor, so raising this trades memory for repeat speed; `0` keeps none and
+ * restores the behaviour of releasing a corridor as soon as the route is done.
+ */
+export type BundleOpenOptions = { mergedCacheSize?: number };
 export type BundleEncodeOptions = { compression?: "none" | "gzip" };
 type BundleChunk = { data: ArrayBuffer; rawByteLength: number; compression: BundleCompression };
 
@@ -180,7 +195,7 @@ export async function encodeCompressedRoadGraphBundle(tiles: BundleGraphTile[], 
   return createBundle(tiles, chunks);
 }
 
-export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetch): Promise<RoadGraphBundle> {
+export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetch, options: BundleOpenOptions = {}): Promise<RoadGraphBundle> {
   const header = await fetchRange(url, 0, HEADER_BYTES - 1, fetcher);
   const headerView = new DataView(header);
   if (headerView.getUint32(0, true) !== MAGIC || headerView.getUint16(4, true) !== VERSION || headerView.getUint16(6, true) !== HEADER_BYTES) {
@@ -236,10 +251,32 @@ export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetc
       maxLat: corridor.maxLat + latitudePadding, maxLng: corridor.maxLng + longitudePadding,
     }));
   };
+  // Decoded chunks are already cached, but stitching them together is the
+  // larger cost and was being repeated for every route over the same corridor.
+  const mergedLimit = Math.max(0, Math.trunc(options.mergedCacheSize ?? DEFAULT_MERGED_CACHE_SIZE));
+  const merged = new Map<string, Promise<RoadGraph>>();
   const loadTiles = async (routeTiles: BundleTile[]) => {
     if (!routeTiles.length) throw new RouterError("ROUTE_ACROSS_TILES", "No local graph tiles cover the route corridor.");
     if (routeTiles.length === 1) return loadTile(routeTiles[0]);
-    return mergeRoadGraphs(await Promise.all(routeTiles.map(loadTile)));
+    const key = routeTiles.map((tile) => tile.id).sort((a, b) => a - b).join(",");
+    const held = merged.get(key);
+    if (held) {
+      // Re-insert so the map's own order is least-recently-used.
+      merged.delete(key);
+      merged.set(key, held);
+      return held;
+    }
+    const graph = Promise.all(routeTiles.map(loadTile)).then(mergeRoadGraphs);
+    if (mergedLimit) {
+      merged.set(key, graph);
+      for (const oldest of merged.keys()) {
+        if (merged.size <= mergedLimit) break;
+        merged.delete(oldest);
+      }
+      // A corridor that failed to stitch must not be remembered as the answer.
+      graph.catch(() => merged.delete(key));
+    }
+    return graph;
   };
   return {
     url,
