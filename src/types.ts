@@ -50,6 +50,12 @@ export interface RoadGraph {
    * falls back to the profile's own ceiling.
    */
   maxSpeedKph?: number;
+  /**
+   * One bit per edge saying whether this profile may use it, present only on a
+   * graph assembled from a shared topology that several profiles share. Absent
+   * means every edge is usable. See `./access`.
+   */
+  edgeAccess?: Uint8Array;
   /** Optional intermediate vertices per directed edge, stored using coordinateScale. */
   edgeShapeOffsets?: Uint32Array;
   edgeShapeLatitudes?: Int32Array;
@@ -109,4 +115,20 @@ export class RouterError extends Error {
     super(message);
     this.name = "RouterError";
   }
+}
+
+/**
+ * A tile's vehicle-independent half: everything a v7 `shared` chunk holds.
+ * It is not routable on its own — a profile supplies the durations.
+ */
+export type SharedRoadGraph = Omit<RoadGraph, "edgeDurationsSeconds" | "edgeDurationScale" | "profileId" | "maxSpeedKph" | "edgeAccess">;
+
+/** A tile's vehicle-dependent half: what a v7 `profile` chunk holds. */
+export interface ProfileChunk {
+  profileId: number;
+  maxSpeedKph: number;
+  edgeDurationScale: number;
+  edgeDurationsSeconds: Uint16Array;
+  /** One bit per edge; absent means this profile may use every road in the tile. */
+  edgeAccess?: Uint8Array;
 }

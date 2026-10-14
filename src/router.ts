@@ -2,6 +2,7 @@ import { MinPriorityQueue } from "./priority-queue";
 import type { Coordinate, GeoJsonPosition, RoadGraph, RoutePreference, RouteResult, RouteSnap } from "./types";
 import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
+import { edgeAllowed } from "./access";
 import { buildTurnRestrictionIndex, buildTurnSequenceIndex, type TurnRestrictionIndex, type TurnSequenceIndex } from "./turn-restrictions";
 import { maxSpeedMpsFor, profileOf } from "./routing-profile";
 import { coordinateFor, geometryAfter, geometryBefore, geometryBetween, haversineMeters, snapToGraph, type EdgeProjection, type GraphSnap } from "./snap";
@@ -67,6 +68,7 @@ type SearchOutcome = { edges: number[]; finisher: Finisher; seed: Seed } | null;
  */
 function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, costBound = Infinity): SearchOutcome {
   const { costOf, heuristicFor } = searchContext(graph, destinationPoint, preference);
+  const access = graph.edgeAccess;
   const nodeCount = graph.nodeLatitudes.length;
   const costs = new Float64Array(nodeCount).fill(Infinity);
   const previousNode = new Int32Array(nodeCount).fill(-1);
@@ -91,6 +93,7 @@ function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Fi
       if (total < best) { best = total; bestNode = node; bestFinisher = finisher; }
     }
     for (let edge = graph.edgeOffsets[node]; edge < graph.edgeOffsets[node + 1]; edge += 1) {
+      if (!edgeAllowed(access, edge)) continue;
       const target = graph.edgeTargets[edge];
       const cost = costs[node] + costOf(edge);
       if (cost >= costs[target]) continue;
@@ -117,6 +120,7 @@ function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Fi
  */
 function searchByEdge(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, restrictions: TurnRestrictionIndex | null, sequenceIndex: TurnSequenceIndex | null, costBound = Infinity): SearchOutcome {
   const { costOf, heuristicFor } = searchContext(graph, destinationPoint, preference);
+  const access = graph.edgeAccess;
   const edgeCount = graph.edgeTargets.length;
   const costs = new Float64Array(edgeCount).fill(Infinity);
   const previousState = new Int32Array(edgeCount).fill(-1);
@@ -224,6 +228,7 @@ function searchByEdge(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Fi
       if (total < best) { best = total; bestArrival = -1; bestFinisher = finisher; bestSeed = seed; }
     }
     for (let edge = graph.edgeOffsets[seed.node]; edge < graph.edgeOffsets[seed.node + 1]; edge += 1) {
+      if (!edgeAllowed(access, edge)) continue;
       relax(edge, seed.cost + costOf(edge), -1, seed);
     }
   }
@@ -237,7 +242,7 @@ function searchByEdge(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Fi
     const banned = restrictions?.get(edge);
     considerFinishers(state, node, null);
     for (let next = graph.edgeOffsets[node]; next < graph.edgeOffsets[node + 1]; next += 1) {
-      if (banned?.has(next)) continue;
+      if (banned?.has(next) || !edgeAllowed(access, next)) continue;
       const carried = advance(edge, matches, next);
       if (carried === null) continue;
       relax(stateFor(next, carried), costOfState(state) + costOf(next), state, null);

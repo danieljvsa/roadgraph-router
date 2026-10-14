@@ -1,7 +1,8 @@
-export { decodeGraph, encodeCompactGraph, encodeGraph } from "./codec";
+export { combineProfiledGraph, decodeGraph, decodeProfileChunk, decodeSharedGraph, encodeCompactGraph, encodeGraph, encodeProfileChunk, encodeSharedGraph } from "./codec";
 export type { CompactEncodeOptions } from "./codec";
 export { VarintReader, VarintWriter, unzigzag, zigzag } from "./varint";
 export { compactGraph } from "./compact";
+export { accessMaskFor, allowsEverything, edgeAllowed } from "./access";
 export { findNearestNode, route } from "./router";
 export type { RouteOptions } from "./router";
 export { snapToGraph } from "./snap";
@@ -17,7 +18,7 @@ export { buildTurnRestrictionIndex, buildTurnSequenceIndex, isTurnBanned, packTu
 export { ProfileId, carRoutingProfile, getRoutingProfile, getRoutingProfileById, maxSpeedMpsFor, parseMaxSpeedKph, profileOf, routingProfiles } from "./routing-profile";
 export type { CompactGraphOptions } from "./compact";
 export type { BundleBounds, BundleEncodeOptions, BundleGraphTile, BundleOpenOptions, BundleTile, RoadGraphBundle } from "./bundle";
-export type { Coordinate, CoordinateStorage, GeoJsonLineString, GeoJsonPosition, RouteSnap, EdgeWeightStorage, NodeSpatialIndex, RoadGraph, RoutePreference, RouteResult, RouterErrorCode } from "./types";
+export type { Coordinate, CoordinateStorage, GeoJsonLineString, GeoJsonPosition, ProfileChunk, RouteSnap, EdgeWeightStorage, NodeSpatialIndex, RoadGraph, RoutePreference, RouteResult, RouterErrorCode, SharedRoadGraph } from "./types";
 export type { GraphBounds, GraphTile, RouteGraphLoader, RouteGraphManifest } from "./manifest";
 export type { TurnRestrictionIndex, TurnSequenceIndex } from "./turn-restrictions";
 export type { EdgeProjection, GraphSnap } from "./snap";

@@ -1,6 +1,7 @@
 import type { Coordinate, RoadGraph } from "./types";
 import { edgePolyline, edgeSource, edgeSpatialIndexFor, nearbyEdgeIds } from "./edge-index";
 import { nearbyNodeIds } from "./spatial-index";
+import { edgeAllowed } from "./access";
 
 const EARTH_RADIUS_METERS = 6_371_000;
 const METERS_PER_DEGREE_LATITUDE = 110_574;
@@ -102,6 +103,8 @@ export function snapToGraph(graph: RoadGraph, coordinate: Coordinate, maxDistanc
   let best: EdgeProjection | null = null;
   const projections: EdgeProjection[] = [];
   for (const edge of candidates) {
+    // A road this profile may not use is not a road to start or finish on.
+    if (!edgeAllowed(graph.edgeAccess, edge)) continue;
     const source = edgeSource(graph, edge);
     const polyline = edgePolyline(graph, edge, source);
     const projected = projectOntoPolyline(polyline, coordinate);
