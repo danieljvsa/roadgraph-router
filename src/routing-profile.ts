@@ -62,11 +62,11 @@ const MINIMUM_SPEED_KPH = 5;
 const MAXIMUM_SPEED_KPH = 150;
 
 /** Values that deny passage, from most to least common. `destination`, `customers`,
- *  `delivery` and `permissive` all still allow a car through, so they are absent. */
+ *  `delivery` and `permissive` all still allow a vehicle through, so they are absent. */
 const BLOCKED_ACCESS = new Set(["no", "private", "agricultural", "forestry", "military", "emergency", "use_sidepath"]);
 
-/** Highway classes a car may drive on, with their default free-flow speed in km/h. */
-const CAR_HIGHWAY_SPEEDS: Record<string, number> = {
+/** Highway classes a motor vehicle may drive on, with their default free-flow speed in km/h. */
+const MOTOR_VEHICLE_SPEEDS: Record<string, number> = {
   motorway: 110,
   motorway_link: 50,
   trunk: 90,
@@ -83,15 +83,6 @@ const CAR_HIGHWAY_SPEEDS: Record<string, number> = {
   service: 20,
   road: 25,
 };
-
-/** Access keys from least to most specific; a later key overrides an earlier one. */
-const CAR_ACCESS_KEYS = ["access", "vehicle", "motor_vehicle", "motorcar"] as const;
-
-/** Restriction keys from least to most specific, mirroring the access hierarchy. */
-const CAR_RESTRICTION_KEYS = ["restriction", "restriction:vehicle", "restriction:motor_vehicle", "restriction:motorcar"] as const;
-
-/** Transport modes that exempt a car from a restriction carrying `except`. */
-const CAR_EXCEPT_MODES = new Set(["motorcar", "motor_vehicle", "vehicle"]);
 
 /** Restriction values this package understands. Anything else is ignored rather than guessed at. */
 const TURN_RESTRICTION_KINDS: Record<string, TurnRestrictionKind> = {
@@ -145,54 +136,89 @@ function accessAllowed(tags: OsmTags, keys: readonly string[]) {
   return allowed;
 }
 
-function onewayDirections(tags: OsmTags, highway: string | undefined) {
-  const oneway = tags.oneway?.trim().toLowerCase();
-  if (oneway === "yes" || oneway === "true" || oneway === "1") return { forward: true, backward: false };
-  if (oneway === "-1" || oneway === "reverse") return { forward: false, backward: true };
+/**
+ * Resolves `oneway`, letting a mode-specific tag override the general one. A
+ * street signed one-way for cars can be two-way for motorcycles in some
+ * places, and `oneway:motorcycle=no` is how OSM says so.
+ */
+function onewayDirections(tags: OsmTags, highway: string | undefined, keys: readonly string[]) {
+  let oneway: string | undefined;
+  for (const key of keys) if (tags[key] !== undefined) oneway = tags[key];
+  const value = oneway?.trim().toLowerCase();
+  if (value === "yes" || value === "true" || value === "1") return { forward: true, backward: false };
+  if (value === "-1" || value === "reverse") return { forward: false, backward: true };
   // `reversible` and `alternating` carriageways change direction over time;
   // treating them as two-way keeps them routable rather than silently removed.
-  if (oneway !== undefined && oneway !== "") return { forward: true, backward: true };
+  if (value !== undefined && value !== "") return { forward: true, backward: true };
   const junction = tags.junction?.trim().toLowerCase();
   if (junction === "roundabout" || junction === "circular") return { forward: true, backward: false };
   if (highway && IMPLICITLY_ONEWAY.has(highway)) return { forward: true, backward: false };
   return { forward: true, backward: true };
 }
 
-export const carRoutingProfile: RoutingProfile = {
-  name: "car",
-  id: ProfileId.car,
-  wayTagKeys: ["highway", "oneway", "junction", "access", "vehicle", "motor_vehicle", "motorcar", "maxspeed", "maxspeed:forward", "maxspeed:backward"],
-  relationTagKeys: ["type", "except", ...CAR_RESTRICTION_KEYS],
-  maxSpeedKph: MAXIMUM_SPEED_KPH,
+/**
+ * Every motor vehicle reads the same tags in the same order; what changes is
+ * the mode name at the bottom of each hierarchy. A car resolves `motorcar`
+ * where a motorcycle resolves `motorcycle`, and the rest — the access ladder,
+ * the oneway rules, the speed table, the restriction ladder — is shared. One
+ * implementation keeps those rules from drifting apart between vehicles.
+ */
+function motorVehicleProfile(options: { name: string; id: ProfileId; mode: string; speeds?: Record<string, number> }): RoutingProfile {
+  const { name, id, mode } = options;
+  const speeds = options.speeds ?? MOTOR_VEHICLE_SPEEDS;
+  const accessKeys = ["access", "vehicle", "motor_vehicle", mode] as const;
+  const onewayKeys = ["oneway", "oneway:motor_vehicle", `oneway:${mode}`] as const;
+  const restrictionKeys = ["restriction", "restriction:vehicle", "restriction:motor_vehicle", `restriction:${mode}`] as const;
+  // `except=motorcar` lifts a restriction for cars but not for motorcycles, so
+  // the exempting modes are the vehicle's own ladder rather than a fixed list.
+  const exceptModes = new Set([mode, "motor_vehicle", "vehicle"]);
 
-  evaluateWay(tags) {
-    const highway = tags.highway;
-    if (!highway || !(highway in CAR_HIGHWAY_SPEEDS)) return null;
-    if (!accessAllowed(tags, CAR_ACCESS_KEYS)) return null;
-    const { forward, backward } = onewayDirections(tags, highway);
-    if (!forward && !backward) return null;
-    const base = parseMaxSpeedKph(tags.maxspeed) ?? CAR_HIGHWAY_SPEEDS[highway];
-    return {
-      forward,
-      backward,
-      forwardSpeedKph: clampSpeed(parseMaxSpeedKph(tags["maxspeed:forward"]) ?? base),
-      backwardSpeedKph: clampSpeed(parseMaxSpeedKph(tags["maxspeed:backward"]) ?? base),
-    };
-  },
+  return {
+    name,
+    id,
+    wayTagKeys: ["highway", "junction", "maxspeed", "maxspeed:forward", "maxspeed:backward", `maxspeed:${mode}`, ...accessKeys, ...onewayKeys],
+    relationTagKeys: ["type", "except", ...restrictionKeys],
+    maxSpeedKph: MAXIMUM_SPEED_KPH,
 
-  evaluateTurnRestriction(tags) {
-    if (tags.type !== "restriction") return null;
-    const except = tags.except?.split(";").map((mode) => mode.trim().toLowerCase()) ?? [];
-    if (except.some((mode) => CAR_EXCEPT_MODES.has(mode))) return null;
-    let value: string | undefined;
-    for (const key of CAR_RESTRICTION_KEYS) if (tags[key] !== undefined) value = tags[key];
-    if (!value) return null;
-    const kind = TURN_RESTRICTION_KINDS[value.trim().toLowerCase()];
-    return kind ? { kind, value } : null;
-  },
-};
+    evaluateWay(tags) {
+      const highway = tags.highway;
+      if (!highway || !(highway in speeds)) return null;
+      if (!accessAllowed(tags, accessKeys)) return null;
+      const { forward, backward } = onewayDirections(tags, highway, onewayKeys);
+      if (!forward && !backward) return null;
+      const base = parseMaxSpeedKph(tags[`maxspeed:${mode}`]) ?? parseMaxSpeedKph(tags.maxspeed) ?? speeds[highway];
+      return {
+        forward,
+        backward,
+        forwardSpeedKph: clampSpeed(parseMaxSpeedKph(tags["maxspeed:forward"]) ?? base),
+        backwardSpeedKph: clampSpeed(parseMaxSpeedKph(tags["maxspeed:backward"]) ?? base),
+      };
+    },
 
-export const routingProfiles: Record<string, RoutingProfile> = { car: carRoutingProfile };
+    evaluateTurnRestriction(tags) {
+      if (tags.type !== "restriction") return null;
+      const except = tags.except?.split(";").map((value) => value.trim().toLowerCase()) ?? [];
+      if (except.some((value) => exceptModes.has(value))) return null;
+      let value: string | undefined;
+      for (const key of restrictionKeys) if (tags[key] !== undefined) value = tags[key];
+      if (!value) return null;
+      const kind = TURN_RESTRICTION_KINDS[value.trim().toLowerCase()];
+      return kind ? { kind, value } : null;
+    },
+  };
+}
+
+export const carRoutingProfile = motorVehicleProfile({ name: "car", id: ProfileId.car, mode: "motorcar" });
+
+/**
+ * Motorcycles use the same roads and the same speed limits as cars almost
+ * everywhere, so the difference is which tags apply to them: `motorcycle=no`
+ * closes a road a car may still use, `oneway:motorcycle=no` opens one, and
+ * `except=motorcar` on a turn restriction does not let a motorcycle through.
+ */
+export const motorcycleRoutingProfile = motorVehicleProfile({ name: "motorcycle", id: ProfileId.motorcycle, mode: "motorcycle" });
+
+export const routingProfiles: Record<string, RoutingProfile> = { car: carRoutingProfile, motorcycle: motorcycleRoutingProfile };
 
 export function getRoutingProfile(name: string): RoutingProfile {
   const profile = routingProfiles[name];

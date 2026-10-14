@@ -3,7 +3,7 @@ import { combineProfiledGraph, decodeGraph, decodeProfileChunk, decodeSharedGrap
 import { mergeRoadGraphs } from "./merge";
 import { withSpatialIndex } from "./spatial-index";
 import { RouterError, type Coordinate, type ProfileChunk, type RoadGraph, type SharedRoadGraph } from "./types";
-import { getRoutingProfile, getRoutingProfileById } from "./routing-profile";
+import { ProfileId, getRoutingProfile, getRoutingProfileById } from "./routing-profile";
 
 const MAGIC = 0x42524645; // EFRB
 /** A bundle holding one graph per tile, which is every bundle published so far. */
@@ -302,7 +302,9 @@ export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetc
   const profiled = bundleVersion === PROFILED_VERSION;
   const defaultProfileId = headerView.getUint8(20);
   const headerSpeedKph = headerView.getUint16(22, true);
-  const available = profiled ? profilesIn(headerView.getUint32(24, true)) : [defaultProfileId];
+  // A v1 bundle holds exactly one vehicle, and a zero there means it was
+  // written before profiles were recorded, which makes it a car.
+  const available = profiled ? profilesIn(headerView.getUint32(24, true)) : [defaultProfileId || ProfileId.car];
   for (const id of available) {
     if (id && !getRoutingProfileById(id)) throw new Error(`This routing bundle was compiled for a profile this build does not support (id ${id}).`);
   }
@@ -435,7 +437,7 @@ export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetc
     tiles,
     profileId: chosenId,
     maxSpeedKph: headerSpeedKph,
-    profiles: available.filter((id) => id !== 0),
+    profiles: available,
     tilesWithinBudget(origin, destination, budgetMeters) {
       // A tile holding either endpoint is always a candidate: the route has to
       // start and finish somewhere even when the budget is tiny.

@@ -105,7 +105,7 @@ function scaleFor(values) { let greatest = 0; for (const value of values) greate
  * Orders a tile's edges by source node and hands the result to the library
  * encoder, so the compiler and the runtime cannot drift apart on the layout.
  */
-function encodeEfr2(graph, encodeCompactGraph) {
+function encodeEfr2(graph, encodeCompactGraph, profile) {
   const nodes = graph.nodeLat.length, edges = graph.edgeFrom.length;
   const distances = graph.edgeDistance.view(), durations = graph.edgeDuration.view();
   const distanceScale = scaleFor(distances), durationScale = scaleFor(durations);
@@ -145,6 +145,9 @@ function encodeEfr2(graph, encodeCompactGraph) {
     edgeOffsets: offsets, edgeTargets: targets,
     edgeDistancesMeters: packedDistances, edgeDurationsSeconds: packedDurations,
     coordinateScale: SCALE, edgeDistanceScale: distanceScale, edgeDurationScale: durationScale,
+    // Without this a bundle compiled for one vehicle reads back as a car,
+    // which is the one mistake the profile metadata exists to prevent.
+    profileId: profile.id, maxSpeedKph: profile.maxSpeedKph,
     edgeShapeOffsets: shapeOffsets, edgeShapeLatitudes: shapeLat, edgeShapeLongitudes: shapeLon,
     ...(banned.length ? { turnRestrictionFromEdges: Uint32Array.from(banned, (pair) => pair[0]), turnRestrictionToEdges: Uint32Array.from(banned, (pair) => pair[1]) } : {}),
     ...(runs.length ? { turnRestrictionSequenceOffsets: runOffsets, turnRestrictionSequenceEdges: Uint32Array.from(runs.flat()) } : {}),
@@ -154,11 +157,15 @@ function encodeEfr2(graph, encodeCompactGraph) {
 /** Writes the fixed-size directory, then streams each chunk straight from the
  *  spill file. Neither the chunk list nor the finished bundle is ever held in
  *  memory, so output size no longer bounds how large a region can be built. */
-async function writeBundle(output, chunks, compression, spillPath) {
+async function writeBundle(output, chunks, compression, spillPath, profile) {
   const directoryBytes = chunks.length * DIRECTORY;
   const head = Buffer.alloc(HEADER + directoryBytes);
   head.writeUInt32LE(EFRB_MAGIC, 0); head.writeUInt16LE(1, 4); head.writeUInt16LE(HEADER, 6);
   head.writeUInt32LE(chunks.length, 8); head.writeUInt32LE(HEADER, 12); head.writeUInt32LE(directoryBytes, 16);
+  // The vehicle, in the header as well as in every chunk, so a reader knows it
+  // before downloading a tile and can size its tile budget accordingly.
+  head.writeUInt8(profile.id, 20); head.writeUInt16LE(Math.round(profile.maxSpeedKph), 22);
+  head.writeUInt32LE(1 << (profile.id - 1), 24); head.writeUInt32LE(chunks.length, 28);
   let offset = HEADER + directoryBytes;
   for (let i = 0; i < chunks.length; i += 1) {
     const chunk = chunks[i], at = HEADER + i * DIRECTORY, b = chunk.tile.bounds;
@@ -452,7 +459,7 @@ else {
     const spillPath = resolve(workspace, "chunks.bin"), spill = createWriteStream(spillPath), chunks = [];
     for (let index = 0; index < built.graphs.length; index += 1) {
       const graph = built.graphs[index];
-      const raw = new Uint8Array(encodeEfr2(graph, encodeCompactGraph));
+      const raw = new Uint8Array(encodeEfr2(graph, encodeCompactGraph, profile));
       const data = compression === "gzip" ? gzipSync(raw, { level: constants.Z_BEST_COMPRESSION }) : raw;
       chunks.push({ tile: graph.tile, byteLength: data.byteLength, rawBytes: raw.byteLength });
       if (!spill.write(data)) await new Promise((done) => spill.once("drain", done));
@@ -460,7 +467,7 @@ else {
       memoryGuard(limitBytes, "writing compressed tiles", 1000);
     }
     await new Promise((done, fail) => spill.end((error) => error ? fail(error) : done()));
-    const bundleBytes = await writeBundle(output, chunks, compression, spillPath);
+    const bundleBytes = await writeBundle(output, chunks, compression, spillPath, profile);
     await verifyBundle(output, chunks.length);
     const nodesBefore = storedNodes, nodesAfter = built.routingNodes, edges = built.routingEdges, rawBytes = chunks.reduce((sum, chunk) => sum + chunk.rawBytes, 0);
     const report = { formatVersion: 1, input: file, inputBytes: source.size, profile: profile.name, compression: `${compression}-per-tile`, tileSizeKm, paddingKm, pbfPasses: 2, tiles: chunks.length, relevantOsmWays: first.ways, relevantOsmNodes, relevantOsmNodesExact: false, routingNodesBeforeSimplification: nodesBefore, routingNodesAfterSimplification: nodesAfter, reductionPercent: Number((100 * (1 - nodesAfter / Math.max(1, nodesBefore))).toFixed(2)), routingEdges: edges, turnRestrictionsRead: first.restrictions.length, turnRestrictionsSkipped: first.skippedRestrictions, bannedTurnPairs: built.bannedTurns, bannedTurnRuns: built.bannedRuns, uncompressedGraphBytes: rawBytes, bundleBytes, compressionRatio: Number((bundleBytes / Math.max(1, rawBytes)).toFixed(4)), peakRssBytes: Math.max(observedPeakRss, process.memoryUsage().rss), elapsedMilliseconds: Math.round(performance.now() - started) };

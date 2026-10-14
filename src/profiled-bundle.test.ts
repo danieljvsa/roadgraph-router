@@ -152,6 +152,10 @@ describe("a bundle written before profiles existed", () => {
     const router = await RoadRouter.open("https://example.test/v1.efrb", rangeFetcher(bundle).fetcher);
     const result = await router.route({ lat: 41.0, lng: -8.04 }, { lat: 41.0, lng: -8.0 });
     expect(result.distanceMeters).toBeGreaterThan(0);
-    expect(() => router.withProfile("car")).toThrow(/does not hold|another vehicle/i);
+    expect(router.profile).toBe("car");
+    // It holds one vehicle, so asking for that one is a no-op and asking for
+    // any other says what the file actually has.
+    expect(router.withProfile("car").profile).toBe("car");
+    expect(() => router.withProfile("motorcycle")).toThrow(/does not hold/i);
   });
 });
