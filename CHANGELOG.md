@@ -6,7 +6,7 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-10-14
+## [0.2.0] - 2026-10-15
 
 Multi-vehicle routing. One bundle can now serve a car, a motorcycle and a
 lorry, and a lorry's routes depend on its size and weight. Walking and cycling
@@ -78,6 +78,16 @@ ship too, in a bundle of their own. Alternative routes moved to 0.3.0.
   whole package — so installing the library on Node 18 or 20 warned, and failed
   under `engine-strict`. It is now `>=18`, and the CLI checks its own
   requirement at startup rather than after streaming the whole extract.
+- **Switching vehicle threw when the first one had dimensions.** Opening as a
+  lorry and asking for the car refused the switch, because the dimensions
+  travelled with the options and a car cannot use them. The check moved to
+  where a caller pairs a vehicle with a profile; past that, dimensions travel
+  with the reader and apply only where they mean something, so truck to car to
+  motorcycle and back ends with the dimensions it started with.
+- **Switching vehicle discarded the stitched corridor.** A bundle kept two
+  corridors however many vehicles it held, so three vehicles evicted each
+  other and every switch re-stitched. It keeps one per vehicle now: a repeated
+  Porto to Lisbon fell from about 1500 ms to 257 ms by car, 140 ms by lorry.
 - **A route could fail because an end snapped to a disconnected stub.** The
   nearest road to a point is not always one that leads anywhere: a path behind
   a fence, a service road in a compound, a stretch clipped at a tile edge. A

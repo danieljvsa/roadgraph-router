@@ -591,11 +591,21 @@ What is worth knowing:
 - **`engines.node` is now `>=18`**, matching the library rather than the
   compiler. The CLI still needs Node 22.5 for `node:sqlite` and says so at
   startup instead of part-way through an extract.
-- **Repeated routes are about four times faster.** The stitched corridor is
-  cached between routes; `mergedCacheSize: 0` restores the old behaviour of
-  holding nothing, at the cost of re-stitching every time.
-- **Car graphs are unchanged.** A single-vehicle compile with no physical
-  limits still writes the one-chunk layout, byte for byte.
+- **Repeated routes are about eight times faster**, and first routes two to
+  three times. The stitched corridor is cached between routes, one per vehicle
+  a bundle holds; `mergedCacheSize: 0` restores the old behaviour of holding
+  nothing, at the cost of re-stitching every time.
+- **Journey times rise by a fraction of a percent on a recompile.** A short
+  edge whose duration rounded to zero used to be free to travel; it is now
+  charged for. The route is the same, the estimate is honest. Reading an old
+  bundle is unaffected, because the correction is in the data.
+- **Car graphs keep their layout.** A single-vehicle compile with no physical
+  limits still writes the one-chunk layout, so an older reader opens a bundle
+  compiled today. It does grow very slightly, because barriers now contribute
+  banned turns.
+- **Barriers are read for the first time.** Gates, bollards and stiles were
+  invisible to every profile before, so some routes that passed through one
+  no longer do.
 - **New formats are additive.** EFR2 v7 and EFRB v2 appear only when a bundle
   holds several vehicles or a vehicle whose routes depend on its size; a 0.1.0
   reader cannot open those, which is why single-vehicle output stays v1.
@@ -634,31 +644,62 @@ Walking and cycling, compiled together into their own bundle:
 Two and a half times the edges of the motor-vehicle bundle, because footways
 and paths exist where roads do not. It needs `--max-memory-mb 3000`.
 
-Porto to Lisbon over the three-vehicle bundle, cold:
+### Routing
 
-| Vehicle | Distance | Duration | Downloaded |
-| --- | --- | --- | --- |
-| car | 313.10 km | 165.5 min | 29.2 MB |
-| truck | 313.10 km | 217.6 min | 2.0 MB |
-| motorcycle | 313.10 km | 165.5 min | 2.0 MB |
+Urban, rural and long journeys over the two Portugal bundles, each measured
+cold and then repeated with nothing left to fetch:
 
-The lorry is 31.5% slower over the same roads, which is the 90 km/h cap on
-motorways. The second and third vehicles cost 2 MB each because the road
-network was already downloaded.
+| Journey | Vehicle | Result | First | Repeat | Downloaded |
+| --- | --- | --- | --- | --- | --- |
+| central Lisbon, 2 km | car | 2.4 km, 3 min | 270 ms | 9 ms | 4.3 MB |
+| | truck | 3.7 km, 5 min | 128 ms | 7 ms | 0.3 MB |
+| | motorcycle | 2.4 km, 3 min | 103 ms | 7 ms | 0.3 MB |
+| rural Bragança, 40 km | car | 41.0 km, 32 min | 238 ms | 5 ms | 3.0 MB |
+| | truck | 41.0 km, 35 min | 187 ms | 4 ms | 0.2 MB |
+| | motorcycle | 41.0 km, 32 min | 127 ms | 4 ms | 0.2 MB |
+| Porto to Lisbon, 313 km | car | 313.1 km, 165 min | 2245 ms | 257 ms | 22.2 MB |
+| | truck | 313.1 km, 218 min | 1767 ms | 140 ms | 1.5 MB |
+| | motorcycle | 313.1 km, 165 min | 1754 ms | 209 ms | 1.5 MB |
+| central Lisbon, 2 km | bicycle | 2.2 km, 8 min | 510 ms | 31 ms | 10.0 MB |
+| | pedestrian | 1.9 km, 23 min | 339 ms | 36 ms | 1.2 MB |
+| rural Bragança, 33 km | bicycle | 33.6 km, 146 min | 692 ms | 9 ms | 10.6 MB |
+| | pedestrian | 32.5 km, 411 min | 466 ms | 7 ms | 0.9 MB |
 
-Repeated routes, nothing left to fetch:
+The lorry is 32% slower than the car over the same roads, which is the 90 km/h
+cap on motorways. The second and third vehicles cost a fraction of the first,
+because the road network was already downloaded and only their own columns
+remain. Opening a bundle costs two requests and about 4 kB, whatever its size,
+so a reader knows which vehicles are on offer before fetching anything.
+
+A route repeated costs almost nothing: the stitched corridor is kept, one per
+vehicle the bundle holds, so moving between vehicles does not discard it.
+
+Repeated routes against 0.1.0, which had none of this:
 
 | | 0.1.0 | 0.2.0 |
 | --- | --- | --- |
-| Porto to Lisbon | 2107 ms | **534 ms** |
-| Lisbon to Faro | 2170 ms | **452 ms** |
+| Porto to Lisbon | 2107 ms | **257 ms** |
+| Lisbon to Faro | 2170 ms | **~140 ms** |
 
-Stitching the corridor was 1293 ms of the old figure and the A* search about
-500 ms; the search was never the bottleneck.
+Three things account for it: the corridor is no longer re-stitched for every
+route, the stitch itself no longer builds a string key per node, and the search
+no longer remembers how it arrived at every junction in the country — only at
+the 1.3% that ban a turn.
 
-Physical limits on Portugal: 7,652 of 2,757,819 edges state one, which is
+Physical limits on Portugal: 7,652 of 2,760,171 edges state one, which is
 0.28%. That is why they are a side table rather than four columns — columns
-would cost about 11 MB to say nothing almost everywhere, against 61 KB.
+would cost about 11 MB to say nothing almost everywhere, against 61 kB.
+
+### Tile size matters more for walking and cycling
+
+A short urban bicycle route downloads 10 MB above, where the same journey by
+car downloads 4.3. Both fetch the tile they start in, and a tile of footpaths
+holds far more than a tile of roads.
+
+Tile size is the lever: `--tile-size-km` trades a larger file, from more
+overlap between tiles, against a smaller first download. The default of 120 km
+suits a road network. An active-travel bundle for a city is better served by
+something smaller.
 
 ## Licence
 
