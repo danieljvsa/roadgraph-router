@@ -88,7 +88,9 @@ describe("the shared and profile chunks", () => {
   });
 
   it("refuses a profile chunk naming a profile this build cannot route", () => {
-    expect(() => encodeProfileChunk({ profileId: ProfileId.bicycle, maxSpeedKph: 25, edgeDurationScale: 1, edgeDurationsSeconds: new Uint16Array(4) })).toThrow(/unsupported profile/i);
+    // A bundle from a later version, naming an id assigned after this one.
+    const unassigned = Math.max(...Object.values(ProfileId)) + 1;
+    expect(() => encodeProfileChunk({ profileId: unassigned, maxSpeedKph: 25, edgeDurationScale: 1, edgeDurationsSeconds: new Uint16Array(4) })).toThrow(/unsupported profile/i);
   });
 });
 

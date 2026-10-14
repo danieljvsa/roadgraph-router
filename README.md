@@ -52,10 +52,11 @@ useful for embedded or application-managed data.
 ## Vehicles
 
 Every tag decision lives behind a `RoutingProfile` rather than in the compiler.
-Three ship: `car`, `motorcycle` and `truck`. They read the same tags in the
-same order and differ in the mode name at the bottom of each hierarchy, so a
-car resolves `motorcar` where a motorcycle resolves `motorcycle` and a lorry
-resolves `hgv`.
+Five ship. `car`, `motorcycle` and `truck` read the same tags in the same
+order and differ in the mode name at the bottom of each hierarchy, so a car
+resolves `motorcar` where a motorcycle resolves `motorcycle` and a lorry
+resolves `hgv`. `bicycle` and `pedestrian` are a different shape, described
+below.
 
 | | `car` | `motorcycle` | `truck` |
 | --- | --- | --- | --- |
@@ -63,6 +64,25 @@ resolves `hgv`.
 | Speed ceiling | 150 km/h | 150 km/h | **90 km/h**, applied to every road |
 | Mode-specific tags | `oneway:motorcar`, `maxspeed:motorcar`, `restriction:motorcar` | `oneway:motorcycle`, `maxspeed:motorcycle`, `restriction:motorcycle` | `oneway:hgv`, `maxspeed:hgv`, `restriction:hgv` |
 | Physical limits | — | — | `maxheight`, `maxwidth`, `maxlength`, `maxweight` |
+
+| | `bicycle` | `pedestrian` |
+| --- | --- | --- |
+| Access keys | `access`, `vehicle`, `bicycle` | `access`, `foot` |
+| Speed | 7–18 km/h by way class | 2–5 km/h by way class |
+| Ceiling | 30 km/h | 7 km/h |
+| One-way signs | obeyed, lifted by `oneway:bicycle=no` | ignored, unless `oneway:foot` |
+| Reads `maxspeed` | only to go slower | only to go slower |
+
+Walking and cycling are not motor vehicles with different numbers; three rules
+change shape. A posted limit never makes anyone pedal harder, so the way class
+decides the pace and `maxspeed` can only lower it. A one-way sign restrains
+traffic, which a pedestrian is not and a cyclist often has a signed contraflow
+out of. And the network itself differs: a footway or a path is the road here,
+while a motorway is not part of it at all.
+
+Steps are walkable at 2 km/h and not cyclable at all. Shared paths tagged as a
+cycleway are walkable, because where walking is genuinely forbidden `foot=no`
+says so.
 
 A lorry is capped below the posted limit nearly everywhere, so `truck` caps
 every speed rather than only bounding the A* heuristic: a truck graph reusing
@@ -104,6 +124,16 @@ that is 42.9 MB for three vehicles where three separate bundles would be about
 
 A single vehicle with no physical limits still compiles to the one-chunk layout
 it always has, byte for byte.
+
+**Walking and cycling need their own bundle.** They use footways, paths, steps
+and cycleways that a road graph correctly leaves out, so they are not another
+column on the same network but a larger network. Compiled together, Portugal is
+102.3 MB against 42.8 MB for the three motor vehicles — putting them in the
+same file would have made every driver download the footpaths.
+
+```sh
+roadgraph-compile portugal.osm.pbf --output portugal-active.efrb --profile bicycle,pedestrian --max-memory-mb 3000
+```
 
 ### Choosing a vehicle at runtime
 
@@ -503,7 +533,8 @@ What the bundled profiles read, and what they deliberately do not.
 
 | Area | Behaviour |
 | --- | --- |
-| Bicycle and pedestrian | Not implemented. They need footways, cycleways and paths that a motor-vehicle graph correctly omits, which is a different compile rather than another column. `getRoutingProfile` throws for them. |
+| An isolated path fragment | Snapping finds the nearest road, not the nearest *useful* one. A point a couple of metres from a disconnected stub snaps to the stub and the route fails, even with a connected road just beyond. It bites hardest on walking and cycling networks, where small fragments are common. |
+| Surface, gradient and steps beyond a flat penalty | A cycling speed comes from the way class alone. `surface`, `smoothness` and elevation are not read, so a cobbled climb costs the same as smooth level tarmac. |
 | Alternative routes | Not in 0.2.0. `routeAlternatives` is planned for 0.3.0. |
 | Untagged limits | A road stating no `maxheight` or `maxweight` is treated as open to any lorry. Absence of a tag is not a measurement. |
 | Axle load, trailer and hazmat rules | `maxaxleload`, `hazmat` and trailer-specific access are not read. |
@@ -557,6 +588,19 @@ Portugal, `portugal-latest.osm.pbf` at 425 MB, on one machine:
 Three vehicles cost 12.8% more than one and compile in the same time, because
 the extract is read once however many are asked for. The same three as separate
 bundles would be about 114 MB.
+
+Walking and cycling, compiled together into their own bundle:
+
+| | bicycle + pedestrian |
+| --- | --- |
+| Bundle | 102.32 MB |
+| Peak compile memory | 2.21 GB |
+| Compile time | 17m 00s |
+| Routing nodes | 2,721,847 |
+| Routing edges | 6,866,866 |
+
+Two and a half times the edges of the motor-vehicle bundle, because footways
+and paths exist where roads do not. It needs `--max-memory-mb 3000`.
 
 Porto to Lisbon over the three-vehicle bundle, cold:
 

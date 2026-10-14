@@ -7,6 +7,9 @@ import { ProfileId, carRoutingProfile, getRoutingProfileById, maxSpeedMpsFor, pr
 import { buildGraph, pathOf, rangeFetcher } from "./test-support";
 import type { RoadGraph } from "./types";
 
+/** Past every id this version assigns, so it stands for a bundle from a later one. */
+const UNASSIGNED_PROFILE_ID = Math.max(...Object.values(ProfileId)) + 1;
+
 const grid = () => buildGraph({
   nodes: { A: [41.0, -8.0], B: [41.0, -7.99], C: [41.01, -7.99], D: [41.01, -8.0] },
   roads: ["A-B", "B-C", "C-D", "D-A"],
@@ -29,11 +32,11 @@ describe("profile metadata in a packed graph", () => {
     }
   });
 
-  it("refuses an id that is reserved but not implemented in this build", () => {
-    // A bicycle graph opened by a build with no bicycle rules would route by
-    // car rules. Refusing is the point; this becomes a round trip when the
-    // profile itself lands, as truck's did.
-    expect(() => roundTrip({ ...grid(), profileId: ProfileId.bicycle })).toThrow(/unsupported profile/i);
+  it("refuses an id this build does not know", () => {
+    // Every reserved id is implemented now, so the case to guard is a bundle
+    // from a future version naming a profile that does not exist here: it
+    // would otherwise be routed by car rules.
+    expect(() => roundTrip({ ...grid(), profileId: UNASSIGNED_PROFILE_ID })).toThrow(/unsupported profile/i);
   });
 
   it("writes nothing for a graph that names no profile", () => {
@@ -91,7 +94,7 @@ describe("profile metadata in a bundle", () => {
   });
 
   it("refuses at open a bundle whose profile this build cannot route", async () => {
-    const graph = { ...compactGraph(grid()), profileId: ProfileId.pedestrian, maxSpeedKph: 6 };
+    const graph = { ...compactGraph(grid()), profileId: UNASSIGNED_PROFILE_ID, maxSpeedKph: 6 };
     const bundle = encodeRoadGraphBundle([{ id: 1, bounds, graph }]);
     // Better here than on the first tile: nothing has been downloaded yet.
     await expect(openRoadGraphBundle("https://example.test/foot.efrb", rangeFetcher(bundle).fetcher))

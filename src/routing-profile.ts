@@ -339,7 +339,180 @@ export const truckRoutingProfile = motorVehicleProfile({
   physicalLimits: true,
 });
 
-export const routingProfiles: Record<string, RoutingProfile> = { car: carRoutingProfile, motorcycle: motorcycleRoutingProfile, truck: truckRoutingProfile };
+/* --------------------------------------------------- walking and cycling --- */
+
+/**
+ * Walking and cycling are not motor vehicles with different numbers. Three
+ * rules change shape rather than value, which is why they do not come from the
+ * factory above.
+ *
+ * A posted speed limit does not make anyone walk faster, so the class decides
+ * the speed and `maxspeed` only ever lowers it. A one-way street is one-way
+ * for traffic, not for people on foot, and a cyclist very often has a legal
+ * contraflow where a driver does not. And the roads themselves differ: a
+ * footway or a path is the network here, while a motorway is not part of it
+ * at all.
+ */
+
+/** How fast each kind of way is walked, in km/h. Steps are slower than level ground. */
+const WALKING_SPEEDS: Record<string, number> = {
+  footway: 5,
+  // A shared path is often tagged as a cycleway; where walking is genuinely
+  // forbidden, `foot=no` says so and the access ladder catches it.
+  cycleway: 5,
+  path: 5,
+  pedestrian: 5,
+  living_street: 5,
+  residential: 5,
+  service: 5,
+  unclassified: 5,
+  road: 5,
+  tertiary: 5,
+  tertiary_link: 5,
+  secondary: 5,
+  secondary_link: 5,
+  primary: 5,
+  primary_link: 5,
+  track: 4,
+  bridleway: 4,
+  corridor: 5,
+  steps: 2,
+};
+
+/** How fast each kind of way is ridden, in km/h. */
+const CYCLING_SPEEDS: Record<string, number> = {
+  cycleway: 18,
+  residential: 15,
+  living_street: 10,
+  service: 12,
+  unclassified: 15,
+  road: 14,
+  tertiary: 16,
+  tertiary_link: 14,
+  secondary: 16,
+  secondary_link: 14,
+  primary: 15,
+  primary_link: 13,
+  path: 11,
+  footway: 7,
+  pedestrian: 7,
+  track: 9,
+  bridleway: 8,
+};
+
+/**
+ * Walking and cycling both reach a way through `access` and then their own
+ * key, with no vehicle ladder in between for a pedestrian. A cyclist is a
+ * vehicle, so `vehicle` applies to them and not to someone on foot.
+ */
+function activeTravelProfile(options: {
+  name: string;
+  id: ProfileId;
+  mode: string;
+  speeds: Record<string, number>;
+  ceilingKph: number;
+  accessKeys: readonly string[];
+  /** True where a one-way sign governs traffic rather than this traveller. */
+  ignoresOneway: boolean;
+  /**
+   * The slowest this traveller is ever modelled as moving. The motor-vehicle
+   * floor of 5 km/h is walking pace, so applying it here would make a flight
+   * of steps as quick as level ground.
+   */
+  floorKph: number;
+}): RoutingProfile {
+  const { name, id, mode, speeds, ceilingKph, accessKeys, ignoresOneway, floorKph } = options;
+  const onewayKeys = [`oneway:${mode}`] as const;
+  const restrictionKeys = ["restriction", `restriction:${mode}`] as const;
+  const exceptModes = new Set([mode]);
+
+  return {
+    name,
+    id,
+    wayTagKeys: ["highway", "junction", "maxspeed", ...accessKeys, "oneway", ...onewayKeys],
+    relationTagKeys: ["type", "except", ...restrictionKeys],
+    maxSpeedKph: ceilingKph,
+
+    evaluateWay(tags) {
+      const highway = tags.highway;
+      if (!highway || !(highway in speeds)) return null;
+      if (!accessAllowed(tags, accessKeys)) return null;
+
+      // A one-way sign restrains traffic. Someone on foot is not traffic, and
+      // a cyclist is often signed out of it explicitly.
+      const own = tags[`oneway:${mode}`]?.trim().toLowerCase();
+      let forward = true;
+      let backward = true;
+      if (own !== undefined && own !== "") {
+        forward = own !== "-1" && own !== "reverse";
+        backward = own === "no" || own === "false" || own === "0" || own === "-1" || own === "reverse";
+      } else if (!ignoresOneway) {
+        ({ forward, backward } = onewayDirections(tags, highway, ["oneway"]));
+      }
+      if (!forward && !backward) return null;
+
+      // The class decides the pace; a posted limit can only slow it down,
+      // never speed it up, because a sign does not make anyone pedal harder.
+      const posted = parseMaxSpeedKph(tags.maxspeed);
+      const wanted = Math.min(speeds[highway], posted !== null && posted > 0 ? posted : Infinity);
+      const speed = Math.min(ceilingKph, Math.max(floorKph, wanted));
+      return { forward, backward, forwardSpeedKph: speed, backwardSpeedKph: speed };
+    },
+
+    evaluateTurnRestriction(tags) {
+      if (tags.type !== "restriction") return null;
+      const except = tags.except?.split(";").map((value) => value.trim().toLowerCase()) ?? [];
+      if (except.some((value) => exceptModes.has(value))) return null;
+      let value: string | undefined;
+      for (const key of restrictionKeys) if (tags[key] !== undefined) value = tags[key];
+      if (!value) return null;
+      const kind = TURN_RESTRICTION_KINDS[value.trim().toLowerCase()];
+      return kind ? { kind, value } : null;
+    },
+  };
+}
+
+/**
+ * Cycling. A cyclist is a vehicle, so the vehicle access ladder applies, and
+ * a one-way street is one-way for them too unless `oneway:bicycle=no` says
+ * otherwise — which is how a contraflow cycle lane is tagged, and there are
+ * a great many of them.
+ */
+export const bicycleRoutingProfile: RoutingProfile = activeTravelProfile({
+  name: "bicycle",
+  id: ProfileId.bicycle,
+  mode: "bicycle",
+  speeds: CYCLING_SPEEDS,
+  ceilingKph: 30,
+  accessKeys: ["access", "vehicle", "bicycle"],
+  ignoresOneway: false,
+  floorKph: 4,
+});
+
+/**
+ * Walking. Someone on foot is not a vehicle, so neither `vehicle` nor
+ * `motor_vehicle` reaches them, and a one-way sign does not either. Only
+ * `oneway:foot` can make a way one-way for walking, which is rare and usually
+ * means a barrier or a turnstile.
+ */
+export const pedestrianRoutingProfile: RoutingProfile = activeTravelProfile({
+  name: "pedestrian",
+  id: ProfileId.pedestrian,
+  mode: "foot",
+  speeds: WALKING_SPEEDS,
+  ceilingKph: 7,
+  accessKeys: ["access", "foot"],
+  ignoresOneway: true,
+  floorKph: 1,
+});
+
+export const routingProfiles: Record<string, RoutingProfile> = {
+  car: carRoutingProfile,
+  motorcycle: motorcycleRoutingProfile,
+  truck: truckRoutingProfile,
+  bicycle: bicycleRoutingProfile,
+  pedestrian: pedestrianRoutingProfile,
+};
 
 export function getRoutingProfile(name: string): RoutingProfile {
   const profile = routingProfiles[name];

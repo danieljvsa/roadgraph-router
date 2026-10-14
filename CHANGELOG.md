@@ -9,11 +9,19 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.2.0] - 2026-10-14
 
 Multi-vehicle routing. One bundle can now serve a car, a motorcycle and a
-lorry, and a lorry's routes depend on its size and weight. Alternative routes
-moved to 0.3.0.
+lorry, and a lorry's routes depend on its size and weight. Walking and cycling
+ship too, in a bundle of their own. Alternative routes moved to 0.3.0.
 
 ### Added
 
+- **`bicycle` and `pedestrian` profiles.** Not motor vehicles with different
+  numbers: a posted limit never makes anyone pedal harder, so the way class
+  decides the pace and `maxspeed` can only lower it; a one-way sign restrains
+  traffic, which a pedestrian is not and a cyclist often has a signed
+  contraflow out of; and footways, paths, steps and cycleways are the network
+  rather than roads left out of it. They need their own bundle — Portugal is
+  102.3 MB for both against 42.8 MB for the three motor vehicles — because
+  folding them in would make every driver download the footpaths.
 - **`motorcycle` and `truck` profiles.** The car profile became a factory
   parameterised by the mode name, so all three read the same tags in the same
   order and differ in the key at the bottom of each hierarchy: `motorcar`,
