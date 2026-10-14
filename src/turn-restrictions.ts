@@ -1,4 +1,5 @@
 import type { RoadGraph } from "./types";
+import { edgeAllowed } from "./access";
 
 /**
  * Turn restrictions are stored as banned ordered edge pairs. A pair
@@ -20,11 +21,15 @@ export function buildTurnRestrictionIndex(graph: RoadGraph): TurnRestrictionInde
   if (fromEdges.length !== toEdges.length) throw new Error("Turn restriction arrays must have the same length.");
   const index: TurnRestrictionIndex = new Map();
   for (let pair = 0; pair < fromEdges.length; pair += 1) {
+    // A shared restriction list carries every vehicle's bans; this vehicle's
+    // mask says which of them it obeys. `except=hgv` lifts one for lorries and
+    // leaves it standing for cars.
+    if (!edgeAllowed(graph.restrictionMask, pair)) continue;
     const banned = index.get(fromEdges[pair]);
     if (banned) banned.add(toEdges[pair]);
     else index.set(fromEdges[pair], new Set([toEdges[pair]]));
   }
-  return index;
+  return index.size ? index : null;
 }
 
 export function isTurnBanned(index: TurnRestrictionIndex, fromEdge: number, toEdge: number) {
@@ -73,7 +78,11 @@ export function buildTurnSequenceIndex(graph: RoadGraph): TurnSequenceIndex | nu
   if (!offsets || !edges || offsets.length < 2) return null;
   const sequences: number[][] = [];
   const startingAt = new Map<number, number[]>();
+  // Sequences sit after the pairs in the vehicle's restriction mask, so their
+  // bits start where the pairs' end.
+  const pairs = graph.turnRestrictionFromEdges?.length ?? 0;
   for (let index = 0; index + 1 < offsets.length; index += 1) {
+    if (!edgeAllowed(graph.restrictionMask, pairs + index)) continue;
     const sequence = Array.from(edges.subarray(offsets[index], offsets[index + 1]));
     if (sequence.length < 3) continue;
     const id = sequences.length;

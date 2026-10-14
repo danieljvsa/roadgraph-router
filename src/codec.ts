@@ -537,12 +537,16 @@ export function encodeProfileChunk(chunk: ProfileChunk): ArrayBuffer {
   if (chunk.maxSpeedKph <= 0 || chunk.maxSpeedKph > MAX_PLAUSIBLE_SPEED_KPH) throw new Error("Invalid profile speed ceiling.");
   const mask = chunk.edgeAccess && !allowsEverything(chunk.edgeAccess, edges) ? chunk.edgeAccess : undefined;
   if (mask && mask.length !== (edges + 7) >> 3) throw new Error("Profile access mask does not cover every edge.");
+  const restrictions = chunk.restrictionCount ?? 0;
+  const turns = chunk.restrictionMask && restrictions && !allowsEverything(chunk.restrictionMask, restrictions) ? chunk.restrictionMask : undefined;
+  if (turns && turns.length !== (restrictions + 7) >> 3) throw new Error("Profile restriction mask does not cover every restriction.");
 
   // The limit table holds 32-bit edge numbers, so it starts on a four-byte
   // boundary: the mask before it can be any number of bytes long.
-  const limitsAt = alignUp(PROFILE_CHUNK_HEADER_BYTES + edges * 2 + (mask?.byteLength ?? 0));
+  const variableAt = PROFILE_CHUNK_HEADER_BYTES + edges * 2 + (mask?.byteLength ?? 0) + (turns?.byteLength ?? 0);
+  const limitsAt = alignUp(variableAt);
   const limitRows = limits?.edges.length ?? 0;
-  const buffer = new ArrayBuffer(limitRows ? limitsAt + limitRows * 8 : PROFILE_CHUNK_HEADER_BYTES + edges * 2 + (mask?.byteLength ?? 0));
+  const buffer = new ArrayBuffer(limitRows ? limitsAt + limitRows * 8 : variableAt);
   const view = new DataView(buffer);
   view.setUint32(0, COMPACT_MAGIC, true);
   view.setUint16(4, SPLIT_COMPACT_VERSION, true);
@@ -553,8 +557,11 @@ export function encodeProfileChunk(chunk: ProfileChunk): ArrayBuffer {
   view.setUint16(16, chunk.edgeDurationScale, true);
   view.setUint16(18, Math.round(chunk.maxSpeedKph), true);
   view.setUint32(20, limitRows, true);
+  view.setUint32(24, restrictions, true);
+  view.setUint32(28, turns?.byteLength ?? 0, true);
   new Uint16Array(buffer, PROFILE_CHUNK_HEADER_BYTES, edges).set(chunk.edgeDurationsSeconds);
   if (mask) new Uint8Array(buffer, PROFILE_CHUNK_HEADER_BYTES + edges * 2, mask.byteLength).set(mask);
+  if (turns) new Uint8Array(buffer, PROFILE_CHUNK_HEADER_BYTES + edges * 2 + (mask?.byteLength ?? 0), turns.byteLength).set(turns);
   if (limits && limitRows) {
     new Uint32Array(buffer, limitsAt, limitRows).set(limits.edges);
     const columns = new Uint8Array(buffer, limitsAt + limitRows * 4, limitRows * 4);
@@ -578,12 +585,16 @@ export function decodeProfileChunk(buffer: ArrayBuffer): ProfileChunk {
   const edgeDurationScale = view.getUint16(16, true);
   const maxSpeedKph = view.getUint16(18, true);
   const limitRows = view.getUint32(20, true);
+  const restrictionCount = view.getUint32(24, true);
+  const turnMaskBytes = view.getUint32(28, true);
   if (!profileId || !getRoutingProfileById(profileId)) throw new Error(`Routing graph was compiled for an unsupported profile (id ${profileId}).`);
   if (!edgeDurationScale) throw new Error("Invalid routing profile chunk: zero duration scale.");
   if (maxSpeedKph > MAX_PLAUSIBLE_SPEED_KPH) throw new Error("Invalid routing profile chunk: implausible profile speed ceiling.");
   if (maskBytes && maskBytes !== (edges + 7) >> 3) throw new Error("Invalid routing profile chunk: access mask does not cover every edge.");
-  const limitsAt = alignUp(PROFILE_CHUNK_HEADER_BYTES + edges * 2 + maskBytes);
-  const expected = limitRows ? limitsAt + limitRows * 8 : PROFILE_CHUNK_HEADER_BYTES + edges * 2 + maskBytes;
+  if (turnMaskBytes && turnMaskBytes !== (restrictionCount + 7) >> 3) throw new Error("Invalid routing profile chunk: restriction mask does not cover every restriction.");
+  const variableAt = PROFILE_CHUNK_HEADER_BYTES + edges * 2 + maskBytes + turnMaskBytes;
+  const limitsAt = alignUp(variableAt);
+  const expected = limitRows ? limitsAt + limitRows * 8 : variableAt;
   if (limitRows > edges) throw new Error("Invalid routing profile chunk: more limits than edges.");
   if (buffer.byteLength !== expected) throw new Error("Truncated routing profile chunk");
   let edgeLimits: EdgeLimits | undefined;
@@ -608,6 +619,8 @@ export function decodeProfileChunk(buffer: ArrayBuffer): ProfileChunk {
     edgeDurationScale,
     edgeDurationsSeconds: new Uint16Array(buffer.slice(PROFILE_CHUNK_HEADER_BYTES, PROFILE_CHUNK_HEADER_BYTES + edges * 2)),
     ...(maskBytes ? { edgeAccess: new Uint8Array(buffer.slice(PROFILE_CHUNK_HEADER_BYTES + edges * 2, PROFILE_CHUNK_HEADER_BYTES + edges * 2 + maskBytes)) } : {}),
+    ...(restrictionCount ? { restrictionCount } : {}),
+    ...(turnMaskBytes ? { restrictionMask: new Uint8Array(buffer.slice(PROFILE_CHUNK_HEADER_BYTES + edges * 2 + maskBytes, variableAt)) } : {}),
     ...(edgeLimits ? { edgeLimits } : {}),
   };
 }
@@ -639,5 +652,6 @@ export function combineProfiledGraph(shared: SharedRoadGraph, profile: ProfileCh
     maxSpeedKph: profile.maxSpeedKph,
     ...(profile.edgeAccess ? { edgeAccess: profile.edgeAccess } : {}),
     ...(profile.edgeLimits ? { edgeLimits: profile.edgeLimits } : {}),
+    ...(profile.restrictionMask ? { restrictionMask: profile.restrictionMask } : {}),
   };
 }

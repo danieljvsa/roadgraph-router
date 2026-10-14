@@ -61,6 +61,11 @@ export interface RoadGraph {
    * for a profile whose routes depend on the vehicle's size. See `./limits`.
    */
   edgeLimits?: EdgeLimits;
+  /**
+   * One bit per turn restriction, saying whether this vehicle obeys it. The
+   * pairs come first, then the sequences. Absent means all of them apply.
+   */
+  restrictionMask?: Uint8Array;
   /** Optional intermediate vertices per directed edge, stored using coordinateScale. */
   edgeShapeOffsets?: Uint32Array;
   edgeShapeLatitudes?: Int32Array;
@@ -157,4 +162,13 @@ export interface ProfileChunk {
   edgeAccess?: Uint8Array;
   /** Signed limits for the few edges that state any; absent for vehicles whose size does not matter. */
   edgeLimits?: EdgeLimits;
+  /**
+   * One bit per turn restriction the shared chunk holds, saying whether this
+   * vehicle obeys it. `except=hgv` lifts a restriction for lorries and not for
+   * cars, so a shared restriction list needs a per-vehicle answer. Absent
+   * means every restriction applies.
+   */
+  restrictionMask?: Uint8Array;
+  /** How many restrictions that mask covers: the pairs, then the sequences. */
+  restrictionCount?: number;
 }
