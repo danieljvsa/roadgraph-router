@@ -77,6 +77,13 @@ export interface RoutingProfile {
    * tells the compiler to keep the limits `evaluateWay` reports.
    */
   readonly usesPhysicalLimits?: boolean;
+  /** Node tag keys the compiler must request, for barriers. */
+  readonly nodeTagKeys?: readonly string[];
+  /**
+   * Whether this traveller gets past a barrier on the road. Returns true when
+   * the node is not a barrier at all, so an absent answer means "carry on".
+   */
+  evaluateBarrier?(tags: OsmTags): boolean;
 }
 
 const MINIMUM_SPEED_KPH = 5;
@@ -118,6 +125,68 @@ const TURN_RESTRICTION_KINDS: Record<string, TurnRestrictionKind> = {
   only_straight_on: "only",
   only_u_turn: "only",
 };
+
+/**
+ * What stands across a road, and who it stops.
+ *
+ * A barrier is a node, not a way, and the same gate stops different travellers
+ * differently: a bollard is nothing to someone walking and the end of the road
+ * for a car, while a stile is the reverse. Where a barrier carries its own
+ * access tags those decide; the defaults below only apply when it says nothing,
+ * which is the common case.
+ *
+ * `true` means this traveller gets through. A barrier this table has never
+ * heard of is treated as passable rather than guessed at, because inventing a
+ * closure severs a road that is probably open.
+ */
+const BARRIER_DEFAULTS: Record<string, { motor: boolean; bicycle: boolean; foot: boolean }> = {
+  bollard: { motor: false, bicycle: true, foot: true },
+  block: { motor: false, bicycle: true, foot: true },
+  jersey_barrier: { motor: false, bicycle: true, foot: true },
+  planter: { motor: false, bicycle: true, foot: true },
+  cycle_barrier: { motor: false, bicycle: false, foot: true },
+  stile: { motor: false, bicycle: false, foot: true },
+  turnstile: { motor: false, bicycle: false, foot: true },
+  kissing_gate: { motor: false, bicycle: false, foot: true },
+  fence: { motor: false, bicycle: false, foot: false },
+  wall: { motor: false, bicycle: false, foot: false },
+  hedge: { motor: false, bicycle: false, foot: false },
+  ditch: { motor: false, bicycle: false, foot: false },
+  // A gate or a boom is usually open, or opens for you; `access` and `locked`
+  // say when it is not.
+  gate: { motor: true, bicycle: true, foot: true },
+  lift_gate: { motor: true, bicycle: true, foot: true },
+  swing_gate: { motor: true, bicycle: true, foot: true },
+  bus_trap: { motor: false, bicycle: true, foot: true },
+  sally_port: { motor: true, bicycle: true, foot: true },
+  toll_booth: { motor: true, bicycle: true, foot: true },
+  border_control: { motor: true, bicycle: true, foot: true },
+  entrance: { motor: true, bicycle: true, foot: true },
+};
+
+/** The keys every profile reads off a barrier node. */
+const BARRIER_TAG_KEYS = ["barrier", "locked", "access", "foot", "bicycle", "vehicle", "motor_vehicle", "motorcar", "motorcycle", "hgv"] as const;
+
+/**
+ * Whether `mode` gets past this node. The access ladder is read first, because
+ * an explicit `bicycle=yes` on a gate outranks any default; then `locked=yes`,
+ * which closes anything; then the table above.
+ */
+function barrierAllows(tags: OsmTags, accessKeys: readonly string[], kind: "motor" | "bicycle" | "foot") {
+  const barrier = tags.barrier?.trim().toLowerCase();
+  if (!barrier || barrier === "no") return true;
+  let decided: boolean | undefined;
+  for (const key of accessKeys) {
+    const value = tags[key];
+    if (value !== undefined) decided = !BLOCKED_ACCESS.has(value);
+  }
+  if (decided !== undefined) return decided;
+  if (tags.locked?.trim().toLowerCase() === "yes") return false;
+  const defaults = BARRIER_DEFAULTS[barrier];
+  // An unknown barrier is left open: inventing a closure severs a road that is
+  // probably passable, and the tag may simply be one this table has not met.
+  return defaults ? defaults[kind] : true;
+}
 
 /** Highway classes OSM treats as implicitly one-way when no `oneway` tag is present. */
 const IMPLICITLY_ONEWAY = new Set(["motorway", "motorway_link"]);
@@ -271,6 +340,8 @@ function motorVehicleProfile(options: { name: string; id: ProfileId; mode: strin
     ],
     relationTagKeys: ["type", "except", ...restrictionKeys],
     maxSpeedKph: ceiling,
+    nodeTagKeys: BARRIER_TAG_KEYS,
+    evaluateBarrier: (tags) => barrierAllows(tags, accessKeys, "motor"),
     ...(options.physicalLimits ? { usesPhysicalLimits: true } : {}),
 
     evaluateWay(tags) {
@@ -432,6 +503,8 @@ function activeTravelProfile(options: {
     wayTagKeys: ["highway", "junction", "maxspeed", ...accessKeys, "oneway", ...onewayKeys],
     relationTagKeys: ["type", "except", ...restrictionKeys],
     maxSpeedKph: ceilingKph,
+    nodeTagKeys: BARRIER_TAG_KEYS,
+    evaluateBarrier: (tags) => barrierAllows(tags, accessKeys, mode === "foot" ? "foot" : "bicycle"),
 
     evaluateWay(tags) {
       const highway = tags.highway;

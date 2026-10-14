@@ -543,6 +543,7 @@ What the bundled profiles read, and what they deliberately do not.
 | Direction | `oneway=yes/no/-1/reverse/true/false/1/0`, `junction=roundabout/circular`, implicit one-way on motorways |
 | Speed | `maxspeed`, `maxspeed:forward`, `maxspeed:backward`, `maxspeed:<mode>`; km/h, `mph`, `km/h`, `kmh`, `knots`, `walk` |
 | Lorry limits | `maxheight`, `maxwidth`, `maxlength`, `maxweight`, each with `:forward`, `:backward` and `:hgv` forms, plus `maxheight:physical` and `maxwidth:physical`; metric and feet-and-inches |
+| Barriers | `barrier` on a node, with `locked` and the access ladder; a bollard stops a car, a stile stops everything but walking, a gate is open unless it says otherwise |
 | Turn restrictions | `no_left_turn`, `no_right_turn`, `no_straight_on`, `no_u_turn`, `no_entry`, `no_exit`, `only_left_turn`, `only_right_turn`, `only_straight_on`, `only_u_turn` |
 | Restriction scope | `via` node and `via` way; `restriction:<mode>`, `restriction:motor_vehicle` and `restriction:vehicle` override the generic key; `except` listing one of this vehicle's modes drops the relation for that vehicle alone |
 
@@ -560,7 +561,8 @@ What the bundled profiles read, and what they deliberately do not.
 | Restrictions spanning a tile boundary | Dropped for tiles that do not hold every edge of the run, rather than enforced in a shortened form. |
 | Turn costs and traffic signals | Not modelled; a turn costs nothing beyond the roads it joins. |
 | Live traffic, elevation, ferries as a distinct mode | Not modelled. Ferry ways are excluded with everything that is not a road. |
-| `barrier`, `motor_vehicle:conditional`, toll avoidance | Not read. Node tags are not requested from the PBF at all, so gates, bollards and height restrictors are invisible to every vehicle. |
+| `motor_vehicle:conditional`, toll avoidance | Not read. |
+| A barrier this table has not met | Treated as passable. Inventing a closure severs a road that is probably open, and the tag may simply be unfamiliar; an `access` tag on the node still decides. |
 | EFRT v1 | Carries topology only: encoding to it drops geometry and turn restrictions. Use EFR2 for anything that needs them. |
 
 The compiler reports what it skipped. `turnRestrictionsRead` against

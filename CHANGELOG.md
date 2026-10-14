@@ -14,6 +14,11 @@ ship too, in a bundle of their own. Alternative routes moved to 0.3.0.
 
 ### Added
 
+- **Barriers.** A gate, bollard or stile across a road is read from the node
+  and becomes a ban on passing through it, which still lets you turn back the
+  way you came. The same barrier stops different travellers differently: a
+  bollard is nothing on foot and the end of the road in a car, a stile is the
+  reverse. An unfamiliar barrier is left passable rather than guessed at.
 - **`bicycle` and `pedestrian` profiles.** Not motor vehicles with different
   numbers: a posted limit never makes anyone pedal harder, so the way class
   decides the pace and `maxspeed` can only lower it; a one-way sign restrains
