@@ -3,7 +3,7 @@ import { openRoadGraphBundle, type BundleTile, type RoadGraphBundle } from "./bu
 import { route } from "./router";
 import { getRoutingProfile, getRoutingProfileById, maxSpeedMpsFor } from "./routing-profile";
 import { RouterError, type Coordinate, type RoadGraph, type RoutePreference, type RouteResult } from "./types";
-import { resolveVehicle, type VehicleDimensions, type VehicleInput } from "./vehicle";
+import { DEFAULT_VEHICLE_PRESET, resolveVehicle, type VehicleDimensions, type VehicleInput } from "./vehicle";
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type RouteLoader = Pick<RouteGraphLoader | RoadGraphBundle, "loadForRoute"> & Partial<Pick<RoadGraphBundle, "loadExpandedForRoute">>;
@@ -64,14 +64,18 @@ function haversineMeters(a: Coordinate, b: Coordinate) {
  * manifest, or an already-decoded graph.
  */
 export class RoadRouter {
-  private constructor(private readonly graph?: RoadGraph, private readonly loader?: RouteLoader, private readonly options: RoadRouterOptions = {}, private readonly profileId?: number) {
+  private constructor(private readonly graph?: RoadGraph, private readonly loader?: RouteLoader, private readonly options: RoadRouterOptions = {}, private readonly profileId?: number, private readonly bundleVehicle?: string) {
     const profile = getRoutingProfileById(profileId ?? 0);
     if (options.vehicle !== undefined && options.vehicle !== null && profile && !profile.usesPhysicalLimits) {
       // Accepting dimensions a bundle cannot act on would look like they were
       // applied. A car graph holds no limits to apply them against.
       throw new Error(`The "${profile.name}" profile does not use vehicle dimensions; only a profile that stores physical limits does.`);
     }
-    this.vehicle = profile?.usesPhysicalLimits && options.vehicle !== null ? resolveVehicle(options.vehicle ?? undefined) : undefined;
+    // Caller first, then whatever the bundle was compiled to suggest, then
+    // the library's own default. Each layer is visible rather than guessed at.
+    this.vehicle = profile?.usesPhysicalLimits && options.vehicle !== null
+      ? resolveVehicle(options.vehicle ?? undefined, bundleVehicle ?? DEFAULT_VEHICLE_PRESET)
+      : undefined;
   }
 
   /** The lorry these routes are for, where the profile depends on one. */
@@ -85,7 +89,7 @@ export class RoadRouter {
     if (typeof source !== "string") return RoadRouter.fromGraph(source);
     if (source.endsWith(".efrb")) {
       const bundle = await openRoadGraphBundle(source, fetcher, { mergedCacheSize: options.mergedCacheSize, profile: options.profile });
-      return new RoadRouter(undefined, bundle, options, bundle.profileId);
+      return new RoadRouter(undefined, bundle, options, bundle.profileId, bundle.defaultVehicle);
     }
     return new RoadRouter(undefined, await createRouteGraphLoader(source, fetcher), options);
   }
@@ -106,7 +110,7 @@ export class RoadRouter {
     if (!this.loader.profiles.includes(wanted.id)) {
       throw new Error(`This routing bundle does not hold the "${name}" profile. It holds: ${this.loader.profiles.map((id) => getRoutingProfileById(id)?.name ?? `id ${id}`).join(", ")}.`);
     }
-    return new RoadRouter(undefined, this.loader, this.options, wanted.id);
+    return new RoadRouter(undefined, this.loader, this.options, wanted.id, this.bundleVehicle);
   }
 
   async route(from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest"): Promise<RouteResult> {

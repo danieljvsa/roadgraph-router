@@ -25,6 +25,23 @@ export type VehicleDimensions = {
   weightTonnes: number;
 };
 
+/**
+ * Stable ids, so a bundle can name its default vehicle in one byte. They are
+ * part of the file format: a value is never reused for a different class, and
+ * 0 means the bundle states no default, which falls back to the library's.
+ */
+export const VehiclePresetId: Record<string, number> = {
+  van: 1,
+  rigid: 2,
+  articulated: 3,
+  "road-train": 4,
+  "us-semi": 5,
+};
+
+export function vehiclePresetName(id: number): string | null {
+  return Object.keys(VehiclePresetId).find((name) => VehiclePresetId[name] === id) ?? null;
+}
+
 export const VEHICLE_PRESETS: Record<string, VehicleDimensions> = {
   van: { heightMeters: 2.6, widthMeters: 2.1, lengthMeters: 6.0, weightTonnes: 3.5 },
   rigid: { heightMeters: 3.8, widthMeters: 2.55, lengthMeters: 10.0, weightTonnes: 18 },

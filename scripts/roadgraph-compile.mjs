@@ -241,7 +241,7 @@ function encodeEfr2(graph, library, profiles) {
 /** Writes the fixed-size directory, then streams each chunk straight from the
  *  spill file. Neither the chunk list nor the finished bundle is ever held in
  *  memory, so output size no longer bounds how large a region can be built. */
-async function writeBundle(output, chunks, compression, spillPath, profiles, split, defaultVehicle) {
+async function writeBundle(output, chunks, compression, spillPath, profiles, split, defaultVehicle, VEHICLE_PRESET_IDS) {
   const directoryBytes = chunks.length * DIRECTORY;
   const head = Buffer.alloc(HEADER + directoryBytes);
   head.writeUInt32LE(EFRB_MAGIC, 0); head.writeUInt16LE(split ? 2 : 1, 4); head.writeUInt16LE(HEADER, 6);
@@ -249,6 +249,7 @@ async function writeBundle(output, chunks, compression, spillPath, profiles, spl
   // The vehicle, in the header as well as in every chunk, so a reader knows it
   // before downloading a tile and can size its tile budget accordingly.
   head.writeUInt8(profiles[0].id, 20);
+  head.writeUInt8(defaultVehicle ? VEHICLE_PRESET_IDS[defaultVehicle] ?? 0 : 0, 21);
   head.writeUInt16LE(Math.round(Math.max(...profiles.map((entry) => entry.maxSpeedKph))), 22);
   head.writeUInt32LE(profiles.reduce((mask, entry) => mask | (1 << (entry.id - 1)), 0) >>> 0, 24);
   head.writeUInt32LE(split ? chunks.length / (profiles.length + 1) : chunks.length, 28);
@@ -594,7 +595,7 @@ else {
     }
     await new Promise((done, fail) => spill.end((error) => error ? fail(error) : done()));
     const split = profiles.length > 1 || profiles.some((entry) => entry.usesPhysicalLimits);
-    const bundleBytes = await writeBundle(output, chunks, compression, spillPath, profiles, split, defaultVehicle);
+    const bundleBytes = await writeBundle(output, chunks, compression, spillPath, profiles, split, defaultVehicle, library.VehiclePresetId);
     await verifyBundle(output, built.graphs.length);
     const nodesBefore = storedNodes, nodesAfter = built.routingNodes, edges = built.routingEdges, rawBytes = chunks.reduce((sum, chunk) => sum + chunk.rawBytes, 0);
     const report = { formatVersion: 1, input: file, inputBytes: source.size, profile: profiles.map((entry) => entry.name).join(","), compression: `${compression}-per-tile`, tileSizeKm, paddingKm, pbfPasses: 2, tiles: built.graphs.length, relevantOsmWays: first.ways, relevantOsmNodes, relevantOsmNodesExact: false, routingNodesBeforeSimplification: nodesBefore, routingNodesAfterSimplification: nodesAfter, reductionPercent: Number((100 * (1 - nodesAfter / Math.max(1, nodesBefore))).toFixed(2)), routingEdges: edges, turnRestrictionsRead: first.restrictions.length, turnRestrictionsSkipped: first.skippedRestrictions, bannedTurnPairs: built.bannedTurns, bannedTurnRuns: built.bannedRuns, layout: split ? "shared-plus-profile" : "single-chunk", profiles: profiles.map((entry) => entry.name), defaultVehicle: defaultVehicle ?? null, edgesWithPhysicalLimits: limitedEdges, uncompressedGraphBytes: rawBytes, bundleBytes, compressionRatio: Number((bundleBytes / Math.max(1, rawBytes)).toFixed(4)), peakRssBytes: Math.max(observedPeakRss, process.memoryUsage().rss), elapsedMilliseconds: Math.round(performance.now() - started) };

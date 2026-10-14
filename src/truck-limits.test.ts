@@ -220,3 +220,45 @@ describe("merging tiles that carry limits", () => {
     expect(countBlocked(merged, resolveVehicle("articulated"))).toBe(1);
   });
 });
+
+describe("where the vehicle comes from", () => {
+  const built = network();
+  const graph = compactGraph(built);
+  const chunk = truckChunk(graph, built.nodeNames, "B-C", { heightMeters: 3.5 });
+
+  /** Writes the bundle header's default-vehicle byte by hand, as the compiler does. */
+  const withDefault = async (preset: string | null) => {
+    const { encodeProfiledRoadGraphBundle } = await import("./bundle");
+    const { VehiclePresetId } = await import("./vehicle");
+    const bundle = await encodeProfiledRoadGraphBundle([{
+      id: 1, bounds: { minLat: 40.99, minLng: -8.01, maxLat: 41.01, maxLng: -7.95 }, graph, profiles: [chunk],
+    }], { compression: "none" });
+    if (preset) new DataView(bundle).setUint8(21, VehiclePresetId[preset]);
+    return bundle;
+  };
+
+  it("falls back to the library's default when nothing says otherwise", async () => {
+    const router = await RoadRouter.open("https://example.test/t.efrb", rangeFetcher(await withDefault(null)).fetcher);
+    expect(router.vehicle).toEqual(resolveVehicle("articulated"));
+  });
+
+  it("uses the bundle's own default where it names one", async () => {
+    const router = await RoadRouter.open("https://example.test/t.efrb", rangeFetcher(await withDefault("us-semi")).fetcher);
+    expect(router.vehicle).toEqual(resolveVehicle("us-semi"));
+  });
+
+  it("lets the caller override the bundle", async () => {
+    const router = await RoadRouter.open("https://example.test/t.efrb", rangeFetcher(await withDefault("us-semi")).fetcher, { vehicle: "van" });
+    expect(router.vehicle).toEqual(resolveVehicle("van"));
+  });
+
+  it("merges a partial override over the bundle's preset, not the library's", async () => {
+    const router = await RoadRouter.open("https://example.test/t.efrb", rangeFetcher(await withDefault("us-semi")).fetcher, { vehicle: { heightMeters: 4.5 } });
+    expect(router.vehicle).toEqual({ heightMeters: 4.5, widthMeters: 2.59, lengthMeters: 22.0, weightTonnes: 36.3 });
+  });
+
+  it("keeps the bundle's default when the vehicle is read as another profile", async () => {
+    const router = await RoadRouter.open("https://example.test/t.efrb", rangeFetcher(await withDefault("van")).fetcher);
+    expect(router.withProfile("truck").vehicle).toEqual(resolveVehicle("van"));
+  });
+});

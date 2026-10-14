@@ -4,6 +4,7 @@ import { mergeRoadGraphs } from "./merge";
 import { withSpatialIndex } from "./spatial-index";
 import { RouterError, type Coordinate, type ProfileChunk, type RoadGraph, type SharedRoadGraph } from "./types";
 import { ProfileId, getRoutingProfile, getRoutingProfileById } from "./routing-profile";
+import { vehiclePresetName } from "./vehicle";
 
 const MAGIC = 0x42524645; // EFRB
 /** A bundle holding one graph per tile, which is every bundle published so far. */
@@ -57,6 +58,12 @@ export type RoadGraphBundle = {
   maxSpeedKph: number;
   /** Every profile this bundle can route, by id. A v1 bundle lists its one. */
   profiles: number[];
+  /**
+   * The vehicle class this bundle was compiled to suggest, where it names one.
+   * Whoever compiled the extract chose it knowingly; a caller's own `vehicle`
+   * still wins, and the library's default applies when neither says anything.
+   */
+  defaultVehicle?: string;
   loadForRoute(origin: Coordinate, destination: Coordinate): Promise<RoadGraph>;
   loadExpandedForRoute(origin: Coordinate, destination: Coordinate): Promise<RoadGraph>;
   /**
@@ -301,6 +308,7 @@ export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetc
   }
   const profiled = bundleVersion === PROFILED_VERSION;
   const defaultProfileId = headerView.getUint8(20);
+  const defaultVehicle = vehiclePresetName(headerView.getUint8(21)) ?? undefined;
   const headerSpeedKph = headerView.getUint16(22, true);
   // A v1 bundle holds exactly one vehicle, and a zero there means it was
   // written before profiles were recorded, which makes it a car.
@@ -445,6 +453,7 @@ export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetc
     profileId: chosenId,
     maxSpeedKph: headerSpeedKph,
     profiles: available,
+    ...(defaultVehicle ? { defaultVehicle } : {}),
     tilesWithinBudget(origin, destination, budgetMeters) {
       // A tile holding either endpoint is always a candidate: the route has to
       // start and finish somewhere even when the budget is tiny.

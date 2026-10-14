@@ -17,7 +17,7 @@ export { createRouteGraphLoader } from "./manifest";
 export { mergeRoadGraphs } from "./merge";
 export { buildTurnRestrictionIndex, buildTurnSequenceIndex, isTurnBanned, packTurnRestrictions, packTurnSequences } from "./turn-restrictions";
 export { ProfileId, carRoutingProfile, getRoutingProfile, getRoutingProfileById, maxSpeedMpsFor, motorcycleRoutingProfile, parseLengthMeters, parseMaxSpeedKph, parseWeightTonnes, profileOf, routingProfiles, truckRoutingProfile } from "./routing-profile";
-export { DEFAULT_VEHICLE_PRESET, VEHICLE_PRESETS, resolveVehicle, vehiclePreset } from "./vehicle";
+export { DEFAULT_VEHICLE_PRESET, VEHICLE_PRESETS, VehiclePresetId, resolveVehicle, vehiclePreset, vehiclePresetName } from "./vehicle";
 export type { CompactGraphOptions } from "./compact";
 export type { BundleBounds, BundleChunkRef, BundleEncodeOptions, BundleGraphTile, BundleOpenOptions, BundleProfiledTile, BundleTile, RoadGraphBundle } from "./bundle";
 export type { Coordinate, CoordinateStorage, EdgeLimits, GeoJsonLineString, GeoJsonPosition, ProfileChunk, RouteSnap, EdgeWeightStorage, NodeSpatialIndex, RoadGraph, RoutePreference, RouteResult, RouterErrorCode, SharedRoadGraph } from "./types";
