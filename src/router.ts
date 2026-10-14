@@ -4,9 +4,10 @@ import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
 import { edgeAllowed } from "./access";
 import { accessForVehicle } from "./limits";
+import { searchBoundsFor, straightLineAtMost } from "./search-bounds";
 import type { VehicleDimensions } from "./vehicle";
 import { buildTurnRestrictionIndex, buildTurnSequenceIndex, type TurnRestrictionIndex, type TurnSequenceIndex } from "./turn-restrictions";
-import { maxSpeedMpsFor, profileOf } from "./routing-profile";
+import { profileOf } from "./routing-profile";
 import { coordinateFor, geometryAfter, geometryBefore, geometryBetween, haversineMeters, snapToGraph, type EdgeProjection, type GraphSnap } from "./snap";
 
 /** Entering the graph: traverse the tail of `edge` to reach `node`. `edge` is -1 at a junction. */
@@ -49,16 +50,27 @@ export function findNearestNode(graph: RoadGraph, coordinate: Coordinate, maxDis
 function searchContext(graph: RoadGraph, destinationPoint: Coordinate, preference: RoutePreference) {
   const distanceScale = graph.edgeDistanceScale ?? 1;
   const durationScale = graph.edgeDurationScale ?? 1;
-  // The ceiling comes from the graph, not from this file: dividing a walking
-  // route's remaining distance by a car's top speed keeps the heuristic
-  // admissible but drives it to nearly zero, which turns A* into Dijkstra.
-  const maxSpeedMps = maxSpeedMpsFor(graph);
+  // Both bounds are measured from the graph rather than assumed, and cached
+  // with it. The speed ceiling has to cover the fastest edge the graph
+  // actually holds, which quantisation can push above the profile's own
+  // ceiling; dividing by the smaller number would overestimate what remains
+  // and let A* settle for a route that is not the best one.
+  const { maxSpeedMps, longitudeMetresPerDegree } = searchBoundsFor(graph);
+  const coordinateScale = graph.coordinateScale ?? 1;
+  const latitudes = graph.nodeLatitudes;
+  const longitudes = graph.nodeLongitudes;
+  const destinationLatitude = destinationPoint.lat;
+  const destinationLongitude = destinationPoint.lng;
+  const toCost = preference === "fastest" ? 1 / maxSpeedMps : 1;
   return {
     costOf: (edge: number) => preference === "fastest" ? graph.edgeDurationsSeconds[edge] * durationScale : graph.edgeDistancesMeters[edge] * distanceScale,
-    heuristicFor: (node: number) => {
-      const remaining = haversineMeters(coordinateFor(graph, node), destinationPoint);
-      return preference === "fastest" ? remaining / maxSpeedMps : remaining;
-    },
+    // Called once per relaxation, millions of times on a long route, so it
+    // reads the coordinate arrays directly and avoids a haversine's four
+    // trigonometric calls for a number that only has to be a lower bound.
+    heuristicFor: (node: number) => straightLineAtMost(
+      latitudes[node] / coordinateScale, longitudes[node] / coordinateScale,
+      destinationLatitude, destinationLongitude, longitudeMetresPerDegree,
+    ) * toCost,
   };
 }
 

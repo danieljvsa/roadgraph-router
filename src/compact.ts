@@ -34,9 +34,13 @@ export function compactGraph(graph: RoadGraph, options: CompactGraphOptions = {}
   const edgeDurationScale = scaleFor(durations, maximum);
   const edgeDistancesMeters = new Uint16Array(distances.length);
   const edgeDurationsSeconds = new Uint16Array(durations.length);
+  // Rounding a short edge's duration down can leave it costing nothing at all,
+  // and a free edge is a shortcut the search will always take. Every edge with
+  // length keeps at least one unit of duration.
   for (let index = 0; index < distances.length; index += 1) {
     edgeDistancesMeters[index] = Math.round(distances[index] / edgeDistanceScale);
-    edgeDurationsSeconds[index] = Math.round(durations[index] / edgeDurationScale);
+    const quantised = Math.round(durations[index] / edgeDurationScale);
+    edgeDurationsSeconds[index] = quantised || (durations[index] > 0 || distances[index] > 0 ? 1 : 0);
   }
 
   const edgeShapeOffsets = graph.edgeShapeOffsets?.slice();

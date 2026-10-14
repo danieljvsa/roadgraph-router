@@ -3,6 +3,8 @@ export type { CompactEncodeOptions } from "./codec";
 export { VarintReader, VarintWriter, unzigzag, zigzag } from "./varint";
 export { compactGraph } from "./compact";
 export { accessMaskFor, allowsEverything, edgeAllowed } from "./access";
+export { searchBoundsFor, straightLineAtMost } from "./search-bounds";
+export type { SearchBounds } from "./search-bounds";
 export { accessForVehicle, countBlocked, fromDecimetres, fromHalfTonnes, packEdgeLimits, toDecimetres, toHalfTonnes } from "./limits";
 export { findNearestNode, route } from "./router";
 export type { RouteOptions } from "./router";

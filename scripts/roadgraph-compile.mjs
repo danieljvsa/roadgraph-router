@@ -189,7 +189,18 @@ function encodeEfr2(graph, library, profiles) {
   const durationScales = profiles.map((_, index) => scaleFor(graph.edgeDurations[index].view()));
   const durationColumns = profiles.map((_, index) => {
     const source = graph.edgeDurations[index].view(), packed = new Uint16Array(edges);
-    for (let i = 0; i < edges; i += 1) packed[placement[i]] = Math.round(source[i] / durationScales[index]);
+    const scale = durationScales[index];
+    // Durations are whole units, and rounding one down can leave a short edge
+    // costing nothing at all or implying a speed no vehicle of this class can
+    // reach. A free edge is a shortcut the search will take, and a speed above
+    // the profile's ceiling makes the A* heuristic inadmissible, which lets it
+    // settle for a route that is not the best one. So no edge is ever stored
+    // as quicker than its own length at the profile's top speed.
+    const ceilingMps = (profiles[index].maxSpeedKph * 1000) / 3600;
+    for (let i = 0; i < edges; i += 1) {
+      const atCeiling = distances[i] / ceilingMps;
+      packed[placement[i]] = Math.max(Math.round(source[i] / scale), Math.ceil(atCeiling / scale));
+    }
     return packed;
   });
 
