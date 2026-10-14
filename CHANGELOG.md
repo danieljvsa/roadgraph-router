@@ -114,19 +114,18 @@ ship too, in a bundle of their own. Alternative routes moved to 0.3.0.
 
 ### Known limitations
 
-- **Conditional restrictions are not read, and this is the next thing to be
-  fixed.** `access:conditional`, `restriction:conditional` and
+- **Conditional restrictions are not read. They are the first item of
+  0.3.0.** `access:conditional`, `restriction:conditional` and
   `hgv:conditional` are ignored, so a street closed to lorries overnight or a
   square pedestrianised on Sundays appears permanently open. It is the
   limitation most likely to make a route wrong rather than merely longer,
-  particularly for a lorry, and it is scheduled ahead of alternative routes in
-  the next release.
+  particularly for a lorry, so it is scheduled ahead of alternative routes.
 - An active-travel bundle at country scale cannot be compiled with small
   tiles: Portugal for walking and cycling at 40 km tiles exceeds the
   compiler's 3 GB ceiling and is refused. The default 120 km works, at the
   cost of a larger first download for a short urban route.
-- Alternative routes are not in this release; they are planned after
-  conditional restrictions.
+- Alternative routes are not in this release; they are planned for 0.3.0,
+  after conditional restrictions.
 
 ### Compatibility
 

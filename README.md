@@ -44,12 +44,12 @@ travel. **Do not use this engine as the sole basis for dispatching a heavy
 vehicle.** Anything safety-critical needs a surveyed freight dataset and a
 routing engine that reads conditional restrictions.
 
-**Conditional restrictions are a known gap and the next thing to be fixed.**
+**Conditional restrictions are a known gap, and the first thing in 0.3.0.**
 Reading `access:conditional`, `restriction:conditional` and `hgv:conditional`
-is the first item of the next release, ahead of alternative routes, because
-time-dependent access is the limitation most likely to make a lorry route
-wrong rather than merely longer. Until then this section describes the engine
-as it is, not as it is meant to stay.
+comes ahead of alternative routes, because time-dependent access is the
+limitation most likely to make a lorry route wrong rather than merely longer.
+Until then this section describes the engine as it is, not as it is meant to
+stay.
 
 The compiler reports what it understood. `turnRestrictionsRead` against
 `turnRestrictionsSkipped`, and `barriersRead`, in `<output>.json` tell you how
@@ -614,10 +614,10 @@ What the bundled profiles read, and what they deliberately do not.
 | --- | --- |
 | A one-way trap | Two points joined on the map but not reachable in the direction asked for — a one-way loop with no way back — still report no route. Snapping again cannot mend that, because both ends are already in the same piece of the network. |
 | Surface, gradient and steps beyond a flat penalty | A cycling speed comes from the way class alone. `surface`, `smoothness` and elevation are not read, so a cobbled climb costs the same as smooth level tarmac. |
-| Alternative routes | Not in 0.2.0. `routeAlternatives` is planned for 0.3.0. |
+| Alternative routes | Not in 0.2.0. `routeAlternatives` is planned for 0.3.0, after conditional restrictions. |
 | Untagged limits | A road stating no `maxheight` or `maxweight` is treated as open to any lorry. Absence of a tag is not a measurement. |
 | Axle load, trailer and hazmat rules | `maxaxleload`, `hazmat` and trailer-specific access are not read. |
-| Conditional restrictions | `restriction:conditional`, `access:conditional`, `hgv:conditional` and every time-of-day, day-of-week or seasonal rule are ignored, so a time-limited restriction is treated as absent. **Identified as the next thing to fix**; see [What a route here does and does not mean](#what-a-route-here-does-and-does-not-mean). |
+| Conditional restrictions | `restriction:conditional`, `access:conditional`, `hgv:conditional` and every time-of-day, day-of-week or seasonal rule are ignored, so a time-limited restriction is treated as absent. **Scheduled for 0.3.0**; see [What a route here does and does not mean](#what-a-route-here-does-and-does-not-mean). |
 | Temporary closures | Roadworks, events and incidents are not modelled. A bundle is as current as the extract it was compiled from. |
 | Zone-level rules | Lorry bans, low-emission zones, permit areas and tolls that apply to an area rather than to a way are not read. |
 | `via` ways longer than four edges | Skipped rather than approximated, and counted as `turnRestrictionsSkipped` in the compile report. |
