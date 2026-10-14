@@ -100,7 +100,7 @@ describe("the profile registry", () => {
   it("offers motorcycle by name and by id", () => {
     expect(getRoutingProfile("motorcycle")).toBe(bike);
     expect(getRoutingProfileById(ProfileId.motorcycle)).toBe(bike);
-    expect(Object.keys(routingProfiles)).toEqual(["car", "motorcycle"]);
+    expect(Object.keys(routingProfiles)).toContain("motorcycle");
   });
 
   it("asks the compiler for the tags it actually reads", () => {

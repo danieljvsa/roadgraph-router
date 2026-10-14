@@ -16,10 +16,26 @@ export type WayTraversal = {
   /** Travel speed in km/h in each direction; both are clamped to the profile range. */
   forwardSpeedKph: number;
   backwardSpeedKph: number;
+  /** Physical limits in force along this way, where the data states any. */
+  forwardLimits?: VehicleLimits;
+  backwardLimits?: VehicleLimits;
 };
 
 /** A turn restriction relation reduced to the only two cases routing cares about. */
 export type TurnRestrictionKind = "no" | "only";
+
+/**
+ * A physical limit OSM states for a way. Every field is optional because an
+ * untagged limit is unknown, not absent: most bridges carry no `maxheight` at
+ * all, and treating silence as "no limit" is the assumption this library makes
+ * and says so, rather than inventing a number.
+ */
+export type VehicleLimits = {
+  heightMeters?: number;
+  widthMeters?: number;
+  lengthMeters?: number;
+  weightTonnes?: number;
+};
 
 export type ParsedTurnRestriction = {
   kind: TurnRestrictionKind;
@@ -56,6 +72,11 @@ export interface RoutingProfile {
   evaluateWay(tags: OsmTags): WayTraversal | null;
   /** Returns null when the relation is not a turn restriction this profile obeys. */
   evaluateTurnRestriction(tags: OsmTags): ParsedTurnRestriction | null;
+  /**
+   * Whether this profile's routes depend on the vehicle's physical size, which
+   * tells the compiler to keep the limits `evaluateWay` reports.
+   */
+  readonly usesPhysicalLimits?: boolean;
 }
 
 const MINIMUM_SPEED_KPH = 5;
@@ -125,6 +146,71 @@ export function parseMaxSpeedKph(value: string | undefined): number | null {
   return amount;
 }
 
+/** Values that are not a measurement: a sign exists, or does not, but neither states a number. */
+const UNMEASURED = new Set(["default", "below_default", "none", "unsigned", "no_sign", "no", "yes", "unknown"]);
+
+const FEET_METERS = 0.3048;
+const INCH_METERS = 0.0254;
+
+/**
+ * Reads a `maxheight`-style value in metres. Feet and inches are accepted
+ * because they are how the limit is written wherever it is signed that way;
+ * anything that is not a measurement reads as unknown rather than as zero,
+ * which would close the road to everything.
+ */
+export function parseLengthMeters(value: string | undefined): number | null {
+  if (!value) return null;
+  const text = value.trim().toLowerCase();
+  if (UNMEASURED.has(text)) return null;
+  const imperial = /^(\d+(?:\.\d+)?)\s*(?:'|ft|feet)\s*(?:(\d+(?:\.\d+)?)\s*(?:"|in|inch(?:es)?)?)?$/.exec(text);
+  if (imperial) {
+    const metres = Number(imperial[1]) * FEET_METERS + Number(imperial[2] ?? 0) * INCH_METERS;
+    return metres > 0 ? metres : null;
+  }
+  const metric = /^(\d+(?:\.\d+)?)\s*(m|metres?|meters?|cm)?$/.exec(text);
+  if (!metric) return null;
+  const amount = Number(metric[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return metric[2] === "cm" ? amount / 100 : amount;
+}
+
+/** Reads a `maxweight`-style value in tonnes. A bare number is tonnes, as OSM defines it. */
+export function parseWeightTonnes(value: string | undefined): number | null {
+  if (!value) return null;
+  const text = value.trim().toLowerCase();
+  if (UNMEASURED.has(text)) return null;
+  const match = /^(\d+(?:\.\d+)?)\s*(t|tonnes?|tons?|kg|lbs?|pounds?)?$/.exec(text);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  if (match[2] === "kg") return amount / 1000;
+  if (match[2] === "lb" || match[2] === "lbs" || match[2] === "pound" || match[2] === "pounds") return amount * 0.00045359237;
+  return amount;
+}
+
+/** The four limit keys, with the direction-specific forms OSM also allows. */
+const LIMIT_KEYS = [
+  ["heightMeters", "maxheight", parseLengthMeters],
+  ["widthMeters", "maxwidth", parseLengthMeters],
+  ["lengthMeters", "maxlength", parseLengthMeters],
+  ["weightTonnes", "maxweight", parseWeightTonnes],
+] as const;
+
+function limitsFor(tags: OsmTags, mode: string, direction: "forward" | "backward"): VehicleLimits | undefined {
+  const limits: VehicleLimits = {};
+  let found = false;
+  for (const [field, key, parse] of LIMIT_KEYS) {
+    // Most specific first: a signed limit for this direction, then one for
+    // this vehicle class, then the general one. `maxheight:physical` is the
+    // structure itself rather than a legal sign, and is the stricter of the two.
+    const value = parse(tags[`${key}:${direction}`]) ?? parse(tags[`${key}:${mode}`]) ?? parse(tags[key]);
+    const physical = key === "maxheight" || key === "maxwidth" ? parse(tags[`${key}:physical`]) : null;
+    const resolved = value !== null && physical !== null ? Math.min(value, physical) : value ?? physical;
+    if (resolved !== null && resolved !== undefined) { limits[field] = resolved; found = true; }
+  }
+  return found ? limits : undefined;
+}
+
 /** Resolves the OSM access hierarchy, where the most specific tag present wins. */
 function accessAllowed(tags: OsmTags, keys: readonly string[]) {
   let allowed = true;
@@ -163,9 +249,11 @@ function onewayDirections(tags: OsmTags, highway: string | undefined, keys: read
  * the oneway rules, the speed table, the restriction ladder — is shared. One
  * implementation keeps those rules from drifting apart between vehicles.
  */
-function motorVehicleProfile(options: { name: string; id: ProfileId; mode: string; speeds?: Record<string, number> }): RoutingProfile {
+function motorVehicleProfile(options: { name: string; id: ProfileId; mode: string; speeds?: Record<string, number>; speedCeilingKph?: number; physicalLimits?: boolean }): RoutingProfile {
   const { name, id, mode } = options;
   const speeds = options.speeds ?? MOTOR_VEHICLE_SPEEDS;
+  const ceiling = options.speedCeilingKph ?? MAXIMUM_SPEED_KPH;
+  const limit = (value: number) => Math.min(ceiling, value);
   const accessKeys = ["access", "vehicle", "motor_vehicle", mode] as const;
   const onewayKeys = ["oneway", "oneway:motor_vehicle", `oneway:${mode}`] as const;
   const restrictionKeys = ["restriction", "restriction:vehicle", "restriction:motor_vehicle", `restriction:${mode}`] as const;
@@ -176,9 +264,14 @@ function motorVehicleProfile(options: { name: string; id: ProfileId; mode: strin
   return {
     name,
     id,
-    wayTagKeys: ["highway", "junction", "maxspeed", "maxspeed:forward", "maxspeed:backward", `maxspeed:${mode}`, ...accessKeys, ...onewayKeys],
+    wayTagKeys: [
+      "highway", "junction", "maxspeed", "maxspeed:forward", "maxspeed:backward", `maxspeed:${mode}`,
+      ...accessKeys, ...onewayKeys,
+      ...(options.physicalLimits ? LIMIT_KEYS.flatMap(([, key]) => [key, `${key}:${mode}`, `${key}:forward`, `${key}:backward`, ...(key === "maxheight" || key === "maxwidth" ? [`${key}:physical`] : [])]) : []),
+    ],
     relationTagKeys: ["type", "except", ...restrictionKeys],
-    maxSpeedKph: MAXIMUM_SPEED_KPH,
+    maxSpeedKph: ceiling,
+    ...(options.physicalLimits ? { usesPhysicalLimits: true } : {}),
 
     evaluateWay(tags) {
       const highway = tags.highway;
@@ -190,8 +283,15 @@ function motorVehicleProfile(options: { name: string; id: ProfileId; mode: strin
       return {
         forward,
         backward,
-        forwardSpeedKph: clampSpeed(parseMaxSpeedKph(tags["maxspeed:forward"]) ?? base),
-        backwardSpeedKph: clampSpeed(parseMaxSpeedKph(tags["maxspeed:backward"]) ?? base),
+        // A vehicle class with a lower legal ceiling does not reach the posted
+        // limit on a road signed above it, so the ceiling caps the speed
+        // rather than only bounding the A* heuristic.
+        forwardSpeedKph: clampSpeed(limit(parseMaxSpeedKph(tags["maxspeed:forward"]) ?? base)),
+        backwardSpeedKph: clampSpeed(limit(parseMaxSpeedKph(tags["maxspeed:backward"]) ?? base)),
+        ...(options.physicalLimits ? {
+          forwardLimits: limitsFor(tags, mode, "forward"),
+          backwardLimits: limitsFor(tags, mode, "backward"),
+        } : {}),
       };
     },
 
@@ -218,7 +318,28 @@ export const carRoutingProfile = motorVehicleProfile({ name: "car", id: ProfileI
  */
 export const motorcycleRoutingProfile = motorVehicleProfile({ name: "motorcycle", id: ProfileId.motorcycle, mode: "motorcycle" });
 
-export const routingProfiles: Record<string, RoutingProfile> = { car: carRoutingProfile, motorcycle: motorcycleRoutingProfile };
+/**
+ * Heavy goods vehicles. `hgv` is the OSM key for them, and it sits below
+ * `motor_vehicle` in the same ladder every motor vehicle uses.
+ *
+ * Two things set a lorry apart. It is slower: a heavy vehicle is capped below
+ * the posted limit almost everywhere, so a truck graph that reused car
+ * durations would give wrong arrival times on roads it is perfectly entitled
+ * to use. And it is large: height, width, length and weight limits decide
+ * whether a road is usable at all, which depends on the lorry rather than on
+ * the map, so those limits are carried through to be applied at routing time.
+ */
+export const truckRoutingProfile = motorVehicleProfile({
+  name: "truck",
+  id: ProfileId.truck,
+  mode: "hgv",
+  // Heavy vehicles are held below the posted limit nearly everywhere; 90 is
+  // at or above the cap in the regimes this library has to serve at once.
+  speedCeilingKph: 90,
+  physicalLimits: true,
+});
+
+export const routingProfiles: Record<string, RoutingProfile> = { car: carRoutingProfile, motorcycle: motorcycleRoutingProfile, truck: truckRoutingProfile };
 
 export function getRoutingProfile(name: string): RoutingProfile {
   const profile = routingProfiles[name];

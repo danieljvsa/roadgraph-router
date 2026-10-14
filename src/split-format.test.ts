@@ -82,8 +82,13 @@ describe("the shared and profile chunks", () => {
     expect(() => decodeProfileChunk(profile.slice(0, profile.byteLength - 2))).toThrow(/Truncated/i);
   });
 
+  it("writes a chunk for any profile this build implements", () => {
+    const columns = { profileId: ProfileId.truck, maxSpeedKph: 90, edgeDurationScale: 1, edgeDurationsSeconds: new Uint16Array(4) };
+    expect(decodeProfileChunk(encodeProfileChunk(columns))).toMatchObject({ profileId: ProfileId.truck, maxSpeedKph: 90 });
+  });
+
   it("refuses a profile chunk naming a profile this build cannot route", () => {
-    expect(() => encodeProfileChunk({ profileId: ProfileId.truck, maxSpeedKph: 90, edgeDurationScale: 1, edgeDurationsSeconds: new Uint16Array(4) })).toThrow(/unsupported profile/i);
+    expect(() => encodeProfileChunk({ profileId: ProfileId.bicycle, maxSpeedKph: 25, edgeDurationScale: 1, edgeDurationsSeconds: new Uint16Array(4) })).toThrow(/unsupported profile/i);
   });
 });
 

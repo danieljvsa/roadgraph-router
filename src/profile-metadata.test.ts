@@ -3,7 +3,7 @@ import { encodeRoadGraphBundle, openRoadGraphBundle } from "./bundle";
 import { mergeRoadGraphs } from "./merge";
 import { compactGraph } from "./compact";
 import { route } from "./router";
-import { ProfileId, carRoutingProfile, getRoutingProfileById, maxSpeedMpsFor, profileOf } from "./routing-profile";
+import { ProfileId, carRoutingProfile, getRoutingProfileById, maxSpeedMpsFor, profileOf, routingProfiles } from "./routing-profile";
 import { buildGraph, pathOf, rangeFetcher } from "./test-support";
 import type { RoadGraph } from "./types";
 
@@ -21,11 +21,19 @@ describe("profile metadata in a packed graph", () => {
     expect(decoded.maxSpeedKph).toBe(110);
   });
 
+  it("round trips every profile this build implements", () => {
+    for (const profile of Object.values(routingProfiles)) {
+      const decoded = roundTrip({ ...grid(), profileId: profile.id, maxSpeedKph: profile.maxSpeedKph });
+      expect(decoded.profileId).toBe(profile.id);
+      expect(decoded.maxSpeedKph).toBe(profile.maxSpeedKph);
+    }
+  });
+
   it("refuses an id that is reserved but not implemented in this build", () => {
-    // A truck graph opened by a build with no truck rules would route a lorry
-    // by car rules. Refusing is the point; this starts passing as a round trip
-    // when the profile itself lands.
-    expect(() => roundTrip({ ...grid(), profileId: ProfileId.truck })).toThrow(/unsupported profile/i);
+    // A bicycle graph opened by a build with no bicycle rules would route by
+    // car rules. Refusing is the point; this becomes a round trip when the
+    // profile itself lands, as truck's did.
+    expect(() => roundTrip({ ...grid(), profileId: ProfileId.bicycle })).toThrow(/unsupported profile/i);
   });
 
   it("writes nothing for a graph that names no profile", () => {
@@ -151,6 +159,9 @@ describe("the speed ceiling and routing", () => {
 it("maps every reserved id to at most one profile", () => {
   expect(getRoutingProfileById(ProfileId.car)).toBe(carRoutingProfile);
   expect(getRoutingProfileById(ProfileId.unspecified)).toBe(carRoutingProfile);
-  expect(getRoutingProfileById(ProfileId.truck)).toBeNull();
   expect(getRoutingProfileById(99)).toBeNull();
+  // Ids are part of the file format, so no two profiles may share one.
+  const ids = Object.values(routingProfiles).map((profile) => profile.id);
+  expect(new Set(ids).size).toBe(ids.length);
+  for (const profile of Object.values(routingProfiles)) expect(getRoutingProfileById(profile.id)).toBe(profile);
 });
