@@ -123,6 +123,16 @@ describe("routing a lorry past a signed limit", () => {
   });
 });
 
+describe("a truck bundle that cannot hold limits", () => {
+  it("is refused rather than routed with the dimensions ignored", async () => {
+    const { encodeRoadGraphBundle } = await import("./bundle");
+    const graph = { ...compactGraph(network()), profileId: ProfileId.truck, maxSpeedKph: 90 };
+    const bundle = encodeRoadGraphBundle([{ id: 1, bounds: { minLat: 40.99, minLng: -8.01, maxLat: 41.01, maxLng: -7.95 }, graph }]);
+    await expect(RoadRouter.open("https://example.test/old-truck.efrb", rangeFetcher(bundle).fetcher))
+      .rejects.toThrow(/must carry its physical limits/i);
+  });
+});
+
 describe("the vehicle option on a router", () => {
   const built = network();
   const graph = compactGraph(built);

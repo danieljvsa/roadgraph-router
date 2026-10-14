@@ -309,6 +309,13 @@ export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetc
     if (id && !getRoutingProfileById(id)) throw new Error(`This routing bundle was compiled for a profile this build does not support (id ${id}).`);
   }
   const chosenId = options.profile ? getRoutingProfile(options.profile).id : defaultProfileId;
+  // A profile whose routes depend on the vehicle's size needs somewhere to
+  // keep the limits, and only the split layout has it. Opening such a bundle
+  // in the single-chunk layout would route a lorry with its dimensions
+  // silently ignored, which is the one outcome worth refusing outright.
+  if (!profiled && getRoutingProfileById(chosenId)?.usesPhysicalLimits) {
+    throw new Error(`A "${getRoutingProfileById(chosenId)!.name}" bundle must carry its physical limits, which this one cannot: it was written in the single-chunk layout. Recompile it.`);
+  }
   if (options.profile && !available.includes(chosenId)) {
     const names = available.map((id) => getRoutingProfileById(id)?.name ?? `id ${id}`).join(", ");
     throw new Error(`This routing bundle does not hold the "${options.profile}" profile. It holds: ${names}.`);
