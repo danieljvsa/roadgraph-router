@@ -3,3 +3,8 @@ dist/
 coverage/
 .DS_Store
 .env*
+
+# Editor and IDE project files, which belong to a developer rather than to the package.
+.idea/
+.vscode/
+*.tgz
