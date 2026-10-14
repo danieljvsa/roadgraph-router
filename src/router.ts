@@ -4,6 +4,7 @@ import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
 import { edgeAllowed } from "./access";
 import { accessForVehicle } from "./limits";
+import { componentSizes, componentsFor } from "./connectivity";
 import { searchBoundsFor, straightLineAtMost } from "./search-bounds";
 import type { VehicleDimensions } from "./vehicle";
 import { buildTurnRestrictionIndex, buildTurnSequenceIndex, guardedJunctionsFor, type TurnRestrictionIndex, type TurnSequenceIndex } from "./turn-restrictions";
@@ -357,14 +358,67 @@ export type RouteOptions = {
   vehicle?: VehicleDimensions;
 };
 
+/** The node a snap stands on, for asking which piece of the network it is in. */
+function nodeOfSnap(snap: GraphSnap) {
+  return snap.kind === "node" ? snap.node : snap.projections[0].source;
+}
+
+/**
+ * A second attempt for a route that failed because an end snapped to the wrong
+ * piece of the network.
+ *
+ * Snapping finds the nearest road, which near a disconnected stub is the stub
+ * — a path fragment behind a fence, a service road in a compound, a stretch
+ * clipped at the edge of a tile. The route then fails although a usable road
+ * was a few metres further. Here the two ends are compared: if they sit in
+ * different pieces, the end in the smaller one is snapped again, this time
+ * only to roads joined to the other end.
+ *
+ * It runs only after a failure, so an ordinary route never pays for labelling
+ * the network.
+ */
+function reconnect(graph: RoadGraph, from: Coordinate, to: Coordinate, preference: RoutePreference, options: RouteOptions, access: Uint8Array | undefined): RouteResult | null {
+  const originSnap = snapToGraph(graph, from, undefined, access);
+  const destinationSnap = snapToGraph(graph, to, undefined, access);
+  if (!originSnap || !destinationSnap) return null;
+
+  const labels = componentsFor(graph);
+  const originLabel = labels[nodeOfSnap(originSnap)];
+  const destinationLabel = labels[nodeOfSnap(destinationSnap)];
+  // Both ends already in one piece: the search failed for some other reason,
+  // a one-way trap most likely, and a different snap will not mend it.
+  if (originLabel === destinationLabel) return null;
+
+  const sizes = componentSizes(labels);
+  // The end in the smaller piece is the one that snapped somewhere useless.
+  const moveOrigin = (sizes.get(originLabel) ?? 0) <= (sizes.get(destinationLabel) ?? 0);
+  const wanted = moveOrigin ? destinationLabel : originLabel;
+  const accept = (node: number) => labels[node] === wanted;
+  try {
+    return routeBetween(graph, from, to, preference, options, access, moveOrigin ? accept : undefined, moveOrigin ? undefined : accept);
+  } catch {
+    // Nothing joined to the other end is within snapping range either.
+    return null;
+  }
+}
+
 export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest", options: RouteOptions = {}): RouteResult {
   assertGraph(graph);
   // The vehicle narrows the profile's own mask, so every later step — snapping
   // included — sees one answer about which roads are usable.
   const access = accessForVehicle(graph, options.vehicle);
-  const originSnap = snapToGraph(graph, from, undefined, access);
+  try {
+    return routeBetween(graph, from, to, preference, options, access);
+  } catch (error) {
+    if (!(error instanceof RouterError) || error.code !== "NO_ROUTE") throw error;
+    return reconnect(graph, from, to, preference, options, access) ?? (() => { throw error; })();
+  }
+}
+
+function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, preference: RoutePreference, options: RouteOptions, access: Uint8Array | undefined, acceptOrigin?: (node: number) => boolean, acceptDestination?: (node: number) => boolean): RouteResult {
+  const originSnap = snapToGraph(graph, from, undefined, access, acceptOrigin);
   if (!originSnap) throw new RouterError("ORIGIN_NOT_ON_GRAPH", "No routable road is close to the origin.");
-  const destinationSnap = snapToGraph(graph, to, undefined, access);
+  const destinationSnap = snapToGraph(graph, to, undefined, access, acceptDestination);
   if (!destinationSnap) throw new RouterError("DESTINATION_NOT_ON_GRAPH", "No routable road is close to the destination.");
 
   const distanceScale = graph.edgeDistanceScale ?? 1;

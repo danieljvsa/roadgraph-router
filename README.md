@@ -219,6 +219,23 @@ A `via`-way run is enforced against the path actually taken, not against an
 approximation. In a Portugal extract they are 541 runs against 33,796 pairs,
 and they add 5 KB to a 71 MB bundle.
 
+### When the nearest road is the wrong road
+
+Snapping finds the nearest road, and near a disconnected stub — a path behind a
+fence, a service road in a compound, a stretch clipped at the edge of a tile —
+that is the stub. A route to a point beside one used to fail although a usable
+road was a few metres further.
+
+A failed route is now tried once more. The two ends are compared, and if they
+sit in different pieces of the network, the end in the smaller piece is snapped
+again, this time only to roads joined to the other end. Labelling the network
+costs a pass over it, so it runs only after a failure and an ordinary route
+never pays for it.
+
+It bites hardest on walking and cycling, where small fragments are common: in
+Monaco the pedestrian network is 97.6% one piece, and the remaining 2.4% is
+enough to lose a route between two points a kilometre apart.
+
 ## Snapping to the road, not to the junction
 
 Topology simplification keeps only junctions and way endpoints as routing
@@ -533,7 +550,7 @@ What the bundled profiles read, and what they deliberately do not.
 
 | Area | Behaviour |
 | --- | --- |
-| An isolated path fragment | Snapping finds the nearest road, not the nearest *useful* one. A point a couple of metres from a disconnected stub snaps to the stub and the route fails, even with a connected road just beyond. It bites hardest on walking and cycling networks, where small fragments are common. |
+| A one-way trap | Two points joined on the map but not reachable in the direction asked for — a one-way loop with no way back — still report no route. Snapping again cannot mend that, because both ends are already in the same piece of the network. |
 | Surface, gradient and steps beyond a flat penalty | A cycling speed comes from the way class alone. `surface`, `smoothness` and elevation are not read, so a cobbled climb costs the same as smooth level tarmac. |
 | Alternative routes | Not in 0.2.0. `routeAlternatives` is planned for 0.3.0. |
 | Untagged limits | A road stating no `maxheight` or `maxweight` is treated as open to any lorry. Absence of a tag is not a measurement. |

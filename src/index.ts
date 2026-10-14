@@ -5,6 +5,7 @@ export { compactGraph } from "./compact";
 export { accessMaskFor, allowsEverything, edgeAllowed } from "./access";
 export { searchBoundsFor, straightLineAtMost } from "./search-bounds";
 export type { SearchBounds } from "./search-bounds";
+export { componentSizes, componentsFor } from "./connectivity";
 export { accessForVehicle, countBlocked, fromDecimetres, fromHalfTonnes, packEdgeLimits, toDecimetres, toHalfTonnes } from "./limits";
 export { findNearestNode, route } from "./router";
 export type { RouteOptions } from "./router";

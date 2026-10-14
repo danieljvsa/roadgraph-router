@@ -95,7 +95,7 @@ function projectOntoPolyline(points: Coordinate[], query: Coordinate) {
  * lies within `maxDistanceMeters` of the coordinate — measured to the road
  * surface, not to the nearest junction.
  */
-export function snapToGraph(graph: RoadGraph, coordinate: Coordinate, maxDistanceMeters = 500, access: Uint8Array | undefined = graph.edgeAccess): GraphSnap | null {
+export function snapToGraph(graph: RoadGraph, coordinate: Coordinate, maxDistanceMeters = 500, access: Uint8Array | undefined = graph.edgeAccess, accept?: (node: number) => boolean): GraphSnap | null {
   const candidates = graph.edgeTargets.length
     ? nearbyEdgeIds(edgeSpatialIndexFor(graph), coordinate, maxDistanceMeters)
     : new Set<number>();
@@ -106,6 +106,9 @@ export function snapToGraph(graph: RoadGraph, coordinate: Coordinate, maxDistanc
     // A road this vehicle may not use is not a road to start or finish on.
     if (!edgeAllowed(access, edge)) continue;
     const source = edgeSource(graph, edge);
+    // A caller that already knows the route failed can rule out the piece of
+    // the network the other end cannot be reached from.
+    if (accept && !(accept(source) && accept(graph.edgeTargets[edge]))) continue;
     const polyline = edgePolyline(graph, edge, source);
     const projected = projectOntoPolyline(polyline, coordinate);
     if (projected.distanceMeters > maxDistanceMeters) continue;
@@ -125,7 +128,7 @@ export function snapToGraph(graph: RoadGraph, coordinate: Coordinate, maxDistanc
 
   if (!best) {
     // A graph with no edges at all can still answer with its nearest node.
-    const node = nearestNodeWithin(graph, coordinate, maxDistanceMeters);
+    const node = nearestNodeWithin(graph, coordinate, maxDistanceMeters, accept);
     return node === null ? null : { kind: "node", node, point: coordinateFor(graph, node), distanceMeters: haversineMeters(coordinate, coordinateFor(graph, node)) };
   }
 
@@ -149,10 +152,11 @@ function totalLengthOf(projection: EdgeProjection) {
   return total;
 }
 
-function nearestNodeWithin(graph: RoadGraph, coordinate: Coordinate, maxDistanceMeters: number) {
+function nearestNodeWithin(graph: RoadGraph, coordinate: Coordinate, maxDistanceMeters: number, accept?: (node: number) => boolean) {
   let closest: number | null = null;
   let closestDistance = maxDistanceMeters;
   const check = (nodeId: number) => {
+    if (accept && !accept(nodeId)) return;
     const distance = haversineMeters(coordinate, coordinateFor(graph, nodeId));
     if (distance <= closestDistance) { closest = nodeId; closestDistance = distance; }
   };

@@ -68,6 +68,12 @@ ship too, in a bundle of their own. Alternative routes moved to 0.3.0.
   whole package — so installing the library on Node 18 or 20 warned, and failed
   under `engine-strict`. It is now `>=18`, and the CLI checks its own
   requirement at startup rather than after streaming the whole extract.
+- **A route could fail because an end snapped to a disconnected stub.** The
+  nearest road to a point is not always one that leads anywhere: a path behind
+  a fence, a service road in a compound, a stretch clipped at a tile edge. A
+  failed route is now retried against the piece of the network the other end
+  is in. It runs only after a failure, so an ordinary route never pays for it.
+  Walking and cycling networks feel this most, being full of small fragments.
 - **Merging tiles dropped per-vehicle data.** Limits, access masks and
   restriction masks are rebased onto the merged numbering, keeping the stricter
   limit where two tiles disagree. A corridor built from more than one tile
