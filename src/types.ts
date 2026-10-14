@@ -56,6 +56,11 @@ export interface RoadGraph {
    * means every edge is usable. See `./access`.
    */
   edgeAccess?: Uint8Array;
+  /**
+   * The physical limits in force on the few edges that state any. Present only
+   * for a profile whose routes depend on the vehicle's size. See `./limits`.
+   */
+  edgeLimits?: EdgeLimits;
   /** Optional intermediate vertices per directed edge, stored using coordinateScale. */
   edgeShapeOffsets?: Uint32Array;
   edgeShapeLatitudes?: Int32Array;
@@ -118,6 +123,25 @@ export class RouterError extends Error {
 }
 
 /**
+ * Signed height, width, length and weight limits, for the edges that have them.
+ *
+ * A side table rather than four columns over every edge: the overwhelming
+ * majority of roads state no limit at all, so columns would spend four bytes
+ * per edge saying nothing nearly everywhere. `edges` is sorted, and the four
+ * arrays run alongside it. A zero means the limit is not stated, which is not
+ * the same as a limit of zero.
+ */
+export interface EdgeLimits {
+  edges: Uint32Array;
+  /** Tenths of a metre. */
+  heightDecimetres: Uint8Array;
+  widthDecimetres: Uint8Array;
+  lengthDecimetres: Uint8Array;
+  /** Half-tonnes. */
+  weightHalfTonnes: Uint8Array;
+}
+
+/**
  * A tile's vehicle-independent half: everything a v7 `shared` chunk holds.
  * It is not routable on its own — a profile supplies the durations.
  */
@@ -131,4 +155,6 @@ export interface ProfileChunk {
   edgeDurationsSeconds: Uint16Array;
   /** One bit per edge; absent means this profile may use every road in the tile. */
   edgeAccess?: Uint8Array;
+  /** Signed limits for the few edges that state any; absent for vehicles whose size does not matter. */
+  edgeLimits?: EdgeLimits;
 }

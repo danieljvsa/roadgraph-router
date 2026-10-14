@@ -16,6 +16,8 @@
  * vehicle classes a caller picks, not a guess about where they are.
  */
 
+export type { VehicleLimits } from "./routing-profile";
+
 export type VehicleDimensions = {
   heightMeters: number;
   widthMeters: number;

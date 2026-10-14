@@ -3,6 +3,7 @@ import { openRoadGraphBundle, type BundleTile, type RoadGraphBundle } from "./bu
 import { route } from "./router";
 import { getRoutingProfile, getRoutingProfileById, maxSpeedMpsFor } from "./routing-profile";
 import { RouterError, type Coordinate, type RoadGraph, type RoutePreference, type RouteResult } from "./types";
+import { resolveVehicle, type VehicleDimensions, type VehicleInput } from "./vehicle";
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type RouteLoader = Pick<RouteGraphLoader | RoadGraphBundle, "loadForRoute"> & Partial<Pick<RoadGraphBundle, "loadExpandedForRoute">>;
@@ -30,6 +31,13 @@ export type RoadRouterOptions = {
    * leaving it out uses the vehicle the bundle was compiled around.
    */
   profile?: string;
+  /**
+   * The lorry's size and weight, for a profile whose routes depend on them. A
+   * preset name, a set of dimensions, or a preset with fields overridden.
+   * `null` turns the filtering off, which is a decision to accept routes no
+   * real lorry may be able to drive.
+   */
+  vehicle?: VehicleInput | null;
 };
 const MINIMUM_BUDGET_METERS = 5_000;
 
@@ -56,7 +64,18 @@ function haversineMeters(a: Coordinate, b: Coordinate) {
  * manifest, or an already-decoded graph.
  */
 export class RoadRouter {
-  private constructor(private readonly graph?: RoadGraph, private readonly loader?: RouteLoader, private readonly options: RoadRouterOptions = {}, private readonly profileId?: number) {}
+  private constructor(private readonly graph?: RoadGraph, private readonly loader?: RouteLoader, private readonly options: RoadRouterOptions = {}, private readonly profileId?: number) {
+    const profile = getRoutingProfileById(profileId ?? 0);
+    if (options.vehicle !== undefined && options.vehicle !== null && profile && !profile.usesPhysicalLimits) {
+      // Accepting dimensions a bundle cannot act on would look like they were
+      // applied. A car graph holds no limits to apply them against.
+      throw new Error(`The "${profile.name}" profile does not use vehicle dimensions; only a profile that stores physical limits does.`);
+    }
+    this.vehicle = profile?.usesPhysicalLimits && options.vehicle !== null ? resolveVehicle(options.vehicle ?? undefined) : undefined;
+  }
+
+  /** The lorry these routes are for, where the profile depends on one. */
+  readonly vehicle?: VehicleDimensions;
 
   static fromGraph(graph: RoadGraph) {
     return new RoadRouter(graph);
@@ -91,7 +110,7 @@ export class RoadRouter {
   }
 
   async route(from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest"): Promise<RouteResult> {
-    if (this.graph) return route(this.graph, from, to, preference);
+    if (this.graph) return route(this.graph, from, to, preference, { vehicle: this.vehicle });
     if (isBundle(this.loader)) return this.routeOverBundle(this.loader, from, to, preference);
     return this.routeOverLoader(this.loader!, from, to, preference);
   }
@@ -138,7 +157,7 @@ export class RoadRouter {
     for (const factor of [1, ...SEARCH_WIDENING_FACTORS]) {
       if (factor !== 1 && !(await widen(factor === Infinity ? Infinity : budget * factor))) break;
       try {
-        best = route(graph!, from, to, preference);
+        best = route(graph!, from, to, preference, { vehicle: this.vehicle });
         break;
       } catch (error) {
         failure = error;
@@ -152,7 +171,7 @@ export class RoadRouter {
     for (let pass = 0; pass < MAX_CONFIRMATION_PASSES; pass += 1) {
       if (!(await widen(reachFor(best)))) return best;
       try {
-        best = route(graph!, from, to, preference, { costBound: preference === "fastest" ? best.durationSeconds : best.distanceMeters });
+        best = route(graph!, from, to, preference, { costBound: preference === "fastest" ? best.durationSeconds : best.distanceMeters, vehicle: this.vehicle });
       } catch (error) {
         if ((error as { code?: string }).code !== "NO_ROUTE") throw error;
         return best; // Nothing in the added tiles beats what we already have.
@@ -164,13 +183,13 @@ export class RoadRouter {
   private async routeOverLoader(loader: RouteLoader, from: Coordinate, to: Coordinate, preference: RoutePreference) {
     const graph = await loader.loadForRoute(from, to);
     try {
-      return route(graph, from, to, preference);
+      return route(graph, from, to, preference, { vehicle: this.vehicle });
     } catch (error) {
       if (!(error instanceof Error) || (error as { code?: string }).code !== "NO_ROUTE" || !loader.loadExpandedForRoute) throw error;
       // A straight geographic corridor may omit a tile holding a bridge, a
       // one-way detour, or a road around a physical obstacle. Retry once with
       // the immediate ring of neighbouring tiles before reporting no route.
-      return route(await loader.loadExpandedForRoute(from, to), from, to, preference);
+      return route(await loader.loadExpandedForRoute(from, to), from, to, preference, { vehicle: this.vehicle });
     }
   }
 }

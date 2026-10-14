@@ -3,6 +3,8 @@ import type { Coordinate, GeoJsonPosition, RoadGraph, RoutePreference, RouteResu
 import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
 import { edgeAllowed } from "./access";
+import { accessForVehicle } from "./limits";
+import type { VehicleDimensions } from "./vehicle";
 import { buildTurnRestrictionIndex, buildTurnSequenceIndex, type TurnRestrictionIndex, type TurnSequenceIndex } from "./turn-restrictions";
 import { maxSpeedMpsFor, profileOf } from "./routing-profile";
 import { coordinateFor, geometryAfter, geometryBefore, geometryBetween, haversineMeters, snapToGraph, type EdgeProjection, type GraphSnap } from "./snap";
@@ -66,9 +68,8 @@ type SearchOutcome = { edges: number[]; finisher: Finisher; seed: Seed } | null;
  * Node-labelled A*. Valid only when no turn is forbidden, because the cost of
  * reaching a node is then independent of how the node was reached.
  */
-function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, costBound = Infinity): SearchOutcome {
+function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, costBound: number, access: Uint8Array | undefined): SearchOutcome {
   const { costOf, heuristicFor } = searchContext(graph, destinationPoint, preference);
-  const access = graph.edgeAccess;
   const nodeCount = graph.nodeLatitudes.length;
   const costs = new Float64Array(nodeCount).fill(Infinity);
   const previousNode = new Int32Array(nodeCount).fill(-1);
@@ -118,9 +119,8 @@ function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Fi
  * mid-edge start already provides, so entering the graph part-way along a road
  * needs no special case and still obeys restrictions on the very first turn.
  */
-function searchByEdge(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, restrictions: TurnRestrictionIndex | null, sequenceIndex: TurnSequenceIndex | null, costBound = Infinity): SearchOutcome {
+function searchByEdge(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, restrictions: TurnRestrictionIndex | null, sequenceIndex: TurnSequenceIndex | null, costBound: number, access: Uint8Array | undefined): SearchOutcome {
   const { costOf, heuristicFor } = searchContext(graph, destinationPoint, preference);
-  const access = graph.edgeAccess;
   const edgeCount = graph.edgeTargets.length;
   const costs = new Float64Array(edgeCount).fill(Infinity);
   const previousState = new Int32Array(edgeCount).fill(-1);
@@ -296,13 +296,23 @@ function snapSummary(snap: GraphSnap): RouteSnap {
  * makes re-checking a route against extra map tiles far cheaper than the
  * original search.
  */
-export type RouteOptions = { costBound?: number };
+export type RouteOptions = {
+  costBound?: number;
+  /**
+   * The lorry being routed, where the graph states physical limits. Roads it
+   * is too large or too heavy for are closed to the search and to snapping.
+   */
+  vehicle?: VehicleDimensions;
+};
 
 export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest", options: RouteOptions = {}): RouteResult {
   assertGraph(graph);
-  const originSnap = snapToGraph(graph, from);
+  // The vehicle narrows the profile's own mask, so every later step — snapping
+  // included — sees one answer about which roads are usable.
+  const access = accessForVehicle(graph, options.vehicle);
+  const originSnap = snapToGraph(graph, from, undefined, access);
   if (!originSnap) throw new RouterError("ORIGIN_NOT_ON_GRAPH", "No routable road is close to the origin.");
-  const destinationSnap = snapToGraph(graph, to);
+  const destinationSnap = snapToGraph(graph, to, undefined, access);
   if (!destinationSnap) throw new RouterError("DESTINATION_NOT_ON_GRAPH", "No routable road is close to the destination.");
 
   const distanceScale = graph.edgeDistanceScale ?? 1;
@@ -337,8 +347,8 @@ export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   const outcome: SearchOutcome = sameNode
     ? { edges: [], finisher: finisherList[0], seed: seeds[0] }
     : restrictions || sequenceIndex
-      ? searchByEdge(graph, seeds, finishers, destinationSnap.point, preference, restrictions, sequenceIndex, costBound)
-      : searchByNode(graph, seeds, finishers, destinationSnap.point, preference, costBound);
+      ? searchByEdge(graph, seeds, finishers, destinationSnap.point, preference, restrictions, sequenceIndex, costBound, access)
+      : searchByNode(graph, seeds, finishers, destinationSnap.point, preference, costBound, access);
   if (direct && direct.cost >= costBound) direct = null;
   if (!outcome && !direct) throw new RouterError("NO_ROUTE", `No ${profileOf(graph).name} route connects the selected points.`);
 

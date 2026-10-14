@@ -1,4 +1,4 @@
-import type { ProfileChunk, RoadGraph, SharedRoadGraph } from "./types";
+import type { EdgeLimits, ProfileChunk, RoadGraph, SharedRoadGraph } from "./types";
 import { allowsEverything } from "./access";
 import { VarintReader, VarintWriter } from "./varint";
 import { getRoutingProfileById } from "./routing-profile";
@@ -520,6 +520,17 @@ const PROFILE_CHUNK_HEADER_BYTES = 64;
  */
 export function encodeProfileChunk(chunk: ProfileChunk): ArrayBuffer {
   const edges = chunk.edgeDurationsSeconds.length;
+  const limits = chunk.edgeLimits?.edges.length ? chunk.edgeLimits : undefined;
+  if (limits) {
+    const rows = limits.edges.length;
+    if (limits.heightDecimetres.length !== rows || limits.widthDecimetres.length !== rows || limits.lengthDecimetres.length !== rows || limits.weightHalfTonnes.length !== rows) {
+      throw new Error("Edge limit columns must all be the same length.");
+    }
+    for (let index = 0; index < rows; index += 1) {
+      if (limits.edges[index] >= edges) throw new Error("Edge limit references an edge outside the graph.");
+      if (index && limits.edges[index] <= limits.edges[index - 1]) throw new Error("Edge limits must be sorted and unique.");
+    }
+  }
   if (!(chunk.edgeDurationsSeconds instanceof Uint16Array)) throw new Error("Profile durations must be a Uint16Array.");
   if (!Number.isInteger(chunk.edgeDurationScale) || chunk.edgeDurationScale <= 0 || chunk.edgeDurationScale > 65535) throw new Error("Invalid profile duration scale.");
   if (!getRoutingProfileById(chunk.profileId) || !chunk.profileId) throw new Error(`Cannot write a profile chunk for an unsupported profile (id ${chunk.profileId}).`);
@@ -527,7 +538,11 @@ export function encodeProfileChunk(chunk: ProfileChunk): ArrayBuffer {
   const mask = chunk.edgeAccess && !allowsEverything(chunk.edgeAccess, edges) ? chunk.edgeAccess : undefined;
   if (mask && mask.length !== (edges + 7) >> 3) throw new Error("Profile access mask does not cover every edge.");
 
-  const buffer = new ArrayBuffer(PROFILE_CHUNK_HEADER_BYTES + edges * 2 + (mask?.byteLength ?? 0));
+  // The limit table holds 32-bit edge numbers, so it starts on a four-byte
+  // boundary: the mask before it can be any number of bytes long.
+  const limitsAt = alignUp(PROFILE_CHUNK_HEADER_BYTES + edges * 2 + (mask?.byteLength ?? 0));
+  const limitRows = limits?.edges.length ?? 0;
+  const buffer = new ArrayBuffer(limitRows ? limitsAt + limitRows * 8 : PROFILE_CHUNK_HEADER_BYTES + edges * 2 + (mask?.byteLength ?? 0));
   const view = new DataView(buffer);
   view.setUint32(0, COMPACT_MAGIC, true);
   view.setUint16(4, SPLIT_COMPACT_VERSION, true);
@@ -537,8 +552,17 @@ export function encodeProfileChunk(chunk: ProfileChunk): ArrayBuffer {
   view.setUint32(12, mask?.byteLength ?? 0, true);
   view.setUint16(16, chunk.edgeDurationScale, true);
   view.setUint16(18, Math.round(chunk.maxSpeedKph), true);
+  view.setUint32(20, limitRows, true);
   new Uint16Array(buffer, PROFILE_CHUNK_HEADER_BYTES, edges).set(chunk.edgeDurationsSeconds);
   if (mask) new Uint8Array(buffer, PROFILE_CHUNK_HEADER_BYTES + edges * 2, mask.byteLength).set(mask);
+  if (limits && limitRows) {
+    new Uint32Array(buffer, limitsAt, limitRows).set(limits.edges);
+    const columns = new Uint8Array(buffer, limitsAt + limitRows * 4, limitRows * 4);
+    columns.set(limits.heightDecimetres, 0);
+    columns.set(limits.widthDecimetres, limitRows);
+    columns.set(limits.lengthDecimetres, limitRows * 2);
+    columns.set(limits.weightHalfTonnes, limitRows * 3);
+  }
   return buffer;
 }
 
@@ -553,17 +577,38 @@ export function decodeProfileChunk(buffer: ArrayBuffer): ProfileChunk {
   const maskBytes = view.getUint32(12, true);
   const edgeDurationScale = view.getUint16(16, true);
   const maxSpeedKph = view.getUint16(18, true);
+  const limitRows = view.getUint32(20, true);
   if (!profileId || !getRoutingProfileById(profileId)) throw new Error(`Routing graph was compiled for an unsupported profile (id ${profileId}).`);
   if (!edgeDurationScale) throw new Error("Invalid routing profile chunk: zero duration scale.");
   if (maxSpeedKph > MAX_PLAUSIBLE_SPEED_KPH) throw new Error("Invalid routing profile chunk: implausible profile speed ceiling.");
   if (maskBytes && maskBytes !== (edges + 7) >> 3) throw new Error("Invalid routing profile chunk: access mask does not cover every edge.");
-  if (buffer.byteLength !== PROFILE_CHUNK_HEADER_BYTES + edges * 2 + maskBytes) throw new Error("Truncated routing profile chunk");
+  const limitsAt = alignUp(PROFILE_CHUNK_HEADER_BYTES + edges * 2 + maskBytes);
+  const expected = limitRows ? limitsAt + limitRows * 8 : PROFILE_CHUNK_HEADER_BYTES + edges * 2 + maskBytes;
+  if (limitRows > edges) throw new Error("Invalid routing profile chunk: more limits than edges.");
+  if (buffer.byteLength !== expected) throw new Error("Truncated routing profile chunk");
+  let edgeLimits: EdgeLimits | undefined;
+  if (limitRows) {
+    const edgeIds = new Uint32Array(buffer.slice(limitsAt, limitsAt + limitRows * 4));
+    for (let index = 0; index < limitRows; index += 1) {
+      if (edgeIds[index] >= edges) throw new Error("Invalid routing profile chunk: limit references an edge outside the graph.");
+      if (index && edgeIds[index] <= edgeIds[index - 1]) throw new Error("Invalid routing profile chunk: limits are not sorted.");
+    }
+    const columns = new Uint8Array(buffer, limitsAt + limitRows * 4, limitRows * 4);
+    edgeLimits = {
+      edges: edgeIds,
+      heightDecimetres: columns.slice(0, limitRows),
+      widthDecimetres: columns.slice(limitRows, limitRows * 2),
+      lengthDecimetres: columns.slice(limitRows * 2, limitRows * 3),
+      weightHalfTonnes: columns.slice(limitRows * 3),
+    };
+  }
   return {
     profileId,
     maxSpeedKph,
     edgeDurationScale,
     edgeDurationsSeconds: new Uint16Array(buffer.slice(PROFILE_CHUNK_HEADER_BYTES, PROFILE_CHUNK_HEADER_BYTES + edges * 2)),
-    ...(maskBytes ? { edgeAccess: new Uint8Array(buffer.slice(PROFILE_CHUNK_HEADER_BYTES + edges * 2)) } : {}),
+    ...(maskBytes ? { edgeAccess: new Uint8Array(buffer.slice(PROFILE_CHUNK_HEADER_BYTES + edges * 2, PROFILE_CHUNK_HEADER_BYTES + edges * 2 + maskBytes)) } : {}),
+    ...(edgeLimits ? { edgeLimits } : {}),
   };
 }
 
@@ -593,5 +638,6 @@ export function combineProfiledGraph(shared: SharedRoadGraph, profile: ProfileCh
     profileId: profile.profileId,
     maxSpeedKph: profile.maxSpeedKph,
     ...(profile.edgeAccess ? { edgeAccess: profile.edgeAccess } : {}),
+    ...(profile.edgeLimits ? { edgeLimits: profile.edgeLimits } : {}),
   };
 }

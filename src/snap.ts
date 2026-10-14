@@ -95,7 +95,7 @@ function projectOntoPolyline(points: Coordinate[], query: Coordinate) {
  * lies within `maxDistanceMeters` of the coordinate — measured to the road
  * surface, not to the nearest junction.
  */
-export function snapToGraph(graph: RoadGraph, coordinate: Coordinate, maxDistanceMeters = 500): GraphSnap | null {
+export function snapToGraph(graph: RoadGraph, coordinate: Coordinate, maxDistanceMeters = 500, access: Uint8Array | undefined = graph.edgeAccess): GraphSnap | null {
   const candidates = graph.edgeTargets.length
     ? nearbyEdgeIds(edgeSpatialIndexFor(graph), coordinate, maxDistanceMeters)
     : new Set<number>();
@@ -103,8 +103,8 @@ export function snapToGraph(graph: RoadGraph, coordinate: Coordinate, maxDistanc
   let best: EdgeProjection | null = null;
   const projections: EdgeProjection[] = [];
   for (const edge of candidates) {
-    // A road this profile may not use is not a road to start or finish on.
-    if (!edgeAllowed(graph.edgeAccess, edge)) continue;
+    // A road this vehicle may not use is not a road to start or finish on.
+    if (!edgeAllowed(access, edge)) continue;
     const source = edgeSource(graph, edge);
     const polyline = edgePolyline(graph, edge, source);
     const projected = projectOntoPolyline(polyline, coordinate);
