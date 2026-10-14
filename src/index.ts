@@ -10,14 +10,14 @@ export { createEdgeSpatialIndex, edgePolyline, edgeSource, edgeSpatialIndexFor, 
 export { createSpatialIndex, withSpatialIndex } from "./spatial-index";
 export { RoadRouter } from "./road-router";
 export type { RoadRouterOptions } from "./road-router";
-export { BundleCompression, distanceToBounds, encodeCompressedRoadGraphBundle, encodeRoadGraphBundle, openRoadGraphBundle } from "./bundle";
+export { BundleCompression, distanceToBounds, encodeCompressedRoadGraphBundle, encodeProfiledRoadGraphBundle, encodeRoadGraphBundle, openRoadGraphBundle } from "./bundle";
 export { RouterError } from "./types";
 export { createRouteGraphLoader } from "./manifest";
 export { mergeRoadGraphs } from "./merge";
 export { buildTurnRestrictionIndex, buildTurnSequenceIndex, isTurnBanned, packTurnRestrictions, packTurnSequences } from "./turn-restrictions";
 export { ProfileId, carRoutingProfile, getRoutingProfile, getRoutingProfileById, maxSpeedMpsFor, parseMaxSpeedKph, profileOf, routingProfiles } from "./routing-profile";
 export type { CompactGraphOptions } from "./compact";
-export type { BundleBounds, BundleEncodeOptions, BundleGraphTile, BundleOpenOptions, BundleTile, RoadGraphBundle } from "./bundle";
+export type { BundleBounds, BundleChunkRef, BundleEncodeOptions, BundleGraphTile, BundleOpenOptions, BundleProfiledTile, BundleTile, RoadGraphBundle } from "./bundle";
 export type { Coordinate, CoordinateStorage, GeoJsonLineString, GeoJsonPosition, ProfileChunk, RouteSnap, EdgeWeightStorage, NodeSpatialIndex, RoadGraph, RoutePreference, RouteResult, RouterErrorCode, SharedRoadGraph } from "./types";
 export type { GraphBounds, GraphTile, RouteGraphLoader, RouteGraphManifest } from "./manifest";
 export type { TurnRestrictionIndex, TurnSequenceIndex } from "./turn-restrictions";

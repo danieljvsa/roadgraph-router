@@ -1,7 +1,7 @@
 import { createRouteGraphLoader, type RouteGraphLoader } from "./manifest";
 import { openRoadGraphBundle, type BundleTile, type RoadGraphBundle } from "./bundle";
 import { route } from "./router";
-import { maxSpeedMpsFor } from "./routing-profile";
+import { getRoutingProfile, getRoutingProfileById, maxSpeedMpsFor } from "./routing-profile";
 import { RouterError, type Coordinate, type RoadGraph, type RoutePreference, type RouteResult } from "./types";
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -25,6 +25,11 @@ export type RoadRouterOptions = {
   maxDetourFactor?: number;
   /** How many stitched corridors a bundle keeps; see `BundleOpenOptions`. */
   mergedCacheSize?: number;
+  /**
+   * Which vehicle to route as. Only a multi-profile bundle offers a choice;
+   * leaving it out uses the vehicle the bundle was compiled around.
+   */
+  profile?: string;
 };
 const MINIMUM_BUDGET_METERS = 5_000;
 
@@ -51,7 +56,7 @@ function haversineMeters(a: Coordinate, b: Coordinate) {
  * manifest, or an already-decoded graph.
  */
 export class RoadRouter {
-  private constructor(private readonly graph?: RoadGraph, private readonly loader?: RouteLoader, private readonly options: RoadRouterOptions = {}) {}
+  private constructor(private readonly graph?: RoadGraph, private readonly loader?: RouteLoader, private readonly options: RoadRouterOptions = {}, private readonly profileId?: number) {}
 
   static fromGraph(graph: RoadGraph) {
     return new RoadRouter(graph);
@@ -59,8 +64,30 @@ export class RoadRouter {
 
   static async open(source: string | RoadGraph, fetcher?: FetchLike, options: RoadRouterOptions = {}) {
     if (typeof source !== "string") return RoadRouter.fromGraph(source);
-    if (source.endsWith(".efrb")) return new RoadRouter(undefined, await openRoadGraphBundle(source, fetcher, { mergedCacheSize: options.mergedCacheSize }), options);
+    if (source.endsWith(".efrb")) {
+      const bundle = await openRoadGraphBundle(source, fetcher, { mergedCacheSize: options.mergedCacheSize, profile: options.profile });
+      return new RoadRouter(undefined, bundle, options, bundle.profileId);
+    }
     return new RoadRouter(undefined, await createRouteGraphLoader(source, fetcher), options);
+  }
+
+  /** The vehicle this router is routing as, when the source names one. */
+  get profile() {
+    return getRoutingProfileById(this.profileId ?? 0)?.name;
+  }
+
+  /**
+   * The same bundle read as another vehicle. The shared half of every tile is
+   * already downloaded and stays so, which is the point of storing the road
+   * network once: switching vehicle costs only the small per-vehicle chunks.
+   */
+  withProfile(name: string): RoadRouter {
+    const wanted = getRoutingProfile(name);
+    if (!isBundle(this.loader)) throw new Error("Only a multi-profile bundle can be read as another vehicle.");
+    if (!this.loader.profiles.includes(wanted.id)) {
+      throw new Error(`This routing bundle does not hold the "${name}" profile. It holds: ${this.loader.profiles.map((id) => getRoutingProfileById(id)?.name ?? `id ${id}`).join(", ")}.`);
+    }
+    return new RoadRouter(undefined, this.loader, this.options, wanted.id);
   }
 
   async route(from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest"): Promise<RouteResult> {
@@ -84,7 +111,10 @@ export class RoadRouter {
     // How far a given duration can reach depends on the vehicle. Sizing a
     // walk's tile budget with a car's top speed would ask for a radius of
     // tiles forty times larger than the walk can cross.
-    const maxSpeedMps = maxSpeedMpsFor({ profileId: bundle.profileId, maxSpeedKph: bundle.maxSpeedKph || undefined });
+    // A multi-profile bundle's header records the fastest vehicle it holds, so
+    // the ceiling for the one actually selected comes from the profile itself.
+    const selected = this.profileId ?? bundle.profileId;
+    const maxSpeedMps = maxSpeedMpsFor({ profileId: selected, maxSpeedKph: bundle.profiles.length > 1 ? undefined : bundle.maxSpeedKph || undefined });
     const reachFor = (result: RouteResult) => Math.min(ceiling, preference === "fastest" ? result.durationSeconds * maxSpeedMps : result.distanceMeters);
     let budget = Math.max(MINIMUM_BUDGET_METERS, Math.min(ceiling, straightLine * INITIAL_DETOUR_FACTOR));
 
@@ -97,7 +127,7 @@ export class RoadRouter {
       const wanted = bundle.tilesWithinBudget(from, to, nextBudget);
       if (wanted.length <= loaded.length && wanted.every((tile) => loaded.some((held) => held.id === tile.id))) return false;
       loaded = wanted;
-      graph = await bundle.loadTiles(wanted);
+      graph = await bundle.loadTiles(wanted, selected);
       return true;
     };
 

@@ -71,14 +71,23 @@ describe("profile metadata in a bundle", () => {
   const bounds = { minLat: 40.99, minLng: -8.01, maxLat: 41.02, maxLng: -7.98 };
 
   it("is readable from the header before any tile is downloaded", async () => {
-    const graph = { ...compactGraph(grid()), profileId: ProfileId.pedestrian, maxSpeedKph: 6 };
+    const graph = { ...compactGraph(grid()), profileId: ProfileId.car, maxSpeedKph: 110 };
     const bundle = encodeRoadGraphBundle([{ id: 1, bounds, graph }]);
     const fetcher = rangeFetcher(bundle);
-    const opened = await openRoadGraphBundle("https://example.test/foot.efrb", fetcher.fetcher);
-    expect(opened.profileId).toBe(ProfileId.pedestrian);
-    expect(opened.maxSpeedKph).toBe(6);
+    const opened = await openRoadGraphBundle("https://example.test/car.efrb", fetcher.fetcher);
+    expect(opened.profileId).toBe(ProfileId.car);
+    expect(opened.maxSpeedKph).toBe(110);
+    expect(opened.profiles).toEqual([ProfileId.car]);
     // Only the header and the directory, no chunk.
     expect(fetcher.stats.requests).toBe(2);
+  });
+
+  it("refuses at open a bundle whose profile this build cannot route", async () => {
+    const graph = { ...compactGraph(grid()), profileId: ProfileId.pedestrian, maxSpeedKph: 6 };
+    const bundle = encodeRoadGraphBundle([{ id: 1, bounds, graph }]);
+    // Better here than on the first tile: nothing has been downloaded yet.
+    await expect(openRoadGraphBundle("https://example.test/foot.efrb", rangeFetcher(bundle).fetcher))
+      .rejects.toThrow(/does not support/i);
   });
 
   it("reads a bundle written before profiles as a car bundle", async () => {
