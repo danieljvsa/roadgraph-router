@@ -17,6 +17,8 @@
  */
 
 import type { VehicleDimensions } from "./vehicle";
+import type { EdgeConditions, RoadGraph } from "./types";
+import { accessMaskFor, edgeAllowed } from "./access";
 
 /** When a journey passes, in the local time of the road it passes on. */
 export type TravelTime = {
@@ -237,4 +239,176 @@ export function travelTimeFrom(date: Date, publicHoliday = false): TravelTime {
     month: date.getMonth() + 1,
     publicHoliday,
   };
+}
+
+/** What a stored conditional row says: an access rule or a speed limit. */
+export const ConditionKind = { access: 0, maxspeed: 1 } as const;
+
+/** Collects what a compiler found into the stored side table. */
+export function packEdgeConditions(entries: { edge: number; kind: number; value: string }[]): EdgeConditions | undefined {
+  const rows = entries
+    .filter((entry) => parseConditional(entry.value).length > 0)
+    .sort((a, b) => a.edge - b.edge || a.kind - b.kind);
+  if (!rows.length) return undefined;
+  const index = new Map<string, number>();
+  const values: string[] = [];
+  const rules = new Uint16Array(rows.length);
+  for (let row = 0; row < rows.length; row += 1) {
+    const value = rows[row].value;
+    let at = index.get(value);
+    if (at === undefined) {
+      // More distinct conditional values than this would overflow the stored
+      // index; dropping the surplus keeps every row that did fit truthful.
+      if (values.length > 65535) continue;
+      at = values.push(value) - 1;
+      index.set(value, at);
+    }
+    rules[row] = at;
+  }
+  return {
+    edges: Uint32Array.from(rows, (row) => row.edge),
+    kinds: Uint8Array.from(rows, (row) => row.kind),
+    rules,
+    values,
+  };
+}
+
+/** A bundle's conditional values parsed once, rather than per edge per search. */
+export type ParsedConditions = { table: EdgeConditions; parsed: ConditionalRule[][] };
+
+export function parseEdgeConditions(table: EdgeConditions | undefined): ParsedConditions | undefined {
+  if (!table?.edges.length) return undefined;
+  return { table, parsed: table.values.map(parseConditional) };
+}
+
+/** The first row for an edge, or -1; rows are sorted so the rest follow it. */
+function firstRowFor(edges: Uint32Array, edge: number) {
+  let low = 0;
+  let high = edges.length - 1;
+  let found = -1;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    if (edges[middle] >= edge) { if (edges[middle] === edge) found = middle; high = middle - 1; } else low = middle + 1;
+  }
+  return found;
+}
+
+const CLOSED = new Set(["no", "private", "destination", "customers", "delivery", "permit", "agricultural", "forestry"]);
+
+/**
+ * What the conditional rules say about one edge at one moment: whether it is
+ * closed, and any speed limit that applies.
+ *
+ * `destination` and the permit-style values count as closed because this
+ * library has no notion of a journey's purpose, and treating "only if you live
+ * here" as open would route strangers down a residents' street.
+ */
+export function conditionsOnEdge(conditions: ParsedConditions, edge: number, when: TravelTime, vehicle?: VehicleDimensions) {
+  const { table, parsed } = conditions;
+  let closed = false;
+  let speedKph: number | undefined;
+  for (let row = firstRowFor(table.edges, edge); row >= 0 && row < table.edges.length && table.edges[row] === edge; row += 1) {
+    const value = conditionalValue(parsed[table.rules[row]], when, vehicle);
+    if (value === null) continue;
+    if (table.kinds[row] === ConditionKind.access) {
+      if (CLOSED.has(value.trim().toLowerCase())) closed = true;
+    } else {
+      const parsedSpeed = Number.parseFloat(value);
+      if (Number.isFinite(parsedSpeed) && parsedSpeed > 0) speedKph = speedKph === undefined ? parsedSpeed : Math.min(speedKph, parsedSpeed);
+    }
+  }
+  return { closed, speedKph };
+}
+
+/**
+ * The access mask for a departure time: the graph's own with the roads shut at
+ * that moment cleared as well.
+ *
+ * Only closures are applied. A road whose plain tags already forbid it stays
+ * forbidden even where a conditional value would open it, because the stored
+ * mask has already dropped it and reopening one would need the compiler to
+ * keep roads it currently discards. That errs towards refusing a road that is
+ * in fact usable, which is the direction this library errs in everywhere else.
+ */
+export function accessAtTime(
+  graph: Pick<RoadGraph, "edgeTargets" | "edgeAccess">,
+  conditions: ParsedConditions | undefined,
+  when: TravelTime | undefined,
+  vehicle?: VehicleDimensions,
+  base?: Uint8Array,
+): Uint8Array | undefined {
+  const start = base ?? graph.edgeAccess;
+  if (!when || !conditions) return start;
+  const edges = graph.edgeTargets.length;
+  let mask: Uint8Array | undefined;
+  const { table } = conditions;
+  for (let row = 0; row < table.edges.length; row += 1) {
+    const edge = table.edges[row];
+    if (edge >= edges || table.kinds[row] !== ConditionKind.access) continue;
+    // Rows are sorted by edge, so a repeat of one already cleared is skipped.
+    if (mask && !edgeAllowed(mask, edge)) continue;
+    if (!conditionsOnEdge(conditions, edge, when, vehicle).closed) continue;
+    mask ??= start ? Uint8Array.from(start) : accessMaskFor(edges, () => true);
+    mask[edge >> 3] &= ~(1 << (edge & 7));
+  }
+  return mask ?? start;
+}
+
+/** How many edges this moment closes, for reporting rather than routing. */
+export function countClosedAt(graph: Pick<RoadGraph, "edgeTargets" | "edgeAccess">, conditions: ParsedConditions | undefined, when: TravelTime, vehicle?: VehicleDimensions) {
+  const before = graph.edgeAccess;
+  const after = accessAtTime(graph, conditions, when, vehicle);
+  if (after === before) return 0;
+  let closed = 0;
+  for (let edge = 0; edge < graph.edgeTargets.length; edge += 1) {
+    if (edgeAllowed(before, edge) && !edgeAllowed(after, edge)) closed += 1;
+  }
+  return closed;
+}
+
+/**
+ * A graph's conditional values parsed once and kept against the graph, so a
+ * search pays the parsing cost on its first route rather than on every edge.
+ */
+const parsedByTable = new WeakMap<EdgeConditions, ParsedConditions>();
+
+export function conditionsOf(graph: Pick<RoadGraph, "edgeConditions">): ParsedConditions | undefined {
+  const table = graph.edgeConditions;
+  if (!table?.edges.length) return undefined;
+  const existing = parsedByTable.get(table);
+  if (existing) return existing;
+  const parsed = parseEdgeConditions(table)!;
+  parsedByTable.set(table, parsed);
+  return parsed;
+}
+
+/**
+ * The edges a conditional speed limit slows at this moment, as whole seconds.
+ *
+ * A conditional limit may only slow an edge, never speed it up. A faster
+ * stored duration is left alone, because the A* bound is built from the
+ * profile's ceiling and an edge quicker than the graph says would break the
+ * guarantee that the route found is the best one.
+ */
+export function conditionalDurations(
+  graph: Pick<RoadGraph, "edgeTargets" | "edgeDistancesMeters" | "edgeDistanceScale" | "edgeDurationsSeconds" | "edgeDurationScale">,
+  conditions: ParsedConditions | undefined,
+  when: TravelTime,
+  vehicle?: VehicleDimensions,
+): Map<number, number> | undefined {
+  if (!conditions) return undefined;
+  const distanceScale = graph.edgeDistanceScale ?? 1;
+  const durationScale = graph.edgeDurationScale ?? 1;
+  const slowed = new Map<number, number>();
+  const { table } = conditions;
+  for (let row = 0; row < table.edges.length; row += 1) {
+    const edge = table.edges[row];
+    if (table.kinds[row] !== ConditionKind.maxspeed || edge >= graph.edgeTargets.length || slowed.has(edge)) continue;
+    const { speedKph } = conditionsOnEdge(conditions, edge, when, vehicle);
+    if (speedKph === undefined) continue;
+    const stored = graph.edgeDurationsSeconds[edge] * durationScale;
+    const limited = (graph.edgeDistancesMeters[edge] * distanceScale) / (speedKph / 3.6);
+    if (limited > stored) slowed.set(edge, limited);
+  }
+  return slowed.size ? slowed : undefined;
 }

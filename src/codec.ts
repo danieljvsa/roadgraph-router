@@ -1,4 +1,4 @@
-import type { EdgeLimits, ProfileChunk, RoadGraph, SharedRoadGraph } from "./types";
+import type { EdgeConditions, EdgeLimits, ProfileChunk, RoadGraph, SharedRoadGraph } from "./types";
 import { allowsEverything } from "./access";
 import { VarintReader, VarintWriter } from "./varint";
 import { getRoutingProfileById } from "./routing-profile";
@@ -587,7 +587,27 @@ export function encodeProfileChunk(chunk: ProfileChunk): ArrayBuffer {
   const variableAt = PROFILE_CHUNK_HEADER_BYTES + edges * 2 + (mask?.byteLength ?? 0) + (turns?.byteLength ?? 0);
   const limitsAt = alignUp(variableAt);
   const limitRows = limits?.edges.length ?? 0;
-  const buffer = new ArrayBuffer(limitRows ? limitsAt + limitRows * 8 : variableAt);
+  const limitsEnd = limitRows ? limitsAt + limitRows * 8 : variableAt;
+
+  // Conditional restrictions live in the header bytes every chunk written so
+  // far left as zero, so a bundle whose roads carry none is byte for byte the
+  // file the previous version wrote.
+  const conditions = chunk.edgeConditions?.edges.length ? chunk.edgeConditions : undefined;
+  if (conditions) {
+    const rows = conditions.edges.length;
+    if (conditions.kinds.length !== rows || conditions.rules.length !== rows) throw new Error("Edge condition columns must all be the same length.");
+    for (let index = 0; index < rows; index += 1) {
+      if (conditions.edges[index] >= edges) throw new Error("Edge condition references an edge outside the graph.");
+      if (index && conditions.edges[index] < conditions.edges[index - 1]) throw new Error("Edge conditions must be sorted by edge.");
+      if (conditions.rules[index] >= conditions.values.length) throw new Error("Edge condition names a value that is not in the table.");
+    }
+    if (conditions.values.some((value) => value.includes("\0"))) throw new Error("A conditional value cannot contain a null byte.");
+  }
+  const conditionRows = conditions?.edges.length ?? 0;
+  const conditionText = conditions ? new TextEncoder().encode(conditions.values.join("\0")) : undefined;
+  const conditionsAt = alignUp(limitsEnd);
+  const conditionTextAt = alignUp(conditionsAt + conditionRows * 7);
+  const buffer = new ArrayBuffer(conditionRows ? conditionTextAt + (conditionText?.byteLength ?? 0) : limitsEnd);
   const view = new DataView(buffer);
   view.setUint32(0, COMPACT_MAGIC, true);
   view.setUint16(4, SPLIT_COMPACT_VERSION, true);
@@ -600,6 +620,8 @@ export function encodeProfileChunk(chunk: ProfileChunk): ArrayBuffer {
   view.setUint32(20, limitRows, true);
   view.setUint32(24, restrictions, true);
   view.setUint32(28, turns?.byteLength ?? 0, true);
+  view.setUint32(32, conditionRows, true);
+  view.setUint32(36, conditionText?.byteLength ?? 0, true);
   new Uint16Array(buffer, PROFILE_CHUNK_HEADER_BYTES, edges).set(chunk.edgeDurationsSeconds);
   if (mask) new Uint8Array(buffer, PROFILE_CHUNK_HEADER_BYTES + edges * 2, mask.byteLength).set(mask);
   if (turns) new Uint8Array(buffer, PROFILE_CHUNK_HEADER_BYTES + edges * 2 + (mask?.byteLength ?? 0), turns.byteLength).set(turns);
@@ -610,6 +632,12 @@ export function encodeProfileChunk(chunk: ProfileChunk): ArrayBuffer {
     columns.set(limits.widthDecimetres, limitRows);
     columns.set(limits.lengthDecimetres, limitRows * 2);
     columns.set(limits.weightHalfTonnes, limitRows * 3);
+  }
+  if (conditions && conditionRows && conditionText) {
+    new Uint32Array(buffer, conditionsAt, conditionRows).set(conditions.edges);
+    new Uint16Array(buffer, conditionsAt + conditionRows * 4, conditionRows).set(conditions.rules);
+    new Uint8Array(buffer, conditionsAt + conditionRows * 6, conditionRows).set(conditions.kinds);
+    new Uint8Array(buffer, conditionTextAt, conditionText.byteLength).set(conditionText);
   }
   return buffer;
 }
@@ -628,6 +656,9 @@ export function decodeProfileChunk(buffer: ArrayBuffer): ProfileChunk {
   const limitRows = view.getUint32(20, true);
   const restrictionCount = view.getUint32(24, true);
   const turnMaskBytes = view.getUint32(28, true);
+  // Zero in every chunk written before conditional restrictions existed.
+  const conditionRows = view.getUint32(32, true);
+  const conditionTextBytes = view.getUint32(36, true);
   if (!profileId || !getRoutingProfileById(profileId)) throw new Error(`Routing graph was compiled for an unsupported profile (id ${profileId}).`);
   if (!edgeDurationScale) throw new Error("Invalid routing profile chunk: zero duration scale.");
   if (maxSpeedKph > MAX_PLAUSIBLE_SPEED_KPH) throw new Error("Invalid routing profile chunk: implausible profile speed ceiling.");
@@ -635,8 +666,12 @@ export function decodeProfileChunk(buffer: ArrayBuffer): ProfileChunk {
   if (turnMaskBytes && turnMaskBytes !== (restrictionCount + 7) >> 3) throw new Error("Invalid routing profile chunk: restriction mask does not cover every restriction.");
   const variableAt = PROFILE_CHUNK_HEADER_BYTES + edges * 2 + maskBytes + turnMaskBytes;
   const limitsAt = alignUp(variableAt);
-  const expected = limitRows ? limitsAt + limitRows * 8 : variableAt;
+  const limitsEnd = limitRows ? limitsAt + limitRows * 8 : variableAt;
+  const conditionsAt = alignUp(limitsEnd);
+  const conditionTextAt = alignUp(conditionsAt + conditionRows * 7);
+  const expected = conditionRows ? conditionTextAt + conditionTextBytes : limitsEnd;
   if (limitRows > edges) throw new Error("Invalid routing profile chunk: more limits than edges.");
+  if (conditionRows && !conditionTextBytes) throw new Error("Invalid routing profile chunk: conditions with no values.");
   if (buffer.byteLength !== expected) throw new Error("Truncated routing profile chunk");
   let edgeLimits: EdgeLimits | undefined;
   if (limitRows) {
@@ -654,6 +689,25 @@ export function decodeProfileChunk(buffer: ArrayBuffer): ProfileChunk {
       weightHalfTonnes: columns.slice(limitRows * 3),
     };
   }
+  let edgeConditions: EdgeConditions | undefined;
+  if (conditionRows) {
+    const conditionEdges = new Uint32Array(buffer.slice(conditionsAt, conditionsAt + conditionRows * 4));
+    for (let index = 0; index < conditionRows; index += 1) {
+      if (conditionEdges[index] >= edges) throw new Error("Invalid routing profile chunk: condition references an edge outside the graph.");
+      if (index && conditionEdges[index] < conditionEdges[index - 1]) throw new Error("Invalid routing profile chunk: conditions are not sorted.");
+    }
+    const values = new TextDecoder().decode(new Uint8Array(buffer, conditionTextAt, conditionTextBytes)).split("\0");
+    const rules = new Uint16Array(buffer.slice(conditionsAt + conditionRows * 4, conditionsAt + conditionRows * 6));
+    for (let index = 0; index < conditionRows; index += 1) {
+      if (rules[index] >= values.length) throw new Error("Invalid routing profile chunk: condition names a value that is not in the table.");
+    }
+    edgeConditions = {
+      edges: conditionEdges,
+      rules,
+      kinds: new Uint8Array(buffer.slice(conditionsAt + conditionRows * 6, conditionsAt + conditionRows * 7)),
+      values,
+    };
+  }
   return {
     profileId,
     maxSpeedKph,
@@ -663,6 +717,7 @@ export function decodeProfileChunk(buffer: ArrayBuffer): ProfileChunk {
     ...(restrictionCount ? { restrictionCount } : {}),
     ...(turnMaskBytes ? { restrictionMask: new Uint8Array(buffer.slice(PROFILE_CHUNK_HEADER_BYTES + edges * 2 + maskBytes, variableAt)) } : {}),
     ...(edgeLimits ? { edgeLimits } : {}),
+    ...(edgeConditions ? { edgeConditions } : {}),
   };
 }
 
@@ -693,6 +748,7 @@ export function combineProfiledGraph(shared: SharedRoadGraph, profile: ProfileCh
     maxSpeedKph: profile.maxSpeedKph,
     ...(profile.edgeAccess ? { edgeAccess: profile.edgeAccess } : {}),
     ...(profile.edgeLimits ? { edgeLimits: profile.edgeLimits } : {}),
+    ...(profile.edgeConditions ? { edgeConditions: profile.edgeConditions } : {}),
     ...(profile.restrictionMask ? { restrictionMask: profile.restrictionMask } : {}),
   };
 }

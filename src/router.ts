@@ -4,6 +4,7 @@ import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
 import { edgeAllowed } from "./access";
 import { accessForVehicle } from "./limits";
+import { accessAtTime, conditionalDurations, conditionsOf, travelTimeFrom, type TravelTime } from "./conditional";
 import { componentSizes, componentsFor } from "./connectivity";
 import { searchBoundsFor, straightLineAtMost } from "./search-bounds";
 import type { VehicleDimensions } from "./vehicle";
@@ -356,7 +357,29 @@ export type RouteOptions = {
    * is too large or too heavy for are closed to the search and to snapping.
    */
   vehicle?: VehicleDimensions;
+  /**
+   * When the journey starts, in the local time of the roads being travelled.
+   *
+   * Leaving it out ignores every conditional restriction, which is what this
+   * library did before it could read them: a road closed only at certain hours
+   * counts as open. Supplying it closes the roads shut at that moment and
+   * slows the ones a conditional speed limit slows.
+   *
+   * One moment is used for the whole route rather than an arrival time per
+   * edge. A route crossing a boundary as a restriction begins is therefore
+   * judged by where it set out, which is the honest limit of a departure time.
+   */
+  departAt?: Date | TravelTime;
+  /** Whether that day is a public holiday, which only a caller can know. */
+  publicHoliday?: boolean;
 };
+
+/** Reads whichever form of departure time a caller supplied. */
+export function departureTime(options: Pick<RouteOptions, "departAt" | "publicHoliday">): TravelTime | undefined {
+  const departAt = options.departAt;
+  if (!departAt) return undefined;
+  return departAt instanceof Date ? travelTimeFrom(departAt, options.publicHoliday) : { ...departAt, publicHoliday: departAt.publicHoliday ?? options.publicHoliday };
+}
 
 /** The node a snap stands on, for asking which piece of the network it is in. */
 function nodeOfSnap(snap: GraphSnap) {
@@ -406,7 +429,10 @@ export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   assertGraph(graph);
   // The vehicle narrows the profile's own mask, so every later step — snapping
   // included — sees one answer about which roads are usable.
-  const access = accessForVehicle(graph, options.vehicle);
+  const vehicleAccess = accessForVehicle(graph, options.vehicle);
+  // The departure time narrows the mask further, so snapping and search agree
+  // about which roads are usable at the moment the journey starts.
+  const access = accessAtTime(graph, conditionsOf(graph), departureTime(options), options.vehicle, vehicleAccess);
   try {
     return routeBetween(graph, from, to, preference, options, access);
   } catch (error) {
@@ -423,7 +449,11 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
 
   const distanceScale = graph.edgeDistanceScale ?? 1;
   const durationScale = graph.edgeDurationScale ?? 1;
-  const costOf = (edge: number) => preference === "fastest" ? graph.edgeDurationsSeconds[edge] * durationScale : graph.edgeDistancesMeters[edge] * distanceScale;
+  const when = departureTime(options);
+  const slowed = preference === "fastest" && when ? conditionalDurations(graph, conditionsOf(graph), when, options.vehicle) : undefined;
+  const costOf = (edge: number) => preference === "fastest"
+    ? (slowed?.get(edge) ?? graph.edgeDurationsSeconds[edge] * durationScale)
+    : graph.edgeDistancesMeters[edge] * distanceScale;
 
   const seeds = seedsFor(originSnap, costOf);
   const finisherList = finishersFor(destinationSnap, costOf);
@@ -494,7 +524,9 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     const scale = graph.coordinateScale ?? 1;
     for (const edge of edges) {
       distanceMeters += graph.edgeDistancesMeters[edge] * distanceScale;
-      durationSeconds += graph.edgeDurationsSeconds[edge] * durationScale;
+      // The same slowed duration the search planned with, so a route held up
+      // by a night speed limit is not reported at the daytime time.
+      durationSeconds += slowed?.get(edge) ?? graph.edgeDurationsSeconds[edge] * durationScale;
       if (graph.edgeShapeOffsets && graph.edgeShapeLatitudes && graph.edgeShapeLongitudes) {
         for (let point = graph.edgeShapeOffsets[edge]; point < graph.edgeShapeOffsets[edge + 1]; point += 1) {
           coordinates.push([graph.edgeShapeLongitudes[point] / scale, graph.edgeShapeLatitudes[point] / scale]);

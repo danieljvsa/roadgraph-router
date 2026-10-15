@@ -3,6 +3,7 @@ import { withSpatialIndex } from "./spatial-index";
 import { packTurnRestrictions, packTurnSequences } from "./turn-restrictions";
 import { accessMaskFor, edgeAllowed } from "./access";
 import { packEdgeLimits, fromDecimetres, fromHalfTonnes } from "./limits";
+import { packEdgeConditions } from "./conditional";
 
 const COORDINATE_SCALE = 10_000_000;
 /** Two edges count as the same road when their lengths agree to the centimetre. */
@@ -206,6 +207,8 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
   const hasAccess = graphs.some((graph) => graph.edgeAccess);
   const mergedAccess = hasAccess ? accessMaskFor(edgeCount, () => true) : undefined;
   const limitRows = new Map<number, { heightMeters?: number; widthMeters?: number; lengthMeters?: number; weightTonnes?: number }>();
+  const conditionRows: { edge: number; kind: number; value: string }[] = [];
+  const seenConditions = new Set<string>();
   for (let index = 0; index < graphs.length; index += 1) {
     const graph = graphs[index];
     const edgeMap = edgeMaps[index];
@@ -238,6 +241,21 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
       }
     }
 
+    const conditions = graph.edgeConditions;
+    if (conditions) {
+      for (let row = 0; row < conditions.edges.length; row += 1) {
+        const merged = rebase(conditions.edges[row]);
+        if (merged < 0) continue;
+        const value = conditions.values[conditions.rules[row]];
+        // Tiles overlap, so the same restriction arrives once per tile that
+        // saw the road. Keeping one copy of each is enough: they say the same.
+        const key = `${merged}:${conditions.kinds[row]}:${value}`;
+        if (seenConditions.has(key)) continue;
+        seenConditions.add(key);
+        conditionRows.push({ edge: merged, kind: conditions.kinds[row], value });
+      }
+    }
+
     const { turnRestrictionFromEdges: fromEdges, turnRestrictionToEdges: toEdges } = graph;
     if (fromEdges && toEdges) {
       for (let pair = 0; pair < fromEdges.length; pair += 1) {
@@ -263,6 +281,7 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
     }
   }
   const mergedLimits = packEdgeLimits([...limitRows].map(([edge, limits]) => ({ edge, limits })));
+  const mergedConditions = packEdgeConditions(conditionRows);
 
   return withSpatialIndex({
     nodeLatitudes: mergedLatitudes.slice(0, nodeCount),
@@ -276,6 +295,7 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
     ...(graphs[0].maxSpeedKph ? { maxSpeedKph: graphs[0].maxSpeedKph } : {}),
     ...(mergedAccess ? { edgeAccess: mergedAccess } : {}),
     ...(mergedLimits ? { edgeLimits: mergedLimits } : {}),
+    ...(mergedConditions ? { edgeConditions: mergedConditions } : {}),
     ...(pointCount ? { edgeShapeOffsets, edgeShapeLatitudes, edgeShapeLongitudes } : {}),
     ...(bannedPairs.length ? packTurnRestrictions(bannedPairs) : {}),
     ...(bannedSequences.length ? packTurnSequences(bannedSequences) : {}),

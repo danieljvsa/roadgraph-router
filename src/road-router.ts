@@ -1,6 +1,6 @@
 import { createRouteGraphLoader, type RouteGraphLoader } from "./manifest";
 import { openRoadGraphBundle, type BundleTile, type RoadGraphBundle } from "./bundle";
-import { route } from "./router";
+import { route, type RouteOptions } from "./router";
 import { getRoutingProfile, getRoutingProfileById, maxSpeedMpsFor } from "./routing-profile";
 import { RouterError, type Coordinate, type RoadGraph, type RoutePreference, type RouteResult } from "./types";
 import { DEFAULT_VEHICLE_PRESET, resolveVehicle, type VehicleDimensions, type VehicleInput } from "./vehicle";
@@ -63,6 +63,9 @@ function haversineMeters(a: Coordinate, b: Coordinate) {
  * High-level route entry point. `open()` accepts an EFRB bundle, an EFRT
  * manifest, or an already-decoded graph.
  */
+/** When a journey starts, for the conditional restrictions that depend on it. */
+export type DepartureOptions = Pick<RouteOptions, "departAt" | "publicHoliday">;
+
 export class RoadRouter {
   private constructor(private readonly graph?: RoadGraph, private readonly loader?: RouteLoader, private readonly options: RoadRouterOptions = {}, private readonly profileId?: number, private readonly bundleVehicle?: string) {
     const profile = getRoutingProfileById(profileId ?? 0);
@@ -142,10 +145,15 @@ export class RoadRouter {
     return new RoadRouter(undefined, this.loader, this.options, wanted.id, this.bundleVehicle);
   }
 
-  async route(from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest"): Promise<RouteResult> {
-    if (this.graph) return route(this.graph, from, to, preference, { vehicle: this.vehicle });
-    if (isBundle(this.loader)) return this.routeOverBundle(this.loader, from, to, preference);
-    return this.routeOverLoader(this.loader!, from, to, preference);
+  /**
+   * `when` says when the journey starts, so conditional restrictions apply.
+   * Leaving it out ignores them, which is how this library behaved before it
+   * could read them.
+   */
+  async route(from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest", when: DepartureOptions = {}): Promise<RouteResult> {
+    if (this.graph) return route(this.graph, from, to, preference, { vehicle: this.vehicle, ...when });
+    if (isBundle(this.loader)) return this.routeOverBundle(this.loader, from, to, preference, when);
+    return this.routeOverLoader(this.loader!, from, to, preference, when);
   }
 
   /**
@@ -157,7 +165,7 @@ export class RoadRouter {
    * graph contains. Because the test measures ground distance rather than
    * counting neighbours, the answer does not depend on the tile size.
    */
-  private async routeOverBundle(bundle: RoadGraphBundle, from: Coordinate, to: Coordinate, preference: RoutePreference) {
+  private async routeOverBundle(bundle: RoadGraphBundle, from: Coordinate, to: Coordinate, preference: RoutePreference, when: DepartureOptions = {}) {
     const straightLine = haversineMeters(from, to);
     const ceiling = straightLine * (this.options.maxDetourFactor ?? Infinity);
     // How far a given duration can reach depends on the vehicle. Sizing a
@@ -190,7 +198,7 @@ export class RoadRouter {
     for (const factor of [1, ...SEARCH_WIDENING_FACTORS]) {
       if (factor !== 1 && !(await widen(factor === Infinity ? Infinity : budget * factor))) break;
       try {
-        best = route(graph!, from, to, preference, { vehicle: this.vehicle });
+        best = route(graph!, from, to, preference, { vehicle: this.vehicle, ...when });
         break;
       } catch (error) {
         failure = error;
@@ -204,7 +212,7 @@ export class RoadRouter {
     for (let pass = 0; pass < MAX_CONFIRMATION_PASSES; pass += 1) {
       if (!(await widen(reachFor(best)))) return best;
       try {
-        best = route(graph!, from, to, preference, { costBound: preference === "fastest" ? best.durationSeconds : best.distanceMeters, vehicle: this.vehicle });
+        best = route(graph!, from, to, preference, { costBound: preference === "fastest" ? best.durationSeconds : best.distanceMeters, vehicle: this.vehicle, ...when });
       } catch (error) {
         if ((error as { code?: string }).code !== "NO_ROUTE") throw error;
         return best; // Nothing in the added tiles beats what we already have.
@@ -213,16 +221,16 @@ export class RoadRouter {
     return best;
   }
 
-  private async routeOverLoader(loader: RouteLoader, from: Coordinate, to: Coordinate, preference: RoutePreference) {
+  private async routeOverLoader(loader: RouteLoader, from: Coordinate, to: Coordinate, preference: RoutePreference, when: DepartureOptions = {}) {
     const graph = await loader.loadForRoute(from, to);
     try {
-      return route(graph, from, to, preference, { vehicle: this.vehicle });
+      return route(graph, from, to, preference, { vehicle: this.vehicle, ...when });
     } catch (error) {
       if (!(error instanceof Error) || (error as { code?: string }).code !== "NO_ROUTE" || !loader.loadExpandedForRoute) throw error;
       // A straight geographic corridor may omit a tile holding a bridge, a
       // one-way detour, or a road around a physical obstacle. Retry once with
       // the immediate ring of neighbouring tiles before reporting no route.
-      return route(await loader.loadExpandedForRoute(from, to), from, to, preference, { vehicle: this.vehicle });
+      return route(await loader.loadExpandedForRoute(from, to), from, to, preference, { vehicle: this.vehicle, ...when });
     }
   }
 }
