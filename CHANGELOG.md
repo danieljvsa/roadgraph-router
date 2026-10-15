@@ -64,6 +64,9 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`departAt` is the local time of the roads travelled.** No time-zone
   conversion is done and no clock is consulted.
 
+The browser build grew from 21.1 kB gzipped to 24.5 kB, measured the same way
+on both; importing only `RoadRouter` is 19.7 kB.
+
 ### Compatibility
 
 A bundle whose roads carry no conditional restriction is byte for byte the

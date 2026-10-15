@@ -5,7 +5,7 @@ routing bundle, then route over it with A* — in Node.js or in the browser, wit
 no routing service involved.
 
 A 425 MB Portugal extract compiles to a 38 MB bundle. A city route downloads
-4.3 MB of it and takes about 270 ms end to end. The browser build is 28 kB
+4.3 MB of it and takes about 270 ms end to end. The browser build is 24.5 kB
 gzipped and pulls in no Node built-ins.
 
 ## What a route here does and does not mean
@@ -510,7 +510,8 @@ EFR2 chunks inside EFRB.
 ## Using it in a browser
 
 The routing engine has no Node built-ins in it. Bundled for the browser it is
-about 18 kB gzipped, and it needs only `fetch` and `DecompressionStream`:
+19.7 kB gzipped on its own, or 24.5 kB for everything this package exports,
+and it needs only `fetch` and `DecompressionStream`:
 
 ```ts
 import { RoadRouter } from "roadgraph-router";
