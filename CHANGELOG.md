@@ -43,6 +43,33 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   29.2 MB the first route needed. A short urban route returned two in 79 ms
   with nothing further to download.
 
+- **A departure may name the time zone the roads are in.** `timeZone:
+  "Europe/Lisbon"` reads the date there rather than wherever the code runs,
+  which is what a restriction written in local time means. Built on `Intl`;
+  nothing is bundled for it.
+
+- **Weather, who is driving and what for can be answered.**
+  `circumstances: { conditions: ["wet"], userGroups: ["resident"],
+  purposes: ["delivery"] }` makes the rules resting on them apply.
+  Unanswered they never hold, so the behaviour of anyone not passing them is
+  unchanged. `unreadableConditions` now counts only what the parser genuinely
+  cannot read, which is what its name always claimed.
+
+- **Roads the caller knows are shut can be avoided.** `avoid: [{ lat, lng,
+  radiusMeters }]` closes everything a circle touches, to the search and to
+  snapping alike, for that call only. Roadworks and incidents happen after a
+  bundle is compiled and cannot be in it; this is how a caller reading a feed
+  of them says so.
+
+- **`searchWiderCorridor: false`** keeps an alternatives search to the tiles
+  one route needed, trading reach for about three megabytes on a long
+  journey.
+
+- **The compile report counts `conditionalTurnRestrictionsIgnored`.** A turn
+  banned only at certain hours is still banned at every hour; the number now
+  says how much of a region that costs. Across Portugal it is 1 relation in
+  26,599.
+
 ### Fixed
 
 - **A rule table too wide for its index stops the compile.** It used to drop

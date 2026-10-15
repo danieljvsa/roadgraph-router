@@ -4,6 +4,7 @@ import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
 import { edgeAllowed } from "./access";
 import { accessForVehicle } from "./limits";
+import { accessAvoiding, type AvoidArea } from "./avoid";
 import { accessAtTime, conditionalDurations, conditionsOf, travelTimeFrom, type Circumstances, type TravelTime } from "./conditional";
 import { componentSizes, componentsFor } from "./connectivity";
 import { searchBoundsFor, straightLineAtMost } from "./search-bounds";
@@ -396,6 +397,13 @@ export type RouteOptions = {
    */
   circumstances?: Circumstances;
   /**
+   * Roads the caller knows are shut — roadworks, an incident, an event. A
+   * compiled bundle cannot know about any of them; whoever is reading a feed
+   * of them can say so here, and the search will neither drive through a
+   * closure nor begin in the middle of one.
+   */
+  avoid?: AvoidArea[];
+  /**
    * Multipliers making certain edges dearer to the search than they really
    * are, used to push a search away from a route already found. The route
    * reported back is always priced at the graph's own cost, so a penalty
@@ -499,7 +507,10 @@ export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   const vehicleAccess = accessForVehicle(graph, options.vehicle);
   // The departure time narrows the mask further, so snapping and search agree
   // about which roads are usable at the moment the journey starts.
-  const access = accessAtTime(graph, conditionsOf(graph), departureTime(options), options.vehicle, vehicleAccess, options.circumstances);
+  const timed = accessAtTime(graph, conditionsOf(graph), departureTime(options), options.vehicle, vehicleAccess, options.circumstances);
+  // What the caller knows is shut comes last: it outranks anything the map
+  // has to say about the road being open.
+  const access = accessAvoiding(graph, options.avoid, timed);
   try {
     return routeBetween(graph, from, to, preference, options, access);
   } catch (error) {

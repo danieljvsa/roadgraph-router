@@ -130,3 +130,20 @@ describe("options that cannot work", () => {
     expect(routes.length).toBeGreaterThan(0);
   });
 });
+
+describe("keeping the download to what one route needed", () => {
+  it("offers what the narrow corridor holds, without fetching more", async () => {
+    const wide = rangeFetcher(await bundle());
+    const wideRouter = await RoadRouter.open("https://example.test/x.efrb", wide.fetcher, { profile: "car" });
+    await wideRouter.routeAlternatives(A, C, "fastest", { count: 3 });
+
+    const narrow = rangeFetcher(await bundle());
+    const narrowRouter = await RoadRouter.open("https://example.test/x.efrb", narrow.fetcher, { profile: "car" });
+    const held = await narrowRouter.routeAlternatives(A, C, "fastest", { count: 3, searchWiderCorridor: false });
+
+    expect(narrow.stats.bytes).toBeLessThan(wide.stats.bytes);
+    // Still a route, and still the best one.
+    expect(held.length).toBeGreaterThan(0);
+    expect(held[0].distanceMeters).toBeCloseTo((await narrowRouter.route(A, C)).distanceMeters, 0);
+  });
+});

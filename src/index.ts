@@ -6,6 +6,7 @@ export { accessMaskFor, allowsEverything, edgeAllowed } from "./access";
 export { searchBoundsFor, straightLineAtMost } from "./search-bounds";
 export type { SearchBounds } from "./search-bounds";
 export { componentSizes, componentsFor } from "./connectivity";
+export { accessAvoiding, countAvoided, type AvoidArea } from "./avoid";
 export { accessForVehicle, countBlocked, fromDecimetres, fromHalfTonnes, packEdgeLimits, toDecimetres, toHalfTonnes } from "./limits";
 export {
   ConditionKind, accessAtTime, conditionalDurations, conditionalValue, conditionHolds, conditionsOf, conditionsOnEdge,

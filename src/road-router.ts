@@ -65,7 +65,7 @@ function haversineMeters(a: Coordinate, b: Coordinate) {
  * manifest, or an already-decoded graph.
  */
 /** When a journey starts, for the conditional restrictions that depend on it. */
-export type DepartureOptions = Pick<RouteOptions, "departAt" | "publicHoliday" | "timeZone" | "circumstances">;
+export type DepartureOptions = Pick<RouteOptions, "departAt" | "publicHoliday" | "timeZone" | "circumstances" | "avoid">;
 
 export class RoadRouter {
   private constructor(private readonly graph?: RoadGraph, private readonly loader?: RouteLoader, private readonly options: RoadRouterOptions = {}, private readonly profileId?: number, private readonly bundleVehicle?: string) {
@@ -187,6 +187,7 @@ export class RoadRouter {
       // Asked for one route, this is that route: widening the corridor would
       // download tiles only an alternative could use.
       if (options.count !== undefined && options.count <= 1) return [best];
+      if (options.searchWiderCorridor === false) return routeAlternatives(graphNow(), from, to, preference, withVehicle);
       // Widening replaces the stitched graph, so the search has to be given
       // the one that exists now. Reading it before the widening would search
       // the narrower corridor and throw away the tiles just downloaded,

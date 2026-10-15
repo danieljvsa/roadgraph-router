@@ -40,6 +40,17 @@ export type AlternativeRoutesOptions = Omit<RouteOptions, "costPenalties" | "cos
    * absurdities. Default 2.
    */
   penaltyFactor?: number;
+  /**
+   * Whether to download the wider corridor an alternative might lie in.
+   *
+   * On by default, because an alternative is allowed to be worse than the
+   * best by `maxStretch` and the tiles holding one therefore reach further
+   * than the tiles that proved the best route. On a long journey that is
+   * about three megabytes more map. Turning it off keeps the download to
+   * what one route needed and offers only the alternatives already inside
+   * it, which on a dense network is usually most of them.
+   */
+  searchWiderCorridor?: boolean;
 };
 
 /** Exported so a bundle can widen its corridor by as much as a route may stretch. */

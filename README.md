@@ -273,6 +273,16 @@ await router.route(from, to, "fastest", {
 });
 ```
 
+A restriction is written in the local time of the road it is on. Where the
+roads and the code are in different places, name the zone:
+
+```js
+await router.route(from, to, "fastest", {
+  departAt: new Date("2026-10-15T08:00:00Z"),
+  timeZone: "Europe/Lisbon",
+});
+```
+
 Public holidays are a calendar this library does not carry, so a rule written
 `no @ (PH)` applies only if you say the day is one:
 
@@ -334,9 +344,19 @@ break the guarantee that the route found is the best one.
   time-dependent routing**: it applies a departure time, which is a weaker
   thing. The gap matters most on long journeys and least on urban ones, where
   the whole route is driven inside the hour it began.
-- **Conditions it cannot answer are never acted on.** Weather, user groups,
-  the purpose of access and a stay duration are not things a compiled graph
-  knows. A rule resting on one — `80 @ (wet)` — is parsed, counted and then
+- **Conditions only you can answer wait for you to answer them.** Whether it
+  is raining, who is driving and what the journey is for are not things a
+  compiled graph knows. Tell it, and the rules resting on them apply:
+
+  ```js
+  await router.route(from, to, "fastest", {
+    departAt,
+    circumstances: { conditions: ["wet"], purposes: ["delivery"] },
+  });
+  ```
+
+  Unanswered, such a rule never holds, so a road shut `@ (wet)` stays open
+  until someone says it is wet. A stay duration is still not read at all. A rule resting on one — `80 @ (wet)` — is parsed, counted and then
   ignored, leaving the road open. `unreadableConditions` reports how many of a
   tag's rules fell into this.
 - **Turn restriction relations are not conditional.** See the list in
@@ -408,6 +428,27 @@ and the tiles holding it lie outside the corridor that proved the best route.
 Everything a single route obeys, these obey: access, turn restrictions,
 barriers, a lorry's dimensions, and conditional restrictions when you pass a
 departure time.
+
+## Roads you know are shut
+
+A bundle is as current as the extract it was compiled from. Roadworks, an
+incident, a street closed for a market: none of them is in it, and none of
+them can be. What a caller reading a feed of such things can do is say so:
+
+```js
+const route = await router.route(from, to, "fastest", {
+  avoid: [{ lat: 38.7223, lng: -9.1393, radiusMeters: 150 }],
+});
+```
+
+Anything a circle touches is closed to the search and to snapping, so a route
+neither drives through a closure nor starts in the middle of one. It outranks
+whatever the map says about the road being open, it applies to every
+alternative, and it lasts only for that call — the graph is left as it was.
+
+An area rather than a road, because a feed gives a place and a radius, not an
+edge number. Only the roads near each circle are looked at, so closing a
+junction costs the same whether the graph holds a town or a country.
 
 ## Turn restrictions
 
@@ -925,10 +966,10 @@ What the bundled profiles read, and what they deliberately do not.
 | Axle load, trailer and hazmat rules | `maxaxleload`, `hazmat` and trailer-specific access are not read. |
 | Conditional restrictions at the time a road is reached | Every road is judged by the moment the journey starts, not by when it would be reached. See [Routing at a time of day](#routing-at-a-time-of-day). This is not time-dependent routing. |
 | Conditional restrictions without `departAt` | Read only when a route supplies a departure time; without one a time-limited restriction is treated as absent, as before. See [Routing at a time of day](#routing-at-a-time-of-day). |
-| Conditional turn restrictions | `restriction:conditional` on a relation is not read: a morning-peak no-left-turn is enforced at every hour. Only way tags are conditional. |
-| Conditions resting on weather, user group or purpose | `80 @ (wet)`, `no @ (disabled)` and a stay duration are parsed and counted but never acted on, leaving the road open. |
+| Conditional turn restrictions | `restriction:conditional` on a relation is not read, so a morning-peak no-left-turn is enforced at every hour. It is rare enough to be worth measuring rather than guessing at: 1 relation in 26,599 across Portugal. The compile report counts them as `conditionalTurnRestrictionsIgnored`. |
+| Conditions resting on weather, user group or purpose | Read, but only a caller knows the answer. `circumstances: { conditions: ["wet"] }` makes `80 @ (wet)` apply; unanswered, the road stays open. A stay duration is still not read at all. |
 | More than 65,536 distinct conditional values in one tile | The compile stops rather than dropping the surplus, which would turn a restricted road into an open one. Compile in smaller tiles with `--tile-size-km`. |
-| Temporary closures | Roadworks, events and incidents are not represented at all. A bundle is as current as the extract it was compiled from, and nothing in it changes afterwards. |
+| Temporary closures in the bundle | Roadworks, events and incidents happen after a bundle is compiled, so none of them is in it. A caller reading a feed of them can pass `avoid` areas per route instead; see [Roads you know are shut](#roads-you-know-are-shut). |
 | Reopening a road | Only closures are applied. `access=no` with `access:conditional=yes @ (...)` stays closed at every hour. |
 | Time zones | `departAt` is taken as the local time of the roads travelled; no conversion is done and no clock is consulted. |
 | Temporary closures | Roadworks, events and incidents are not modelled. A bundle is as current as the extract it was compiled from. |
