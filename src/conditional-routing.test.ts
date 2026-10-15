@@ -2,6 +2,7 @@ import { packEdgeConditions, ConditionKind, countClosedAt, conditionsOf, conditi
 import { decodeGraph, decodeProfileChunk, encodeCompactGraph, encodeProfileChunk } from "./codec";
 import { compactGraph } from "./compact";
 import { route } from "./router";
+import { routeAlternatives } from "./alternatives";
 import { mergeRoadGraphs } from "./merge";
 import { buildGraph, pathOf } from "./test-support";
 import type { RoadGraph } from "./types";
@@ -329,5 +330,49 @@ describe("a conditional speed limit written with units", () => {
       { edge: 0, kind: ConditionKind.maxspeed, value: "20 mph @ (Mo-Fr 07:00-19:00)" },
     ])!;
     expect(conditionsOnEdge(parseEdgeConditions(table)!, 0, { weekday: 0, minutes: 9 * 60, month: 3 }).speedKph).toBeCloseTo(32.19, 1);
+  });
+});
+
+describe("a conditional limit and the routes on offer", () => {
+  // Two ways from A to C, the middle one quicker until a night limit slows it.
+  const twoWays = () => buildGraph({
+    nodes: { A: [41.0, -8.0], B: [41.0, -7.99], C: [41.0, -7.98], D: [41.004, -7.99] },
+    roads: ["A-B", "B-C", "A-D", "D-C"],
+    speedsKph: { "A-B": 90, "B-C": 90, "A-D": 70, "D-C": 70 },
+  });
+
+  const slowedAtNight = () => {
+    const built = twoWays();
+    const middle = [edgeFrom(built, "A", "B"), edgeFrom(built, "B", "A"), edgeFrom(built, "B", "C"), edgeFrom(built, "C", "B")].sort((a, b) => a - b);
+    return {
+      ...built,
+      edgeConditions: packEdgeConditions(middle.map((edge) => ({ edge, kind: ConditionKind.maxspeed, value: "10 @ (22:00-06:00)" }))),
+    };
+  };
+
+  const ends = [{ lat: 41.0, lng: -8.0 }, { lat: 41.0, lng: -7.98 }] as const;
+
+  it("changes which route is the best one", () => {
+    const graph = slowedAtNight();
+    const byDay = routeAlternatives(graph, ends[0], ends[1], "fastest", { count: 3, departAt: new Date(2026, 9, 12, 12, 0) });
+    const byNight = routeAlternatives(graph, ends[0], ends[1], "fastest", { count: 3, departAt: new Date(2026, 9, 12, 23, 0) });
+    expect(pathOf(graph as never, byDay[0].nodeIds)).toBe("A>B>C");
+    expect(pathOf(graph as never, byNight[0].nodeIds)).toBe("A>D>C");
+  });
+
+  it("keeps them in order under the limit that applies", () => {
+    const graph = slowedAtNight();
+    for (const hour of [12, 23]) {
+      const routes = routeAlternatives(graph, ends[0], ends[1], "fastest", { count: 3, departAt: new Date(2026, 9, 12, hour, 0) });
+      const costs = routes.map((result) => result.durationSeconds);
+      expect(costs).toEqual([...costs].sort((left, right) => left - right));
+    }
+  });
+
+  it("reports the slowed time, not the daytime one", () => {
+    const graph = slowedAtNight();
+    const [byNight] = routeAlternatives(graph, ends[0], ends[1], "fastest", { count: 3, departAt: new Date(2026, 9, 12, 23, 0) });
+    const sameRouteByDay = route(graph, ends[0], ends[1], "fastest", { departAt: new Date(2026, 9, 12, 12, 0) });
+    expect(byNight.durationSeconds).toBeGreaterThan(sameRouteByDay.durationSeconds);
   });
 });
