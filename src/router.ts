@@ -49,7 +49,7 @@ export function findNearestNode(graph: RoadGraph, coordinate: Coordinate, maxDis
   return closest;
 }
 
-function searchContext(graph: RoadGraph, destinationPoint: Coordinate, preference: RoutePreference) {
+function searchContext(graph: RoadGraph, destinationPoint: Coordinate, preference: RoutePreference, slowed?: Map<number, number>) {
   const distanceScale = graph.edgeDistanceScale ?? 1;
   const durationScale = graph.edgeDurationScale ?? 1;
   // Both bounds are measured from the graph rather than assumed, and cached
@@ -65,7 +65,12 @@ function searchContext(graph: RoadGraph, destinationPoint: Coordinate, preferenc
   const destinationLongitude = destinationPoint.lng;
   const toCost = preference === "fastest" ? 1 / maxSpeedMps : 1;
   return {
-    costOf: (edge: number) => preference === "fastest" ? graph.edgeDurationsSeconds[edge] * durationScale : graph.edgeDistancesMeters[edge] * distanceScale,
+    // A conditional speed limit only ever raises a duration, so the heuristic
+    // built from the graph's fastest edge stays a lower bound and the search
+    // still returns the best route.
+    costOf: (edge: number) => preference === "fastest"
+      ? (slowed?.get(edge) ?? graph.edgeDurationsSeconds[edge] * durationScale)
+      : graph.edgeDistancesMeters[edge] * distanceScale,
     // Called once per relaxation, millions of times on a long route, so it
     // reads the coordinate arrays directly and avoids a haversine's four
     // trigonometric calls for a number that only has to be a lower bound.
@@ -82,8 +87,8 @@ type SearchOutcome = { edges: number[]; finisher: Finisher; seed: Seed } | null;
  * Node-labelled A*. Valid only when no turn is forbidden, because the cost of
  * reaching a node is then independent of how the node was reached.
  */
-function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, costBound: number, access: Uint8Array | undefined): SearchOutcome {
-  const { costOf, heuristicFor } = searchContext(graph, destinationPoint, preference);
+function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, costBound: number, access: Uint8Array | undefined, slowed?: Map<number, number>): SearchOutcome {
+  const { costOf, heuristicFor } = searchContext(graph, destinationPoint, preference, slowed);
   const nodeCount = graph.nodeLatitudes.length;
   const costs = new Float64Array(nodeCount).fill(Infinity);
   const previousNode = new Int32Array(nodeCount).fill(-1);
@@ -144,8 +149,8 @@ function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Fi
  * along a known edge, so entering part-way along a road obeys a restriction on
  * the very first turn as before.
  */
-function searchWithRestrictions(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, restrictions: TurnRestrictionIndex | null, sequenceIndex: TurnSequenceIndex | null, costBound: number, access: Uint8Array | undefined): SearchOutcome {
-  const { costOf, heuristicFor } = searchContext(graph, destinationPoint, preference);
+function searchWithRestrictions(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, restrictions: TurnRestrictionIndex | null, sequenceIndex: TurnSequenceIndex | null, costBound: number, access: Uint8Array | undefined, slowed?: Map<number, number>): SearchOutcome {
+  const { costOf, heuristicFor } = searchContext(graph, destinationPoint, preference, slowed);
   const targets = graph.edgeTargets;
   const { guarded, stateOfEdge, edgeOfState, count: guardedStates } = guardedJunctionsFor(graph, restrictions, sequenceIndex);
 
@@ -483,8 +488,8 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   const outcome: SearchOutcome = sameNode
     ? { edges: [], finisher: finisherList[0], seed: seeds[0] }
     : restrictions || sequenceIndex
-      ? searchWithRestrictions(graph, seeds, finishers, destinationSnap.point, preference, restrictions, sequenceIndex, costBound, access)
-      : searchByNode(graph, seeds, finishers, destinationSnap.point, preference, costBound, access);
+      ? searchWithRestrictions(graph, seeds, finishers, destinationSnap.point, preference, restrictions, sequenceIndex, costBound, access, slowed)
+      : searchByNode(graph, seeds, finishers, destinationSnap.point, preference, costBound, access, slowed);
   if (direct && direct.cost >= costBound) direct = null;
   if (!outcome && !direct) throw new RouterError("NO_ROUTE", `No ${profileOf(graph).name} route connects the selected points.`);
 

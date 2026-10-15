@@ -125,7 +125,32 @@ describe("a conditional speed limit", () => {
     const raised = route(quick, from, to, "fastest", { departAt: new Date(2026, 9, 12, 12, 0) });
     expect(raised.durationSeconds).toBeCloseTo(plain.durationSeconds, 5);
   });
+
+  it("sends the search the other way when a limit slows the quick road", () => {
+    // Not the same as the test above: there the slowed road is reached by
+    // snapping, so a cost the search itself never consults still shows up in
+    // the answer. Here the choice between two whole paths is the search's
+    // alone, which is what a conditional limit has to be able to change.
+    const twoWays = buildGraph({
+      nodes: { A: [41.0, -8.0], B: [41.0, -7.99], C: [41.0, -7.98], D: [41.02, -7.99] },
+      roads: ["A-B", "B-C", "A-D", "D-C"],
+      speedsKph: { "A-B": 90, "B-C": 90, "A-D": 90, "D-C": 90 },
+    });
+    const crawlingAtNight = {
+      ...twoWays,
+      edgeConditions: packEdgeConditions(
+        [edgeFrom(twoWays, "A", "B"), edgeFrom(twoWays, "B", "A"), edgeFrom(twoWays, "B", "C"), edgeFrom(twoWays, "C", "B")]
+          .sort((a, b) => a - b)
+          .map((edge) => ({ edge, kind: ConditionKind.maxspeed, value: "5 @ (22:00-06:00)" })),
+      ),
+    };
+    const ends = [{ lat: 41.0, lng: -8.0 }, { lat: 41.0, lng: -7.98 }] as const;
+    expect(pathOf(crawlingAtNight as never, route(crawlingAtNight, ends[0], ends[1]).nodeIds)).toBe("A>B>C");
+    const atNight = route(crawlingAtNight, ends[0], ends[1], "fastest", { departAt: new Date(2026, 9, 12, 23, 0) });
+    expect(pathOf(crawlingAtNight as never, atNight.nodeIds)).toBe("A>D>C");
+  });
 });
+
 
 describe("carrying conditions through a profile chunk", () => {
   const compacted = compactGraph(townWithADetour());
