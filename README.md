@@ -409,6 +409,39 @@ It bites hardest on walking and cycling, where small fragments are common: in
 Monaco the pedestrian network is 97.6% one piece, and the remaining 2.4% is
 enough to lose a route between two points a kilometre apart.
 
+### When the nearest road cannot be reached
+
+The road nearest a point is not always one the rest of the network can get to.
+A pocket of one-way streets behind banned turns can be driven out of but never
+into; an island of service roads around a terminal joins nothing at all. Asked
+for a point on one of those, this library used to report no route.
+
+It now finishes on a road a little further off, trying the nearest few in turn
+and taking the first that works. `destinationSnap.distanceMeters` says how far
+short of the point it finished, and `originSnap.distanceMeters` the same for
+the start:
+
+```js
+const route = await router.route(from, to);
+if (route.destinationSnap.distanceMeters > 100) {
+  // Finished on the nearest road it could reach, not at the point asked for.
+}
+```
+
+This only happens after a route has already failed, so a reachable road
+nearest the point is still always the one used. To be told plainly that a
+point cannot be reached, turn it off:
+
+```js
+await router.route(from, to, "fastest", { finishOnANearbyRoad: false });
+```
+
+Evora's walled centre is the case this was found on: `no_left_turn` and
+`no_right_turn` relations on Rua de Serpa Pinto seal the only entry to a
+street, so OpenStreetMap says no car may legally enter it. Routing Lisbon to a
+point in that street now finishes 23 m away on the nearest road a car can
+reach, rather than reporting no route across 133 km of motorway.
+
 ## Snapping to the road, not to the junction
 
 Topology simplification keeps only junctions and way endpoints as routing
@@ -774,7 +807,7 @@ What the bundled profiles read, and what they deliberately do not.
 
 | Area | Behaviour |
 | --- | --- |
-| A one-way trap | Two points joined on the map but not reachable in the direction asked for — a one-way loop with no way back — still report no route. Snapping again cannot mend that, because both ends are already in the same piece of the network. |
+| A one-way trap | Two points joined on the map but not reachable in the direction asked for still cannot be joined. The route finishes on the nearest road it can reach instead, which `destinationSnap.distanceMeters` reports; `finishOnANearbyRoad: false` asks to be refused outright. |
 | Surface, gradient and steps beyond a flat penalty | A cycling speed comes from the way class alone. `surface`, `smoothness` and elevation are not read, so a cobbled climb costs the same as smooth level tarmac. |
 | Untagged limits | A road stating no `maxheight` or `maxweight` is treated as open to any lorry. Absence of a tag is not a measurement. |
 | Axle load, trailer and hazmat rules | `maxaxleload`, `hazmat` and trailer-specific access are not read. |

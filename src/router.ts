@@ -10,11 +10,14 @@ import { searchBoundsFor, straightLineAtMost } from "./search-bounds";
 import type { VehicleDimensions } from "./vehicle";
 import { buildTurnRestrictionIndex, buildTurnSequenceIndex, guardedJunctionsFor, type TurnRestrictionIndex, type TurnSequenceIndex } from "./turn-restrictions";
 import { profileOf } from "./routing-profile";
-import { coordinateFor, geometryAfter, geometryBefore, geometryBetween, haversineMeters, snapToGraph, type EdgeProjection, type GraphSnap } from "./snap";
+import { FALLBACK_SNAP_RADIUS_METERS, coordinateFor, geometryAfter, geometryBefore, geometryBetween, haversineMeters, snapToGraph, type EdgeProjection, type GraphSnap } from "./snap";
 
 /** Entering the graph: traverse the tail of `edge` to reach `node`. `edge` is -1 at a junction. */
 type Seed = { node: number; edge: number; cost: number };
 /** Leaving the graph: from `node`, traverse the head of `edge`. `edge` is -1 at a junction. */
+/** How many of the nearest roads a failed route tries before giving up. */
+const ROADS_TO_TRY = 6;
+
 type Finisher = { node: number; edge: number; cost: number };
 
 function assertGraph(graph: RoadGraph) {
@@ -385,6 +388,18 @@ export type RouteOptions = {
    * changes which roads are chosen and never what they are said to cost.
    */
   costPenalties?: ReadonlyMap<number, number>;
+  /**
+   * Whether a route that cannot reach the road nearest its destination may
+   * finish on one a little further away. On by default, because the nearest
+   * road is sometimes one the network cannot legally enter — a pocket of
+   * one-way streets behind banned turns, an island of service roads — and
+   * refusing to route at all is a worse answer than finishing nearby.
+   *
+   * Turn it off to be told plainly that the point asked for cannot be
+   * reached. `RouteResult.destinationSnap.distanceMeters` reports how far
+   * short a route finished either way.
+   */
+  finishOnANearbyRoad?: boolean;
 };
 
 /**
@@ -473,14 +488,79 @@ export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     return routeBetween(graph, from, to, preference, options, access);
   } catch (error) {
     if (!(error instanceof RouterError) || error.code !== "NO_ROUTE") throw error;
-    return reconnect(graph, from, to, preference, options, access) ?? (() => { throw error; })();
+    const mended = reconnect(graph, from, to, preference, options, access);
+    if (mended) return mended;
+    // The nearest road is not always one the rest of the network can reach: a
+    // pocket of one-way streets behind banned turns can be left but not
+    // entered, and an island of service roads joins nothing at all. Both ends
+    // already sit in one piece of the network here, so re-snapping by
+    // component cannot help, and the only thing left is to look further and
+    // let the search finish on a road it can actually get to.
+    if (options.finishOnANearbyRoad === false) throw error;
+    return onAnotherRoad(graph, from, to, preference, options, access) ?? (() => { throw error; })();
   }
 }
 
-function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, preference: RoutePreference, options: RouteOptions, access: Uint8Array | undefined, acceptOrigin?: (node: number) => boolean, acceptDestination?: (node: number) => boolean): RouteResult {
-  const originSnap = snapToGraph(graph, from, undefined, access, acceptOrigin);
+/** The roads near a point, nearest first, each as a snap of its own. */
+function roadsNear(graph: RoadGraph, point: Coordinate, access: Uint8Array | undefined): GraphSnap[] {
+  const nearby = snapToGraph(graph, point, FALLBACK_SNAP_RADIUS_METERS, access, undefined, true);
+  if (!nearby || nearby.kind === "node") return nearby ? [nearby] : [];
+  // The forward and reverse copies of one stretch are one road: a route may
+  // use either direction, so they are offered together.
+  const byRoad = new Map<string, EdgeProjection[]>();
+  for (const projection of nearby.projections) {
+    const key = `${Math.min(projection.source, projection.target)}:${Math.max(projection.source, projection.target)}`;
+    const held = byRoad.get(key);
+    if (held) held.push(projection); else byRoad.set(key, [projection]);
+  }
+  return [...byRoad.values()].map((projections) => ({
+    kind: "edge" as const,
+    projections,
+    point: projections[0].point,
+    distanceMeters: projections[0].distanceMeters,
+  }));
+}
+
+/**
+ * The last thing tried when a route fails: finish, or start, on a road a
+ * little further away.
+ *
+ * The nearest road is not always one the rest of the network can reach. A
+ * pocket of one-way streets behind banned turns can be left but not entered,
+ * and an island of service roads joins nothing at all. Both ends are in one
+ * piece of the network by the time this runs, so re-snapping by component
+ * cannot help; what is left is to try the next nearest roads in turn.
+ *
+ * Nearest first, and only a few of them, so the answer is the closest road
+ * that actually works rather than whichever one makes the sums smallest. The
+ * route then ends short of where it was asked to, which
+ * `RouteResult.destinationSnap.distanceMeters` reports.
+ */
+function onAnotherRoad(graph: RoadGraph, from: Coordinate, to: Coordinate, preference: RoutePreference, options: RouteOptions, access: Uint8Array | undefined): RouteResult | null {
+  const attempt = (chosen: { origin?: GraphSnap; destination?: GraphSnap }) => {
+    try {
+      return routeBetween(graph, from, to, preference, options, access, undefined, undefined, chosen);
+    } catch {
+      return null;
+    }
+  };
+  // The destination first: a point someone typed is far likelier to be a door
+  // in a restricted street than the place they are standing.
+  for (const destination of roadsNear(graph, to, access).slice(1, ROADS_TO_TRY + 1)) {
+    const found = attempt({ destination });
+    if (found) return found;
+  }
+  for (const origin of roadsNear(graph, from, access).slice(1, ROADS_TO_TRY + 1)) {
+    const found = attempt({ origin });
+    if (found) return found;
+  }
+  return null;
+}
+
+function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, preference: RoutePreference, options: RouteOptions, access: Uint8Array | undefined, acceptOrigin?: (node: number) => boolean, acceptDestination?: (node: number) => boolean, chosen?: { origin?: GraphSnap; destination?: GraphSnap }): RouteResult {
+  const originSnap = chosen?.origin ?? snapToGraph(graph, from, undefined, access, acceptOrigin);
   if (!originSnap) throw new RouterError("ORIGIN_NOT_ON_GRAPH", "No routable road is close to the origin.");
-  const destinationSnap = snapToGraph(graph, to, undefined, access, acceptDestination);
+  const destinationSnap = chosen?.destination ?? snapToGraph(graph, to, undefined, access, acceptDestination);
   if (!destinationSnap) throw new RouterError("DESTINATION_NOT_ON_GRAPH", "No routable road is close to the destination.");
 
   const distanceScale = graph.edgeDistanceScale ?? 1;

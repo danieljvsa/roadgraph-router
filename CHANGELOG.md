@@ -43,6 +43,26 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   29.2 MB the first route needed. A short urban route returned two in 79 ms
   with nothing further to download.
 
+### Fixed
+
+- **Points on a road the network cannot reach no longer report no route.** The
+  road nearest a point is sometimes one nothing may legally enter: a pocket of
+  one-way streets behind banned turns, or an island of service roads. A route
+  to such a point failed outright, however much of the network lay between.
+
+  It now finishes on a road a little further off, trying the nearest few in
+  turn and taking the first that works, and `destinationSnap.distanceMeters`
+  reports how far short it stopped. `finishOnANearbyRoad: false` restores the
+  old behaviour of being told plainly that the point cannot be reached.
+
+  Found on Évora, where `no_left_turn` and `no_right_turn` relations on Rua de
+  Serpa Pinto seal the only entry to a street: Lisbon to a point there now
+  routes 133.2 km, finishing 23 m away, and Braga to Évora routes 460.2 km
+  where both previously failed. Lisbon airport, whose terminal roads are an
+  island 527 m from the nearest road a car can reach, routes too.
+
+### Added
+
 - `edgesWithConditionalRestrictions` in the compile report, beside
   `edgesWithPhysicalLimits`, so a region's conditional data can be counted
   rather than assumed.

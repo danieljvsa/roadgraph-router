@@ -94,7 +94,8 @@ describe("no_* turn restrictions", () => {
       roads: ["W>C", "C>N"],
       bans: [["W>C", "C>N"]],
     });
-    expect(() => route(graph, at.W, at.N)).toThrow(/No car route/);
+    // Asked to be told plainly: no road a little further off instead.
+    expect(() => route(graph, at.W, at.N, "fastest", { finishOnANearbyRoad: false })).toThrow(/No car route/);
   });
 });
 
