@@ -244,10 +244,21 @@ one season. OpenStreetMap writes these as `*:conditional` tags, and this
 library reads them when — and only when — you say when the journey starts.
 
 ```js
-const route = await router.route(from, to, "fastest", {
-  departAt: new Date("2026-03-16T08:00:00"),
+const router = await RoadRouter.open("portugal.efrb");
+
+const route = await router.route(origin, destination, "fastest", {
+  departAt: new Date("2026-10-15T08:00:00"),
+});
+
+const alternatives = await router.routeAlternatives(origin, destination, "fastest", {
+  count: 3,
+  maxStretch: 1.4,
+  maxSharing: 0.75,
 });
 ```
+
+Both work the same way in Node and in a browser: the only difference is that
+a browser needs `fetch` and `DecompressionStream`, which it has.
 
 `departAt` is in the **local time of the roads being travelled**. This library
 does not convert time zones and does not consult a clock: a `Date` is read for
@@ -307,9 +318,22 @@ break the guarantee that the route found is the best one.
   forbidden even where a conditional value would open it, because the compiled
   mask has already dropped it. This errs towards refusing a road that is in
   fact usable, which is the direction this library errs in everywhere else.
-- **One moment, not an arrival time per edge.** The whole route is judged by
-  when it set out. A long route crossing a boundary as a restriction begins is
-  judged by its departure, not by when it would actually arrive there.
+- **One moment, not an arrival time per edge.** This is the limitation to
+  understand before relying on any of it. Every road on the route is judged by
+  the moment the journey *starts*, not by when it would be reached. Leave
+  Lisbon at 07:00 on a six-hour drive and the roads near Porto are judged at
+  07:00, though you would arrive at one in the afternoon. A restriction that
+  lifts at 10:00 therefore still closes a road you would reach at noon, and
+  one that begins at 10:00 is missed entirely.
+
+  Doing better means a time-dependent shortest path, where each edge is
+  evaluated at the arrival time the search has accumulated. That changes the
+  cost function, the A* bound and the corridor logic together, and it is a
+  piece of work in its own right rather than something to bolt on. It is not
+  in this release, and **this engine should not be described as doing
+  time-dependent routing**: it applies a departure time, which is a weaker
+  thing. The gap matters most on long journeys and least on urban ones, where
+  the whole route is driven inside the hour it began.
 - **Conditions it cannot answer are never acted on.** Weather, user groups,
   the purpose of access and a stay duration are not things a compiled graph
   knows. A rule resting on one — `80 @ (wet)` — is parsed, counted and then
@@ -338,12 +362,27 @@ alternative's distance and duration are what it would really take.
 Candidates are filtered rather than trusted. One that is much worse than the
 best, or that is mostly the same road, is not an alternative anybody wants:
 
+Each is checked rather than trusted: a `count` that is not a whole number
+between 1 and 10, a `maxStretch` below 1, a `maxSharing` outside nought to
+one, or a `penaltyFactor` below 1 raises a `RangeError` rather than searching
+forever or returning something arbitrary.
+
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `count` | 3 | How many routes to return at most, the best one included. |
 | `maxStretch` | 1.4 | How much worse than the best an alternative may be. |
 | `maxSharing` | 0.75 | How much of the routes already offered it may reuse, by distance. |
 | `penaltyFactor` | 2 | How much dearer a road already used is made to look. |
+
+Routes come back in the order they would be driven: the best first, then the
+rest by what they really cost. The penalties steer the search and never reach
+the figures, so an alternative's distance and duration are its own.
+
+Two routes count as the same road where they travel the same tarmac, measured
+by distance travelled rather than by edges in common. A road driven in the
+opposite direction is the same road; a junction two routes merely pass
+through costs no distance and so does not make them similar. The part-driven
+roads a route starts and finishes on count towards it as well.
 
 **Fewer routes than you asked for is the normal answer.** A road network
 usually has one obvious way through, and returning a second route that is

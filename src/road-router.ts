@@ -180,6 +180,9 @@ export class RoadRouter {
     if (this.graph) return routeAlternatives(this.graph, from, to, preference, withVehicle);
     if (isBundle(this.loader)) {
       const { best, graphNow, widen, reachFor } = await this.bestOverBundle(this.loader, from, to, preference, options);
+      // Asked for one route, this is that route: widening the corridor would
+      // download tiles only an alternative could use.
+      if (options.count !== undefined && options.count <= 1) return [best];
       // Widening replaces the stitched graph, so the search has to be given
       // the one that exists now. Reading it before the widening would search
       // the narrower corridor and throw away the tiles just downloaded,

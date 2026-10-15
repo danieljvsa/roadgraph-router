@@ -45,6 +45,36 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A window named with a day is read as one window.** `no @ (Fr 22:00-06:00)`
+  was matched by asking "is it Friday?" and "is it between 22:00 and 06:00?"
+  separately, which answered both ends of it backwards: it applied at two on
+  Friday morning, before it began, and not at two on Saturday morning, while
+  it was still in force. A span running past midnight now belongs to the day
+  it starts on, which also fixes Sunday into Monday.
+
+- **`24:30` is no longer a time.** It parsed as half past midnight, quietly
+  moving a window onto the following day. Only `24:00` is the end of a day.
+
+- **A conditional speed limit keeps its units.** `30 mph @ (…)` was read with
+  `parseFloat` and became 30 km/h — two-thirds of the real limit, applied to
+  the road as fact. It now uses the same parser as a plain `maxspeed`.
+
+- **A rule table too wide for its index drops its surplus.** Past 65,535
+  distinct values the extra rows were kept and left pointing at rule zero,
+  applying one road's restriction to another.
+
+- **Alternatives search the corridor that was downloaded for them.** The
+  widening that fetches the tiles an alternative could lie in replaced the
+  stitched graph, but the search was handed the graph from before it, so the
+  tiles were downloaded and discarded. Asking for a single route no longer
+  widens the corridor at all.
+
+- **Alternatives come back in the order they would be driven**, by their real
+  cost, rather than in the order the penalties happened to find them; and two
+  routes are told apart by the road they travel rather than by which direction
+  of it, so coming back along a road already offered is no longer a different
+  way there.
+
 - **A bundle compiled for one vehicle now carries its conditional
   restrictions.** They were stored in the per-vehicle chunk, which only exists
   when a bundle holds several vehicles or one whose routes depend on its size.

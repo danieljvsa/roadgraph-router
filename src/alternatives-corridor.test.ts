@@ -84,3 +84,20 @@ describe("an alternative that lives outside the corridor", () => {
     expect(new Set(stats.rangeHeaders).size).toBe(everyChunkOnce);
   });
 });
+
+describe("asking for a single route", () => {
+  it("downloads no more than a single route needs", async () => {
+    const one = rangeFetcher(await bundle());
+    const router = await RoadRouter.open("https://example.test/x.efrb", one.fetcher, { profile: "car" });
+    const [only] = await router.routeAlternatives(A, C, "fastest", { count: 1 });
+
+    const plain = rangeFetcher(await bundle());
+    const plainRouter = await RoadRouter.open("https://example.test/x.efrb", plain.fetcher, { profile: "car" });
+    const direct = await plainRouter.route(A, C);
+
+    expect(only.distanceMeters).toBeCloseTo(direct.distanceMeters, 0);
+    // Widening the corridor for alternatives nobody asked for would fetch the
+    // far tile and then ignore it.
+    expect(one.stats.bytes).toBeLessThanOrEqual(plain.stats.bytes);
+  });
+});
