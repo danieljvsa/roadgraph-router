@@ -219,7 +219,16 @@ function encodeEfr2(graph, library, profiles) {
   };
 
   const split = profiles.length > 1 || profiles.some((entry) => entry.usesPhysicalLimits);
-  if (!split) return { shared: library.encodeCompactGraph(assembled), profiles: [], limitedEdges: 0, conditionalEdges: 0 };
+  if (!split) {
+    // One vehicle writes one chunk, and that chunk is its whole graph, so the
+    // conditional restrictions belong in it. Without this a bundle compiled
+    // for a single vehicle would read as though no road were ever shut.
+    const onlyConditions = library.packEdgeConditions(
+      graph.edgeConditions[0].map((row) => ({ ...row, edge: placement[row.edge] })),
+    );
+    const encoded = library.encodeCompactGraph(onlyConditions ? { ...assembled, edgeConditions: onlyConditions } : assembled);
+    return { shared: encoded, profiles: [], limitedEdges: 0, conditionalEdges: onlyConditions?.edges.length ?? 0 };
+  }
 
   const restrictionCount = banned.length + runs.length;
   let limitedEdges = 0;

@@ -270,6 +270,36 @@ export function encodeSharedGraph(graph: RoadGraph): ArrayBuffer {
   return encodePackedGraph(graph, SPLIT_COMPACT_VERSION);
 }
 
+/** The rules a stored conditional table must keep, wherever it is written. */
+function assertEdgeConditions(conditions: EdgeConditions, edges: number) {
+  const rows = conditions.edges.length;
+  if (conditions.kinds.length !== rows || conditions.rules.length !== rows) throw new Error("Edge condition columns must all be the same length.");
+  for (let index = 0; index < rows; index += 1) {
+    if (conditions.edges[index] >= edges) throw new Error("Edge condition references an edge outside the graph.");
+    if (index && conditions.edges[index] < conditions.edges[index - 1]) throw new Error("Edge conditions must be sorted by edge.");
+    if (conditions.rules[index] >= conditions.values.length) throw new Error("Edge condition names a value that is not in the table.");
+  }
+  if (conditions.values.some((value) => value.includes("\0"))) throw new Error("A conditional value cannot contain a null byte.");
+}
+
+/** Reads a conditional table that says its own size, as a graph chunk writes it. */
+function readEdgeConditions(buffer: ArrayBuffer, at: number, edges: number): EdgeConditions {
+  const view = new DataView(buffer);
+  const rows = view.getUint32(at, true);
+  const textBytes = view.getUint32(at + 4, true);
+  const conditionEdges = new Uint32Array(buffer.slice(at + 8, at + 8 + rows * 4));
+  for (let index = 0; index < rows; index += 1) {
+    if (conditionEdges[index] >= edges) throw new Error("Invalid routing graph: condition references an edge outside the graph.");
+    if (index && conditionEdges[index] < conditionEdges[index - 1]) throw new Error("Invalid routing graph: conditions are not sorted.");
+  }
+  const values = new TextDecoder().decode(new Uint8Array(buffer, alignUp(at + 8 + rows * 7), textBytes)).split("\0");
+  const rules = new Uint16Array(buffer.slice(at + 8 + rows * 4, at + 8 + rows * 6));
+  for (let index = 0; index < rows; index += 1) {
+    if (rules[index] >= values.length) throw new Error("Invalid routing graph: condition names a value that is not in the table.");
+  }
+  return { edges: conditionEdges, rules, kinds: new Uint8Array(buffer.slice(at + 8 + rows * 6, at + 8 + rows * 7)), values };
+}
+
 function encodePackedGraph(graph: RoadGraph, version: number = PACKED_COMPACT_VERSION): ArrayBuffer {
   const nodes = graph.nodeLatitudes.length;
   const edges = graph.edgeTargets.length;
@@ -340,7 +370,18 @@ function encodePackedGraph(graph: RoadGraph, version: number = PACKED_COMPACT_VE
   // coordinates among the variable sections rather than as a fixed block.
   const weightBytes = edges * (shared ? 2 : 4);
   const restrictionsAt = alignUp(PACKED_HEADER_BYTES + (shared ? 0 : nodes * 8) + weightBytes + variableBytes);
-  const buffer = new ArrayBuffer(restrictionsAt + pairs * 8 + (runs ? (runs + 1) * 4 + runEdges * 4 : 0));
+  const restrictionsEnd = restrictionsAt + pairs * 8 + (runs ? (runs + 1) * 4 + runEdges * 4 : 0);
+
+  // Conditional restrictions belong to one vehicle, so they ride in a
+  // single-chunk graph — which is one vehicle's whole graph — and never in a
+  // shared chunk, where the profile chunk carries them instead.
+  const conditions = !shared && graph.edgeConditions?.edges.length ? graph.edgeConditions : undefined;
+  if (conditions) assertEdgeConditions(conditions, edges);
+  const conditionRows = conditions?.edges.length ?? 0;
+  const conditionText = conditions ? new TextEncoder().encode(conditions.values.join("\0")) : undefined;
+  const conditionsAt = alignUp(restrictionsEnd);
+  const conditionTextAt = alignUp(conditionsAt + 8 + conditionRows * 7);
+  const buffer = new ArrayBuffer(conditionRows ? conditionTextAt + (conditionText?.byteLength ?? 0) : restrictionsEnd);
   const view = new DataView(buffer);
   view.setUint32(0, COMPACT_MAGIC, true);
   view.setUint16(4, version, true);
@@ -362,6 +403,9 @@ function encodePackedGraph(graph: RoadGraph, version: number = PACKED_COMPACT_VE
     // A shared chunk spends bytes 60-63 on its sixth section length and has
     // no profile of its own to name; the profile chunk carries that.
     view.setUint8(60, graph.profileId ?? 0);
+    // Byte 61 was never written before conditional restrictions existed, so a
+    // zero there means a chunk carries none and reads back exactly as it did.
+    view.setUint8(61, conditionRows ? 1 : 0);
     view.setUint16(62, Math.round(graph.maxSpeedKph ?? 0), true);
   }
 
@@ -383,6 +427,16 @@ function encodePackedGraph(graph: RoadGraph, version: number = PACKED_COMPACT_VE
     new Uint32Array(buffer, offset, runs + 1).set(graph.turnRestrictionSequenceOffsets!); offset += (runs + 1) * 4;
     new Uint32Array(buffer, offset, runEdges).set(graph.turnRestrictionSequenceEdges!);
   }
+  if (conditions && conditionRows && conditionText) {
+    // The section says its own size, so the header needs only the one bit it
+    // had left to say that a section is there at all.
+    view.setUint32(conditionsAt, conditionRows, true);
+    view.setUint32(conditionsAt + 4, conditionText.byteLength, true);
+    new Uint32Array(buffer, conditionsAt + 8, conditionRows).set(conditions.edges);
+    new Uint16Array(buffer, conditionsAt + 8 + conditionRows * 4, conditionRows).set(conditions.rules);
+    new Uint8Array(buffer, conditionsAt + 8 + conditionRows * 6, conditionRows).set(conditions.kinds);
+    new Uint8Array(buffer, conditionTextAt, conditionText.byteLength).set(conditionText);
+  }
   return buffer;
 }
 
@@ -402,7 +456,19 @@ function decodePackedGraph(buffer: ArrayBuffer, shared = false): RoadGraph {
   const lengths = Array.from({ length: shared ? 6 : 5 }, (_, index) => view.getUint32(40 + index * 4, true));
   const variableBytes = lengths.reduce((sum, length) => sum + length, 0);
   const restrictionsAt = alignUp(PACKED_HEADER_BYTES + (shared ? 0 : nodes * 8) + edges * (shared ? 2 : 4) + variableBytes);
-  const expected = restrictionsAt + pairs * 8 + (runs ? (runs + 1) * 4 + runEdges * 4 : 0);
+  const restrictionsEnd = restrictionsAt + pairs * 8 + (runs ? (runs + 1) * 4 + runEdges * 4 : 0);
+  // Byte 61 is zero in every chunk written before conditional restrictions
+  // existed, so those still measure exactly as long as they always did.
+  const hasConditions = !shared && view.getUint8(61) === 1;
+  const conditionsAt = alignUp(restrictionsEnd);
+  let expected = restrictionsEnd;
+  if (hasConditions) {
+    if (buffer.byteLength < conditionsAt + 8) throw new Error("Truncated compact routing graph");
+    const rows = view.getUint32(conditionsAt, true);
+    const textBytes = view.getUint32(conditionsAt + 4, true);
+    if (rows > edges || !textBytes) throw new Error("Invalid compact routing graph: conditions do not fit the graph.");
+    expected = alignUp(conditionsAt + 8 + rows * 7) + textBytes;
+  }
   if (!coordinateScale || !edgeDistanceScale || !edgeDurationScale || buffer.byteLength !== expected) throw new Error("Truncated compact routing graph");
   // Counts that do not take part in the length check above are bounded by what
   // the file could actually hold, so a corrupt header cannot ask for an
@@ -545,6 +611,7 @@ function decodePackedGraph(buffer: ArrayBuffer, shared = false): RoadGraph {
   }
   for (const edge of graph.turnRestrictionFromEdges ?? []) if (edge >= edges) throw new Error("Invalid routing graph: turn restriction references an edge outside the graph.");
   for (const edge of graph.turnRestrictionToEdges ?? []) if (edge >= edges) throw new Error("Invalid routing graph: turn restriction references an edge outside the graph.");
+  if (hasConditions) graph.edgeConditions = readEdgeConditions(buffer, conditionsAt, edges);
   return graph;
 }
 
@@ -593,16 +660,7 @@ export function encodeProfileChunk(chunk: ProfileChunk): ArrayBuffer {
   // far left as zero, so a bundle whose roads carry none is byte for byte the
   // file the previous version wrote.
   const conditions = chunk.edgeConditions?.edges.length ? chunk.edgeConditions : undefined;
-  if (conditions) {
-    const rows = conditions.edges.length;
-    if (conditions.kinds.length !== rows || conditions.rules.length !== rows) throw new Error("Edge condition columns must all be the same length.");
-    for (let index = 0; index < rows; index += 1) {
-      if (conditions.edges[index] >= edges) throw new Error("Edge condition references an edge outside the graph.");
-      if (index && conditions.edges[index] < conditions.edges[index - 1]) throw new Error("Edge conditions must be sorted by edge.");
-      if (conditions.rules[index] >= conditions.values.length) throw new Error("Edge condition names a value that is not in the table.");
-    }
-    if (conditions.values.some((value) => value.includes("\0"))) throw new Error("A conditional value cannot contain a null byte.");
-  }
+  if (conditions) assertEdgeConditions(conditions, edges);
   const conditionRows = conditions?.edges.length ?? 0;
   const conditionText = conditions ? new TextEncoder().encode(conditions.values.join("\0")) : undefined;
   const conditionsAt = alignUp(limitsEnd);

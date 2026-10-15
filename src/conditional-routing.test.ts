@@ -1,5 +1,5 @@
 import { packEdgeConditions, ConditionKind, countClosedAt, conditionsOf } from "./conditional";
-import { decodeProfileChunk, encodeProfileChunk } from "./codec";
+import { decodeGraph, decodeProfileChunk, encodeCompactGraph, encodeProfileChunk } from "./codec";
 import { compactGraph } from "./compact";
 import { route } from "./router";
 import { mergeRoadGraphs } from "./merge";
@@ -239,5 +239,62 @@ describe("conditions crossing a tile boundary", () => {
   it("keeps one copy when overlapping tiles both describe the same road", () => {
     const sameRoadTwice = mergeRoadGraphs([westTile, { ...westTile }]);
     expect(sameRoadTwice.edgeConditions?.edges).toHaveLength(1);
+  });
+});
+
+describe("carrying conditions in a one-vehicle chunk", () => {
+  // A bundle compiled for a single vehicle writes one chunk holding that
+  // vehicle's whole graph, rather than a shared half and a profile half. The
+  // restrictions have to travel in it, or a one-vehicle bundle would read as
+  // though no road were ever shut.
+  const built = townWithADetour();
+  const compacted = compactGraph(built);
+  const closed = packEdgeConditions([
+    { edge: 0, kind: ConditionKind.access, value: CLOSED_IN_WORKING_HOURS },
+    { edge: 0, kind: ConditionKind.maxspeed, value: "30 @ (Mo-Fr 08:00-09:00)" },
+    { edge: 2, kind: ConditionKind.access, value: CLOSED_IN_WORKING_HOURS },
+  ])!;
+
+  it("round-trips through the single-chunk format", () => {
+    const decoded = decodeGraph(encodeCompactGraph({ ...compacted, edgeConditions: closed }));
+    expect(decoded.edgeConditions?.values).toEqual([CLOSED_IN_WORKING_HOURS, "30 @ (Mo-Fr 08:00-09:00)"]);
+    expect([...decoded.edgeConditions!.edges]).toEqual([0, 0, 2]);
+    expect([...decoded.edgeConditions!.kinds]).toEqual([ConditionKind.access, ConditionKind.maxspeed, ConditionKind.access]);
+    expect([...decoded.edgeConditions!.rules]).toEqual([0, 1, 0]);
+  });
+
+  it("writes the same bytes as before when no road carries one", () => {
+    const without = encodeCompactGraph(compacted);
+    const explicitlyNone = encodeCompactGraph({ ...compacted, edgeConditions: undefined });
+    expect(new Uint8Array(explicitlyNone)).toEqual(new Uint8Array(without));
+  });
+
+  it("is longer only by what the conditions take", () => {
+    const without = encodeCompactGraph(compacted).byteLength;
+    const with_ = encodeCompactGraph({ ...compacted, edgeConditions: closed }).byteLength;
+    expect(with_).toBeGreaterThan(without);
+    // Three rows and two short strings, not a second copy of the graph.
+    expect(with_ - without).toBeLessThan(200);
+  });
+
+  it("keeps a route off a road shut at the departure time", () => {
+    const built2 = townWithADetour();
+    const edges = [edgeFrom(built2, "B", "C"), edgeFrom(built2, "C", "B")].sort((a, b) => a - b);
+    const graph = decodeGraph(encodeCompactGraph({
+      ...compactGraph(built2),
+      edgeConditions: packEdgeConditions(edges.map((edge) => ({ edge, kind: ConditionKind.access, value: CLOSED_IN_WORKING_HOURS }))),
+    }));
+    const from = { lat: 41.0, lng: -8.0 };
+    const to = { lat: 41.0, lng: -7.98 };
+    const open = route(graph, from, to, "fastest", { departAt: sundayMorning });
+    const shut = route(graph, from, to, "fastest", { departAt: mondayMorning });
+    expect(shut.distanceMeters).toBeGreaterThan(open.distanceMeters);
+  });
+
+  it("refuses a condition naming an edge the graph does not have", () => {
+    expect(() => encodeCompactGraph({
+      ...compacted,
+      edgeConditions: packEdgeConditions([{ edge: 9999, kind: ConditionKind.access, value: CLOSED_IN_WORKING_HOURS }]),
+    })).toThrow(/outside the graph/);
   });
 });

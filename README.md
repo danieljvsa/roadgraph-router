@@ -271,6 +271,11 @@ await router.route(from, to, "fastest", { departAt, publicHoliday: true });
 
 ### What is read
 
+Every bundle carries them, whether it holds one vehicle or several: a
+one-vehicle bundle keeps them in its single chunk, and a multi-vehicle bundle
+in the per-vehicle half of each tile, since the same road can be shut to a
+lorry and open to a car.
+
 A `value @ condition` list is read from the way's access tags — `access`,
 `vehicle`, `motor_vehicle` and the profile's own key, such as `hgv` — and from
 `maxspeed`. Where several rules match the same moment, the **last** one wins,
@@ -692,9 +697,12 @@ comparable:
 | Routing edges | 2,760,171 | 2,760,171 | identical graph |
 | Edges with a conditional restriction | 0 | **3,328** | |
 
+Compiled for a car alone, where the whole graph is one chunk, the same extract
+grows by 4,187 bytes — 38,037,856 to 38,042,043 — for 1,087 restrictions.
+
 A region whose roads carry no conditional restriction compiles to the same
-file as before, byte for byte: Monaco for a car is 26,177 bytes from either
-compiler.
+file as before, byte for byte, in either layout: Monaco for a car is 26,177
+bytes from either compiler.
 
 Asking for a departure time costs nothing measurable. Routing Porto to Lisbon
 by car, three runs each: 2,294 ms cold and 208 ms repeated without one,

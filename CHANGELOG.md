@@ -45,6 +45,22 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A bundle compiled for one vehicle now carries its conditional
+  restrictions.** They were stored in the per-vehicle chunk, which only exists
+  when a bundle holds several vehicles or one whose routes depend on its size.
+  A `--profile car` compile wrote the single-chunk layout instead, where
+  nothing held them, so every road read as permanently open however carefully
+  a route named its departure time. The restrictions now ride in that layout
+  too, in a header byte no chunk written before them ever used.
+
+  Found while comparing bundle sizes between releases: a car-only Portugal
+  compiled byte for byte the same under 0.2.0 and 0.3.0, which it should not
+  have, since 129 of its ways carry `access:conditional` and 85
+  `motor_vehicle:conditional`. Compiled for motorcycle alone, Monaco now
+  stores the Avenue Pasteur ban it used to drop, and a route across it travels
+  183 m at midday and 3,081 m at 23:00 — the same answers the multi-vehicle
+  bundle gives.
+
 - **Points on a road the network cannot reach no longer report no route.** The
   road nearest a point is sometimes one nothing may legally enter: a pocket of
   one-way streets behind banned turns, or an island of service roads. A route
@@ -97,10 +113,13 @@ reporting no route, where this release finishes in 2.3 s.
 ### Compatibility
 
 A bundle whose roads carry no conditional restriction is byte for byte the
-file 0.2.0 wrote: the new section lives in profile-chunk header bytes that
-every version so far left as zero. Every bundle published so far still opens
-and routes identically. A bundle that does carry conditional restrictions
-cannot be opened by 0.2.0 or earlier.
+file 0.2.0 wrote, in both layouts: the new sections live in header bytes that
+every version so far left as zero. Monaco for a car is 26,177 bytes from
+either compiler. Every bundle published so far still opens and routes
+identically.
+
+A bundle that does carry conditional restrictions cannot be opened by 0.2.0
+or earlier, which report a truncated chunk.
 
 ## [0.2.0] - 2026-10-15
 
