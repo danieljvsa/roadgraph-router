@@ -149,10 +149,12 @@ describe("conditions this parser cannot read", () => {
     expect(valueAt("no @ (stay>2 hours)", at())).toBeNull();
   });
 
-  it("counts them so they can be reported rather than passed over in silence", () => {
-    expect(unreadableConditions(parseConditional("no @ (wet)"))).toBe(1);
+  it("counts the ones it cannot read at all", () => {
+    // Weather is readable; it simply needs answering. A stay duration is not
+    // a thing this parser knows how to read.
+    expect(unreadableConditions(parseConditional("no @ (wet)"))).toBe(0);
+    expect(unreadableConditions(parseConditional("no @ (stay>2 hours)"))).toBe(1);
     expect(unreadableConditions(parseConditional("no @ (Mo-Fr 07:00-19:00)"))).toBe(0);
-    expect(unreadableConditions(parseConditional("80 @ (wet); 60 @ (snow)"))).toBe(2);
   });
 
   it("still applies the readable rule beside an unreadable one", () => {
@@ -182,7 +184,9 @@ describe("examples taken from the wiki", () => {
     const tag = "120 @ (06:00-20:00); 80 @ (wet)";
     expect(valueAt(tag, at({ minutes: 10 * 60 }))).toBe("120");
     expect(valueAt(tag, at({ minutes: 22 * 60 }))).toBeNull();
-    expect(unreadableConditions(parseConditional(tag))).toBe(1);
+    // Nothing here is unreadable: the second rule waits on the weather.
+    expect(unreadableConditions(parseConditional(tag))).toBe(0);
+    expect(conditionalValue(parseConditional(tag), at({ minutes: 22 * 60 }), undefined, { conditions: ["wet"] })).toBe("80");
   });
 
   it("reads a lorry ban in working hours", () => {
@@ -349,5 +353,45 @@ describe("a window that runs past the end of a month", () => {
   it("reads the day of the month off a date", () => {
     expect(travelTimeFrom(new Date(2026, 10, 1, 2, 0)).dayOfMonth).toBe(1);
     expect(travelTimeFrom(new Date(2026, 10, 1, 2, 0)).month).toBe(11);
+  });
+});
+
+describe("circumstances only the caller knows", () => {
+  const wetRule = "no @ (wet)";
+
+  it("leaves the road open until someone says it is wet", () => {
+    expect(valueAt(wetRule, at())).toBeNull();
+  });
+
+  it("applies once the caller says so", () => {
+    expect(conditionalValue(parseConditional(wetRule), at(), undefined, { conditions: ["wet"] })).toBe("no");
+  });
+
+  it("does not apply for a different circumstance", () => {
+    expect(conditionalValue(parseConditional(wetRule), at(), undefined, { conditions: ["snow"] })).toBeNull();
+  });
+
+  it("answers for who is driving and what for", () => {
+    const residents = parseConditional("no @ (resident)");
+    expect(conditionalValue(residents, at(), undefined, { userGroups: ["resident"] })).toBe("no");
+    const delivery = parseConditional("yes @ (delivery)");
+    expect(conditionalValue(delivery, at(), undefined, { purposes: ["delivery"] })).toBe("yes");
+  });
+
+  it("needs every part of a combined rule, circumstance included", () => {
+    const tag = "no @ (Mo-Fr 07:00-19:00 AND wet)";
+    const working = at({ weekday: 1, minutes: 9 * 60 });
+    expect(conditionalValue(parseConditional(tag), working)).toBeNull();
+    expect(conditionalValue(parseConditional(tag), working, undefined, { conditions: ["wet"] })).toBe("no");
+    // The right weather on the wrong day is still the wrong day.
+    expect(conditionalValue(parseConditional(tag), at({ weekday: 6, minutes: 9 * 60 }), undefined, { conditions: ["wet"] })).toBeNull();
+  });
+
+  it("is not case-sensitive about the answer", () => {
+    expect(conditionalValue(parseConditional(wetRule), at(), undefined, { conditions: ["WET"] })).toBe("no");
+  });
+
+  it("still cannot read what it has never been taught", () => {
+    expect(conditionalValue(parseConditional("no @ (stay>2 hours)"), at(), undefined, { conditions: ["stay"] })).toBeNull();
   });
 });

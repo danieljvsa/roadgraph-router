@@ -66,12 +66,54 @@ export type Condition = {
   publicHoliday?: boolean;
   vehicle?: VehicleComparison[];
   /**
-   * The part of the condition this parser could not read — weather, a user
-   * group, a stay duration. A condition carrying one is never matched, and is
-   * counted so it can be reported rather than quietly ignored.
+   * Circumstances this library cannot know by itself: the weather, who is
+   * driving, what for. They are read from the tag and answered only by a
+   * caller who says so; unanswered, the condition does not hold.
+   */
+  circumstances?: string[];
+  /**
+   * The part of the condition this parser could not read at all — a stay
+   * duration, a form of words nobody has taught it. A condition carrying one
+   * is never matched, and is counted so it can be reported rather than
+   * quietly ignored.
    */
   unreadable?: string;
 };
+
+/**
+ * What the caller knows that the map does not: whether it is raining, who is
+ * at the wheel, what the journey is for. A conditional rule resting on one of
+ * these is ignored unless the answer is given here.
+ */
+export type Circumstances = {
+  /** Named states of the road or sky, such as `wet`, `snow`, `ice`. */
+  conditions?: string[];
+  /** Who is driving, such as `disabled`, `resident`, `emergency`. */
+  userGroups?: string[];
+  /** Why, such as `delivery`, `destination`, `agricultural`. */
+  purposes?: string[];
+};
+
+/** Every circumstance a caller has answered yes to, lower-cased. */
+function answered(circumstances: Circumstances | undefined) {
+  const yes = new Set<string>();
+  for (const list of [circumstances?.conditions, circumstances?.userGroups, circumstances?.purposes]) {
+    for (const name of list ?? []) yes.add(name.trim().toLowerCase());
+  }
+  return yes;
+}
+
+/**
+ * The circumstances OSM writes in a conditional value. Kept as a list rather
+ * than guessed at: this library has no opinion about whether it is raining,
+ * and inventing one would either close roads that are open or open roads that
+ * are shut.
+ */
+const KNOWN_CIRCUMSTANCES = new Set([
+  "wet", "dry", "snow", "ice", "fog", "rain",
+  "disabled", "resident", "residents", "customers", "employees", "emergency", "permit", "school",
+  "delivery", "destination", "agricultural", "forestry", "loading", "unloading",
+]);
 
 export type ConditionalRule = {
   /** What applies when the condition holds: `no`, `destination`, `30`, `7.5`. */
@@ -159,6 +201,7 @@ function parseCondition(text: string): Condition {
       if (day) { days.push(day); continue; }
       const month = parseIndexedRange(piece, MONTHS);
       if (month) { months.push(month); continue; }
+      if (KNOWN_CIRCUMSTANCES.has(piece)) { (condition.circumstances ??= []).push(piece); continue; }
       understood = false;
       break;
     }
@@ -249,11 +292,17 @@ function dayAndTimeHold(condition: Condition, when: TravelTime): boolean {
 }
 
 /** Whether one condition group holds at this moment, for this vehicle. */
-export function conditionHolds(condition: Condition, when: TravelTime, vehicle?: VehicleDimensions): boolean {
+export function conditionHolds(condition: Condition, when: TravelTime, vehicle?: VehicleDimensions, circumstances?: Circumstances): boolean {
   // A condition this parser could not read is never treated as holding, and
   // the caller is expected to have counted it.
   if (condition.unreadable !== undefined) return false;
   if (condition.publicHoliday && !when.publicHoliday) return false;
+  if (condition.circumstances?.length) {
+    // Every named circumstance has to hold: `no @ (wet AND Mo-Fr)` is not a
+    // rule about Mondays in general.
+    const yes = answered(circumstances);
+    if (!condition.circumstances.every((name) => yes.has(name))) return false;
+  }
   if (!dayAndTimeHold(condition, when)) return false;
   if (condition.vehicle?.length) {
     if (!vehicle) return false;
@@ -278,26 +327,65 @@ export function conditionHolds(condition: Condition, when: TravelTime, vehicle?:
  * rules applies. Where several match, the last wins, which is what
  * OpenStreetMap says and why the convention is general first, specific last.
  */
-export function conditionalValue(rules: ConditionalRule[], when: TravelTime, vehicle?: VehicleDimensions): string | null {
+export function conditionalValue(rules: ConditionalRule[], when: TravelTime, vehicle?: VehicleDimensions, circumstances?: Circumstances): string | null {
   let effective: string | null = null;
   for (const rule of rules) {
-    if (rule.conditions.some((condition) => conditionHolds(condition, when, vehicle))) effective = rule.value;
+    if (rule.conditions.some((condition) => conditionHolds(condition, when, vehicle, circumstances))) effective = rule.value;
   }
   return effective;
 }
 
-/** How many of these rules rest on something this parser cannot read. */
+/**
+ * How many of these rules rest on something this parser cannot read at all.
+ * A rule resting on the weather or on who is driving is readable and is not
+ * counted here; it simply needs a caller to answer it.
+ */
 export function unreadableConditions(rules: ConditionalRule[]) {
   return rules.reduce((count, rule) => count + rule.conditions.filter((condition) => condition.unreadable !== undefined).length, 0);
 }
 
-/** The moment a journey is travelled, from a date in the road's own local time. */
-export function travelTimeFrom(date: Date, publicHoliday = false): TravelTime {
+const WEEKDAY_NUMBER: Record<string, number> = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 };
+
+/**
+ * The moment a journey is travelled.
+ *
+ * Without a time zone the date is read as the machine reads it, which is
+ * right when the roads and the reader are in the same place and wrong by
+ * however many hours when they are not. Naming the zone the roads are in —
+ * `"Europe/Lisbon"` — reads the date there instead, which is what a
+ * restriction written in local time means.
+ *
+ * The zone names are the IANA ones the platform already knows; nothing is
+ * bundled for this.
+ */
+export function travelTimeFrom(date: Date, publicHoliday = false, timeZone?: string): TravelTime {
+  if (!timeZone) {
+    return {
+      weekday: (date.getDay() + 6) % 7,
+      minutes: date.getHours() * 60 + date.getMinutes(),
+      month: date.getMonth() + 1,
+      dayOfMonth: date.getDate(),
+      publicHoliday,
+    };
+  }
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    weekday: "short",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+    hour12: false,
+  }).formatToParts(date);
+  const field = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  // A midnight in some zones formats as 24 rather than 00.
+  const hour = Number(field("hour")) % 24;
   return {
-    weekday: (date.getDay() + 6) % 7,
-    minutes: date.getHours() * 60 + date.getMinutes(),
-    month: date.getMonth() + 1,
-    dayOfMonth: date.getDate(),
+    weekday: WEEKDAY_NUMBER[field("weekday")] ?? 0,
+    minutes: hour * 60 + Number(field("minute")),
+    month: Number(field("month")),
+    dayOfMonth: Number(field("day")),
     publicHoliday,
   };
 }
@@ -370,12 +458,12 @@ const CLOSED = new Set(["no", "private", "destination", "customers", "delivery",
  * library has no notion of a journey's purpose, and treating "only if you live
  * here" as open would route strangers down a residents' street.
  */
-export function conditionsOnEdge(conditions: ParsedConditions, edge: number, when: TravelTime, vehicle?: VehicleDimensions) {
+export function conditionsOnEdge(conditions: ParsedConditions, edge: number, when: TravelTime, vehicle?: VehicleDimensions, circumstances?: Circumstances) {
   const { table, parsed } = conditions;
   let closed = false;
   let speedKph: number | undefined;
   for (let row = firstRowFor(table.edges, edge); row >= 0 && row < table.edges.length && table.edges[row] === edge; row += 1) {
-    const value = conditionalValue(parsed[table.rules[row]], when, vehicle);
+    const value = conditionalValue(parsed[table.rules[row]], when, vehicle, circumstances);
     if (value === null) continue;
     if (table.kinds[row] === ConditionKind.access) {
       if (CLOSED.has(value.trim().toLowerCase())) closed = true;
@@ -406,6 +494,7 @@ export function accessAtTime(
   when: TravelTime | undefined,
   vehicle?: VehicleDimensions,
   base?: Uint8Array,
+  circumstances?: Circumstances,
 ): Uint8Array | undefined {
   const start = base ?? graph.edgeAccess;
   if (!when || !conditions) return start;
@@ -417,7 +506,7 @@ export function accessAtTime(
     if (edge >= edges || table.kinds[row] !== ConditionKind.access) continue;
     // Rows are sorted by edge, so a repeat of one already cleared is skipped.
     if (mask && !edgeAllowed(mask, edge)) continue;
-    if (!conditionsOnEdge(conditions, edge, when, vehicle).closed) continue;
+    if (!conditionsOnEdge(conditions, edge, when, vehicle, circumstances).closed) continue;
     mask ??= start ? Uint8Array.from(start) : accessMaskFor(edges, () => true);
     mask[edge >> 3] &= ~(1 << (edge & 7));
   }
@@ -465,6 +554,7 @@ export function conditionalDurations(
   conditions: ParsedConditions | undefined,
   when: TravelTime,
   vehicle?: VehicleDimensions,
+  circumstances?: Circumstances,
 ): Map<number, number> | undefined {
   if (!conditions) return undefined;
   const distanceScale = graph.edgeDistanceScale ?? 1;
@@ -474,7 +564,7 @@ export function conditionalDurations(
   for (let row = 0; row < table.edges.length; row += 1) {
     const edge = table.edges[row];
     if (table.kinds[row] !== ConditionKind.maxspeed || edge >= graph.edgeTargets.length || slowed.has(edge)) continue;
-    const { speedKph } = conditionsOnEdge(conditions, edge, when, vehicle);
+    const { speedKph } = conditionsOnEdge(conditions, edge, when, vehicle, circumstances);
     if (speedKph === undefined) continue;
     const stored = graph.edgeDurationsSeconds[edge] * durationScale;
     const limited = (graph.edgeDistancesMeters[edge] * distanceScale) / (speedKph / 3.6);

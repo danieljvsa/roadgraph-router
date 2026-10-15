@@ -103,7 +103,19 @@ function roadOf(graph: RoadGraph, edge: number) {
   const ends = source < target ? `${source}:${target}` : `${target}:${source}`;
   // Rounded to the metre, which both directions of one road agree on and
   // which quantisation keeps stable.
-  return `${ends}:${Math.round(graph.edgeDistancesMeters[edge] * (graph.edgeDistanceScale ?? 1))}`;
+  const length = Math.round(graph.edgeDistancesMeters[edge] * (graph.edgeDistanceScale ?? 1));
+  // Two roads joining the same junctions and happening to be the same length
+  // are still two roads, and their shapes say so. Summing the shape points
+  // rather than walking them in order keeps the two directions of one road
+  // equal, since a sum does not care which end it started from.
+  const offsets = graph.edgeShapeOffsets;
+  let shape = 0;
+  if (offsets && graph.edgeShapeLatitudes && graph.edgeShapeLongitudes) {
+    for (let point = offsets[edge]; point < offsets[edge + 1]; point += 1) {
+      shape += graph.edgeShapeLatitudes[point] + graph.edgeShapeLongitudes[point];
+    }
+  }
+  return `${ends}:${length}:${shape}`;
 }
 
 /** Every stretch of road a route drives, the ends it only part-drives included. */

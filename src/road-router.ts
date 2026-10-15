@@ -65,7 +65,7 @@ function haversineMeters(a: Coordinate, b: Coordinate) {
  * manifest, or an already-decoded graph.
  */
 /** When a journey starts, for the conditional restrictions that depend on it. */
-export type DepartureOptions = Pick<RouteOptions, "departAt" | "publicHoliday">;
+export type DepartureOptions = Pick<RouteOptions, "departAt" | "publicHoliday" | "timeZone" | "circumstances">;
 
 export class RoadRouter {
   private constructor(private readonly graph?: RoadGraph, private readonly loader?: RouteLoader, private readonly options: RoadRouterOptions = {}, private readonly profileId?: number, private readonly bundleVehicle?: string) {

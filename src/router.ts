@@ -4,7 +4,7 @@ import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
 import { edgeAllowed } from "./access";
 import { accessForVehicle } from "./limits";
-import { accessAtTime, conditionalDurations, conditionsOf, travelTimeFrom, type TravelTime } from "./conditional";
+import { accessAtTime, conditionalDurations, conditionsOf, travelTimeFrom, type Circumstances, type TravelTime } from "./conditional";
 import { componentSizes, componentsFor } from "./connectivity";
 import { searchBoundsFor, straightLineAtMost } from "./search-bounds";
 import type { VehicleDimensions } from "./vehicle";
@@ -382,6 +382,20 @@ export type RouteOptions = {
   /** Whether that day is a public holiday, which only a caller can know. */
   publicHoliday?: boolean;
   /**
+   * The time zone the roads are in, as an IANA name such as
+   * `"Europe/Lisbon"`. A restriction is written in the local time of the road
+   * it is on, so a caller routing somewhere other than where it is running
+   * should say where. Left out, a `Date` is read as this machine reads it.
+   */
+  timeZone?: string;
+  /**
+   * What the map cannot know: whether it is raining, who is driving, what the
+   * journey is for. A conditional rule resting on one of these is ignored
+   * unless it is answered here, so a road shut `@ (wet)` stays open until a
+   * caller says it is wet.
+   */
+  circumstances?: Circumstances;
+  /**
    * Multipliers making certain edges dearer to the search than they really
    * are, used to push a search away from a route already found. The route
    * reported back is always priced at the graph's own cost, so a penalty
@@ -426,10 +440,12 @@ function withPenalties(
 }
 
 /** Reads whichever form of departure time a caller supplied. */
-export function departureTime(options: Pick<RouteOptions, "departAt" | "publicHoliday">): TravelTime | undefined {
+export function departureTime(options: Pick<RouteOptions, "departAt" | "publicHoliday" | "timeZone">): TravelTime | undefined {
   const departAt = options.departAt;
   if (!departAt) return undefined;
-  return departAt instanceof Date ? travelTimeFrom(departAt, options.publicHoliday) : { ...departAt, publicHoliday: departAt.publicHoliday ?? options.publicHoliday };
+  return departAt instanceof Date
+    ? travelTimeFrom(departAt, options.publicHoliday, options.timeZone)
+    : { ...departAt, publicHoliday: departAt.publicHoliday ?? options.publicHoliday };
 }
 
 /** The node a snap stands on, for asking which piece of the network it is in. */
@@ -483,7 +499,7 @@ export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   const vehicleAccess = accessForVehicle(graph, options.vehicle);
   // The departure time narrows the mask further, so snapping and search agree
   // about which roads are usable at the moment the journey starts.
-  const access = accessAtTime(graph, conditionsOf(graph), departureTime(options), options.vehicle, vehicleAccess);
+  const access = accessAtTime(graph, conditionsOf(graph), departureTime(options), options.vehicle, vehicleAccess, options.circumstances);
   try {
     return routeBetween(graph, from, to, preference, options, access);
   } catch (error) {
@@ -566,7 +582,7 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   const distanceScale = graph.edgeDistanceScale ?? 1;
   const durationScale = graph.edgeDurationScale ?? 1;
   const when = departureTime(options);
-  const conditionallySlowed = preference === "fastest" && when ? conditionalDurations(graph, conditionsOf(graph), when, options.vehicle) : undefined;
+  const conditionallySlowed = preference === "fastest" && when ? conditionalDurations(graph, conditionsOf(graph), when, options.vehicle, options.circumstances) : undefined;
   // A penalty makes an edge dearer to the search without making it dearer in
   // the answer: the distance and duration reported below are the real ones.
   const slowed = withPenalties(graph, preference, conditionallySlowed, options.costPenalties);

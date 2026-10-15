@@ -10,7 +10,7 @@ export { accessForVehicle, countBlocked, fromDecimetres, fromHalfTonnes, packEdg
 export {
   ConditionKind, accessAtTime, conditionalDurations, conditionalValue, conditionHolds, conditionsOf, conditionsOnEdge,
   countClosedAt, packEdgeConditions, parseConditional, parseEdgeConditions, travelTimeFrom, unreadableConditions,
-  type Condition, type ConditionalRule, type MinuteSpan, type ParsedConditions, type TravelTime, type VehicleComparison,
+  type Circumstances, type Condition, type ConditionalRule, type MinuteSpan, type ParsedConditions, type TravelTime, type VehicleComparison,
 } from "./conditional";
 export { findNearestNode, route } from "./router";
 export type { RouteOptions } from "./router";
