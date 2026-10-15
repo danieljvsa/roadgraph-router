@@ -43,12 +43,19 @@ const METRES_PER_DEGREE_LATITUDE = 111_320;
  * closed junction may have no shape point anywhere near it, and testing the
  * ends alone would drive a route straight through.
  */
-function touches(graph: RoadGraph, edge: number, area: AvoidArea, centre: Coordinate) {
+export function touchesArea(graph: RoadGraph, edge: number, area: AvoidArea, centre: Coordinate = { lat: area.lat, lng: area.lng }) {
   const polyline = edgePolyline(graph, edge, edgeSource(graph, edge));
   // Flat-earth metres about the centre, which is accurate well past any
   // radius a closure is described with.
   const longitudeScale = METRES_PER_DEGREE_LATITUDE * Math.cos((centre.lat * Math.PI) / 180);
-  const x = (point: Coordinate) => (point.lng - centre.lng) * longitudeScale;
+  // Longitudes either side of the date line are a hair apart, not 360
+  // degrees. Taking the difference at face value puts a road in Fiji half a
+  // world from a closure standing on it.
+  const apart = (from: number, to: number) => {
+    const delta = from - to;
+    return delta > 180 ? delta - 360 : delta < -180 ? delta + 360 : delta;
+  };
+  const x = (point: Coordinate) => apart(point.lng, centre.lng) * longitudeScale;
   const y = (point: Coordinate) => (point.lat - centre.lat) * METRES_PER_DEGREE_LATITUDE;
 
   for (let index = 0; index < polyline.length; index += 1) {
@@ -88,7 +95,7 @@ export function accessAvoiding(graph: RoadGraph, areas: AvoidArea[] | undefined,
     for (const edge of nearbyEdgeIds(index, centre, area.radiusMeters)) {
       if (edge >= edges) continue;
       if (mask && !edgeAllowed(mask, edge)) continue;
-      if (!touches(graph, edge, area, centre)) continue;
+      if (!touchesArea(graph, edge, area, centre)) continue;
       mask ??= start ? Uint8Array.from(start) : accessMaskFor(edges, () => true);
       mask[edge >> 3] &= ~(1 << (edge & 7));
     }

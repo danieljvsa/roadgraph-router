@@ -16,7 +16,7 @@
  * alternative anybody wants. What comes back is in order, best first.
  */
 
-import { edgeSource } from "./edge-index";
+import { edgePolyline, edgeSource } from "./edge-index";
 import { route } from "./router";
 import type { RouteOptions } from "./router";
 import { RouterError, type Coordinate, type RoadGraph, type RoutePreference, type RouteResult } from "./types";
@@ -112,21 +112,29 @@ function roadOf(graph: RoadGraph, edge: number) {
   const source = edgeSource(graph, edge);
   const target = graph.edgeTargets[edge];
   const ends = source < target ? `${source}:${target}` : `${target}:${source}`;
-  // Rounded to the metre, which both directions of one road agree on and
-  // which quantisation keeps stable.
-  const length = Math.round(graph.edgeDistancesMeters[edge] * (graph.edgeDistanceScale ?? 1));
-  // Two roads joining the same junctions and happening to be the same length
-  // are still two roads, and their shapes say so. Summing the shape points
-  // rather than walking them in order keeps the two directions of one road
-  // equal, since a sum does not care which end it started from.
-  const offsets = graph.edgeShapeOffsets;
-  let shape = 0;
-  if (offsets && graph.edgeShapeLatitudes && graph.edgeShapeLongitudes) {
-    for (let point = offsets[edge]; point < offsets[edge + 1]; point += 1) {
-      shape += graph.edgeShapeLatitudes[point] + graph.edgeShapeLongitudes[point];
+
+  // The geometry, walked in the direction both copies of the road agree on:
+  // from the lower-numbered end to the higher one. Each copy of a two-way
+  // road then sees the same sequence of points, and two different roads
+  // between the same junctions see different ones.
+  //
+  // Folded in order rather than added up. A sum does not care which point
+  // came first, so a road bending north then east and one bending east then
+  // north add to the same number and would be taken for one road.
+  const polyline = edgePolyline(graph, edge, source);
+  const points = source < target ? polyline : [...polyline].reverse();
+  const scale = graph.coordinateScale ?? 1e7;
+  let first = 0x811c9dc5;
+  let second = 0x01000193;
+  for (const point of points) {
+    for (const value of [Math.round(point.lat * scale), Math.round(point.lng * scale)]) {
+      first = Math.imul(first ^ (value & 0xffff), 0x01000193) >>> 0;
+      first = Math.imul(first ^ (value >>> 16), 0x01000193) >>> 0;
+      second = Math.imul(second ^ (value & 0xffff), 0x85ebca6b) >>> 0;
+      second = Math.imul(second ^ (value >>> 16), 0xc2b2ae35) >>> 0;
     }
   }
-  return `${ends}:${length}:${shape}`;
+  return `${ends}:${first.toString(36)}${second.toString(36)}`;
 }
 
 /** Every stretch of road a route drives, the ends it only part-drives included. */

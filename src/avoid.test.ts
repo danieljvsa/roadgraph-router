@@ -1,4 +1,5 @@
-import { countAvoided } from "./avoid";
+import { accessAvoiding, countAvoided, touchesArea } from "./avoid";
+import { edgeAllowed } from "./access";
 import { route } from "./router";
 import { routeAlternatives } from "./alternatives";
 import { buildGraph, pathOf } from "./test-support";
@@ -71,5 +72,74 @@ describe("roads the caller says are shut", () => {
     expect(bad({ lat: 41, lng: 400, radiusMeters: 10 })).toThrow(/longitude/);
     expect(bad({ lat: 41, lng: -8, radiusMeters: 0 })).toThrow(/positive distance/);
     expect(bad({ lat: 41, lng: -8, radiusMeters: Number.NaN })).toThrow(/positive distance/);
+  });
+});
+
+describe("the index offers every road a closure touches", () => {
+  /**
+   * A correct intersection test is no use if the spatial index never hands
+   * the road over, so this asks every edge directly and checks the two
+   * answers agree.
+   */
+  const brokenDownBy = (graph: ReturnType<typeof town>, area: { lat: number; lng: number; radiusMeters: number }) => {
+    const byHand = new Set<number>();
+    for (let edge = 0; edge < graph.edgeTargets.length; edge += 1) {
+      if (touchesArea(graph, edge, area)) byHand.add(edge);
+    }
+    const mask = accessAvoiding(graph, [area]);
+    const byIndex = new Set<number>();
+    for (let edge = 0; edge < graph.edgeTargets.length; edge += 1) {
+      if (!edgeAllowed(mask, edge)) byIndex.add(edge);
+    }
+    return { byHand, byIndex };
+  };
+
+  it("agrees with asking every road, for a small closure", () => {
+    const graph = town();
+    const { byHand, byIndex } = brokenDownBy(graph, onTheMiddleRoad);
+    expect([...byIndex].sort()).toEqual([...byHand].sort());
+    expect(byHand.size).toBeGreaterThan(0);
+  });
+
+  it("agrees for a closure larger than the whole graph", () => {
+    const graph = town();
+    const { byHand, byIndex } = brokenDownBy(graph, { lat: 41.002, lng: -7.99, radiusMeters: 50_000 });
+    expect([...byIndex].sort()).toEqual([...byHand].sort());
+    expect(byHand.size).toBe(graph.edgeTargets.length);
+  });
+
+  it("agrees for a closure on a long road with distant ends", () => {
+    const long = buildGraph({ nodes: { A: [41.0, -8.6], B: [41.0, -7.4] }, roads: ["A-B"] });
+    const area = { lat: 41.0, lng: -8.0, radiusMeters: 200 };
+    const byHand = new Set<number>();
+    for (let edge = 0; edge < long.edgeTargets.length; edge += 1) if (touchesArea(long, edge, area)) byHand.add(edge);
+    const mask = accessAvoiding(long, [area]);
+    const byIndex = new Set<number>();
+    for (let edge = 0; edge < long.edgeTargets.length; edge += 1) if (!edgeAllowed(mask, edge)) byIndex.add(edge);
+    expect([...byIndex].sort()).toEqual([...byHand].sort());
+    expect(byHand.size).toBe(2);
+  });
+
+  it("agrees across the date line", () => {
+    const pacific = buildGraph({ nodes: { A: [10.0, 179.99], B: [10.0, -179.99] }, roads: ["A-B"] });
+    const area = { lat: 10.0, lng: 180.0, radiusMeters: 500 };
+    expect(touchesArea(pacific, 0, area)).toBe(true);
+    expect(countAvoided(pacific, [area])).toBe(2);
+  });
+
+  it("agrees at a high latitude", () => {
+    const arctic = buildGraph({ nodes: { A: [78.0, 15.0], B: [78.0, 15.02] }, roads: ["A-B"] });
+    expect(countAvoided(arctic, [{ lat: 78.0, lng: 15.01, radiusMeters: 300 }])).toBe(2);
+  });
+
+  it("takes overlapping closures as one", () => {
+    const graph = town();
+    const overlapping = [onTheMiddleRoad, { ...onTheMiddleRoad, radiusMeters: 200 }];
+    expect(countAvoided(graph, overlapping)).toBe(countAvoided(graph, [overlapping[1]]));
+  });
+
+  it("copes with a road of no length at all", () => {
+    const degenerate = buildGraph({ nodes: { A: [41.0, -8.0], B: [41.0, -8.0] }, roads: ["A-B"] });
+    expect(() => countAvoided(degenerate, [{ lat: 41.0, lng: -8.0, radiusMeters: 50 }])).not.toThrow();
   });
 });
