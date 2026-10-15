@@ -19,6 +19,10 @@
 import type { VehicleDimensions } from "./vehicle";
 import type { EdgeConditions, RoadGraph } from "./types";
 import { accessMaskFor, edgeAllowed } from "./access";
+import { parseMaxSpeedKph } from "./speed";
+
+/** The widest rule table the 16-bit stored index can name. */
+export const MAX_STORED_VALUES = 65535;
 
 /** When a journey passes, in the local time of the road it passes on. */
 export type TravelTime = {
@@ -90,6 +94,10 @@ function parseClock(text: string): number | null {
   const hours = Number(match[1]);
   const minutes = Number(match[2]);
   if (hours > 24 || minutes > 59) return null;
+  // 24:00 is midnight at the end of the day, which opening hours write as the
+  // close of a span. There is no 24:30: an hour past the end of the day is not
+  // a time, and reading it as 00:30 would silently move the span by a day.
+  if (hours === 24 && minutes !== 0) return null;
   return hours * 60 + minutes;
 }
 
@@ -186,15 +194,38 @@ const withinSpan = (minutes: number, span: MinuteSpan) => span.from <= span.to
   // A span running past midnight, as 22:00-06:00.
   : minutes >= span.from || minutes < span.to;
 
+const YESTERDAY = (weekday: number) => (weekday + 6) % 7;
+
+const onDay = (weekday: number, days: Range[] | undefined) => !days?.length || days.some((range) => withinRange(weekday, range));
+
+/**
+ * Whether the day and the time hold together.
+ *
+ * They cannot be asked separately. `Fr 22:00-06:00` is one span that begins on
+ * Friday evening and ends on Saturday morning, so two o'clock on Saturday is
+ * inside it and two o'clock on Friday is not. Checking "is it Friday" and "is
+ * it between 22:00 and 06:00" one at a time answers both of those backwards.
+ */
+function dayAndTimeHold(condition: Condition, when: TravelTime): boolean {
+  if (!condition.times?.length) return onDay(when.weekday, condition.days);
+  return condition.times.some((span) => {
+    if (span.from <= span.to) return onDay(when.weekday, condition.days) && withinSpan(when.minutes, span);
+    // A span running past midnight: the evening half belongs to the day it
+    // started on, the morning half to the day before.
+    if (when.minutes >= span.from) return onDay(when.weekday, condition.days);
+    if (when.minutes < span.to) return onDay(YESTERDAY(when.weekday), condition.days);
+    return false;
+  });
+}
+
 /** Whether one condition group holds at this moment, for this vehicle. */
 export function conditionHolds(condition: Condition, when: TravelTime, vehicle?: VehicleDimensions): boolean {
   // A condition this parser could not read is never treated as holding, and
   // the caller is expected to have counted it.
   if (condition.unreadable !== undefined) return false;
   if (condition.publicHoliday && !when.publicHoliday) return false;
-  if (condition.days?.length && !condition.days.some((range) => withinRange(when.weekday, range))) return false;
   if (condition.months?.length && !condition.months.some((range) => withinRange(when.month - 1, range))) return false;
-  if (condition.times?.length && !condition.times.some((span) => withinSpan(when.minutes, span))) return false;
+  if (!dayAndTimeHold(condition, when)) return false;
   if (condition.vehicle?.length) {
     if (!vehicle) return false;
     for (const test of condition.vehicle) {
@@ -252,23 +283,25 @@ export function packEdgeConditions(entries: { edge: number; kind: number; value:
   if (!rows.length) return undefined;
   const index = new Map<string, number>();
   const values: string[] = [];
-  const rules = new Uint16Array(rows.length);
-  for (let row = 0; row < rows.length; row += 1) {
-    const value = rows[row].value;
-    let at = index.get(value);
+  const kept: { edge: number; kind: number; rule: number }[] = [];
+  for (const row of rows) {
+    let at = index.get(row.value);
     if (at === undefined) {
-      // More distinct conditional values than this would overflow the stored
-      // index; dropping the surplus keeps every row that did fit truthful.
-      if (values.length > 65535) continue;
-      at = values.push(value) - 1;
-      index.set(value, at);
+      // The stored rule number is 16 bits wide. A region with more distinct
+      // conditional values than that loses the surplus rows entirely rather
+      // than keeping them pointed at whichever rule happened to be first,
+      // which would quietly apply the wrong restriction to a real road.
+      if (values.length > MAX_STORED_VALUES) continue;
+      at = values.push(row.value) - 1;
+      index.set(row.value, at);
     }
-    rules[row] = at;
+    kept.push({ edge: row.edge, kind: row.kind, rule: at });
   }
+  if (!kept.length) return undefined;
   return {
-    edges: Uint32Array.from(rows, (row) => row.edge),
-    kinds: Uint8Array.from(rows, (row) => row.kind),
-    rules,
+    edges: Uint32Array.from(kept, (row) => row.edge),
+    kinds: Uint8Array.from(kept, (row) => row.kind),
+    rules: Uint16Array.from(kept, (row) => row.rule),
     values,
   };
 }
@@ -313,8 +346,11 @@ export function conditionsOnEdge(conditions: ParsedConditions, edge: number, whe
     if (table.kinds[row] === ConditionKind.access) {
       if (CLOSED.has(value.trim().toLowerCase())) closed = true;
     } else {
-      const parsedSpeed = Number.parseFloat(value);
-      if (Number.isFinite(parsedSpeed) && parsedSpeed > 0) speedKph = speedKph === undefined ? parsedSpeed : Math.min(speedKph, parsedSpeed);
+      // The same parser the plain `maxspeed` uses: a conditional limit is
+      // written in the same units, and reading "30 mph" as 30 km/h would
+      // slow a road to two-thirds of its real limit.
+      const parsedSpeed = parseMaxSpeedKph(value);
+      if (parsedSpeed !== null && parsedSpeed > 0) speedKph = speedKph === undefined ? parsedSpeed : Math.min(speedKph, parsedSpeed);
     }
   }
   return { closed, speedKph };

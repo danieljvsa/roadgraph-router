@@ -1,4 +1,4 @@
-import { packEdgeConditions, ConditionKind, countClosedAt, conditionsOf } from "./conditional";
+import { packEdgeConditions, ConditionKind, countClosedAt, conditionsOf, conditionsOnEdge, parseEdgeConditions } from "./conditional";
 import { decodeGraph, decodeProfileChunk, encodeCompactGraph, encodeProfileChunk } from "./codec";
 import { compactGraph } from "./compact";
 import { route } from "./router";
@@ -296,5 +296,38 @@ describe("carrying conditions in a one-vehicle chunk", () => {
       ...compacted,
       edgeConditions: packEdgeConditions([{ edge: 9999, kind: ConditionKind.access, value: CLOSED_IN_WORKING_HOURS }]),
     })).toThrow(/outside the graph/);
+  });
+});
+
+describe("a conditional speed limit written with units", () => {
+  const speedFrom = (value: string) => {
+    const table = packEdgeConditions([{ edge: 0, kind: ConditionKind.maxspeed, value }])!;
+    return conditionsOnEdge(parseEdgeConditions(table)!, 0, { weekday: 0, minutes: 9 * 60, month: 3 }).speedKph;
+  };
+
+  it("reads miles per hour as miles per hour", () => {
+    // Taken as a bare number this would slow the road to 30 km/h, two-thirds
+    // of what the sign says.
+    expect(speedFrom("30 mph @ (Mo-Fr 07:00-19:00)")).toBeCloseTo(48.28, 1);
+  });
+
+  it("reads km/h, however it is spelled", () => {
+    expect(speedFrom("50 km/h @ (Mo-Fr 07:00-19:00)")).toBeCloseTo(50, 5);
+    expect(speedFrom("50 kmh @ (Mo-Fr 07:00-19:00)")).toBeCloseTo(50, 5);
+    expect(speedFrom("50 @ (Mo-Fr 07:00-19:00)")).toBeCloseTo(50, 5);
+  });
+
+  it("takes no speed at all from something that is not one", () => {
+    expect(speedFrom("fast @ (Mo-Fr 07:00-19:00)")).toBeUndefined();
+    expect(speedFrom("30 furlongs @ (Mo-Fr 07:00-19:00)")).toBeUndefined();
+    expect(speedFrom("-30 @ (Mo-Fr 07:00-19:00)")).toBeUndefined();
+  });
+
+  it("takes the lowest where several apply", () => {
+    const table = packEdgeConditions([
+      { edge: 0, kind: ConditionKind.maxspeed, value: "50 @ (Mo-Fr 07:00-19:00)" },
+      { edge: 0, kind: ConditionKind.maxspeed, value: "20 mph @ (Mo-Fr 07:00-19:00)" },
+    ])!;
+    expect(conditionsOnEdge(parseEdgeConditions(table)!, 0, { weekday: 0, minutes: 9 * 60, month: 3 }).speedKph).toBeCloseTo(32.19, 1);
   });
 });

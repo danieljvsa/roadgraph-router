@@ -118,3 +118,87 @@ describe("alternatives obey everything a single route obeys", () => {
     for (const result of routes) expect(result.edgeIds).not.toContain(middle);
   });
 });
+
+describe("the order routes come back in", () => {
+  it("is by what they really cost, not by when they were found", () => {
+    // Penalties drive the search somewhere new each pass, so the order
+    // candidates turn up in is not the order they would be driven in.
+    const routes = routeAlternatives(threeWays, A, E, "fastest", { count: 3 });
+    const costs = routes.map((result) => result.durationSeconds);
+    expect(costs).toEqual([...costs].sort((left, right) => left - right));
+  });
+
+  it("puts the genuinely best route first", () => {
+    const best = route(threeWays, A, E).durationSeconds;
+    for (const preference of ["fastest", "shortest"] as const) {
+      const routes = routeAlternatives(threeWays, A, E, preference, { count: 3 });
+      if (preference === "fastest") expect(routes[0].durationSeconds).toBeCloseTo(best, 6);
+      const costs = routes.map((r) => (preference === "fastest" ? r.durationSeconds : r.distanceMeters));
+      expect(costs).toEqual([...costs].sort((left, right) => left - right));
+    }
+  });
+
+  it("reports each route at its own cost, never a penalised one", () => {
+    for (const result of routeAlternatives(threeWays, A, E, "fastest", { count: 3 })) {
+      const alone = route(threeWays, A, { lat: result.destinationSnap.point.lat, lng: result.destinationSnap.point.lng });
+      expect(alone.durationSeconds).toBeLessThanOrEqual(result.durationSeconds + 1);
+    }
+  });
+});
+
+describe("telling one route from another", () => {
+  it("counts a road as shared whichever way it is driven", () => {
+    // There and back along one road is the same tarmac, so a route using the
+    // reverse of a road already offered is not a different way there.
+    const thereAndBack = buildGraph({
+      nodes: { A: [41.0, -8.0], B: [41.0, -7.99], C: [41.0, -7.98] },
+      roads: ["A-B", "B-C"],
+    });
+    const routes = routeAlternatives(thereAndBack, { lat: 41.0, lng: -8.0 }, { lat: 41.0, lng: -7.98 });
+    expect(routes).toHaveLength(1);
+  });
+
+  it("allows two roads that merely meet at a junction", () => {
+    const routes = routeAlternatives(threeWays, A, E, "fastest", { count: 3 });
+    // The three ways share only their two end junctions, which cost no
+    // distance, so none of them is rejected for sharing.
+    expect(routes.length).toBeGreaterThan(1);
+  });
+});
+
+describe("options that make no sense", () => {
+  const bad = (options: Record<string, number>) => () => routeAlternatives(threeWays, A, E, "fastest", options);
+
+  it("refuses a count that is not a sensible number of routes", () => {
+    expect(bad({ count: 0 })).toThrow(/count/);
+    expect(bad({ count: -2 })).toThrow(/count/);
+    expect(bad({ count: 2.5 })).toThrow(/whole number/);
+    expect(bad({ count: Number.NaN })).toThrow(/count/);
+    expect(bad({ count: Number.POSITIVE_INFINITY })).toThrow(/count/);
+    expect(bad({ count: 1_000_000 })).toThrow(/count/);
+  });
+
+  it("refuses a stretch below one, which no alternative could meet", () => {
+    expect(bad({ maxStretch: 0.5 })).toThrow(/maxStretch/);
+    expect(bad({ maxStretch: Number.NaN })).toThrow(/maxStretch/);
+  });
+
+  it("refuses a sharing limit outside nought to one", () => {
+    expect(bad({ maxSharing: -0.1 })).toThrow(/maxSharing/);
+    expect(bad({ maxSharing: 1.5 })).toThrow(/maxSharing/);
+    expect(bad({ maxSharing: Number.NaN })).toThrow(/maxSharing/);
+  });
+
+  it("refuses a penalty that would not steer the search", () => {
+    expect(bad({ penaltyFactor: 0 })).toThrow(/penaltyFactor/);
+    expect(bad({ penaltyFactor: Number.NaN })).toThrow(/penaltyFactor/);
+  });
+
+  it("accepts the edges of what it allows", () => {
+    expect(bad({ count: 1 })).not.toThrow();
+    expect(bad({ maxStretch: 1 })).not.toThrow();
+    expect(bad({ maxSharing: 0 })).not.toThrow();
+    expect(bad({ maxSharing: 1 })).not.toThrow();
+    expect(bad({ penaltyFactor: 1 })).not.toThrow();
+  });
+});

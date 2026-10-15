@@ -229,3 +229,66 @@ describe("alternatives inside one condition", () => {
     expect(unreadableConditions(parseConditional(tag))).toBe(0);
   });
 });
+
+describe("a window that runs past midnight on a named day", () => {
+  // `Fr 22:00-06:00` is one span beginning Friday evening and ending Saturday
+  // morning. Asking "is it Friday?" and "is it between 22:00 and 06:00?"
+  // separately answers both ends of it backwards.
+  const tag = "no @ (Fr 22:00-06:00)";
+  const friday = 4;
+  const saturday = 5;
+
+  it("does not apply on the Friday morning before it starts", () => {
+    expect(valueAt(tag, at({ weekday: friday, minutes: 2 * 60 }))).toBeNull();
+  });
+
+  it("applies once Friday evening reaches it", () => {
+    expect(valueAt(tag, at({ weekday: friday, minutes: 23 * 60 }))).toBe("no");
+  });
+
+  it("still applies after midnight, on the Saturday", () => {
+    expect(valueAt(tag, at({ weekday: saturday, minutes: 2 * 60 }))).toBe("no");
+  });
+
+  it("stops when the Saturday morning passes its end", () => {
+    expect(valueAt(tag, at({ weekday: saturday, minutes: 7 * 60 }))).toBeNull();
+  });
+
+  it("carries the same way from Sunday into Monday", () => {
+    const sunday = "no @ (Su 22:00-06:00)";
+    expect(valueAt(sunday, at({ weekday: 6, minutes: 23 * 60 }))).toBe("no");
+    expect(valueAt(sunday, at({ weekday: 0, minutes: 2 * 60 }))).toBe("no");
+    expect(valueAt(sunday, at({ weekday: 0, minutes: 7 * 60 }))).toBeNull();
+  });
+
+  it("covers every night of a weekday range", () => {
+    const weekdays = "no @ (Mo-Fr 22:00-06:00)";
+    // Saturday morning belongs to Friday night, Monday morning to Sunday's,
+    // which is not in the range.
+    expect(valueAt(weekdays, at({ weekday: 5, minutes: 2 * 60 }))).toBe("no");
+    expect(valueAt(weekdays, at({ weekday: 0, minutes: 2 * 60 }))).toBeNull();
+  });
+
+  it("leaves a span inside one day alone", () => {
+    expect(valueAt("no @ (Fr 09:00-17:00)", at({ weekday: friday, minutes: 12 * 60 }))).toBe("no");
+    expect(valueAt("no @ (Fr 09:00-17:00)", at({ weekday: saturday, minutes: 12 * 60 }))).toBeNull();
+  });
+});
+
+describe("times that are not times", () => {
+  const unreadable = (tag: string) => parseConditional(tag)[0].conditions[0].unreadable !== undefined;
+
+  it("takes 24:00 as the end of the day", () => {
+    expect(valueAt("no @ (22:00-24:00)", at({ minutes: 23 * 60 }))).toBe("no");
+  });
+
+  it("refuses an hour past the end of the day", () => {
+    // Reading 24:30 as 00:30 would quietly move the span onto the next day.
+    expect(unreadable("no @ (24:30-06:00)")).toBe(true);
+    expect(unreadable("no @ (25:00-06:00)")).toBe(true);
+  });
+
+  it("refuses a minute that is not one", () => {
+    expect(unreadable("no @ (07:60-19:00)")).toBe(true);
+  });
+});

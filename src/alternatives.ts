@@ -16,6 +16,7 @@
  * alternative anybody wants. What comes back is in order, best first.
  */
 
+import { edgeSource } from "./edge-index";
 import { route } from "./router";
 import type { RouteOptions } from "./router";
 import { RouterError, type Coordinate, type RoadGraph, type RoutePreference, type RouteResult } from "./types";
@@ -46,21 +47,87 @@ export const DEFAULT_MAX_STRETCH = 1.4;
 
 const DEFAULTS = { count: 3, maxStretch: DEFAULT_MAX_STRETCH, maxSharing: 0.75, penaltyFactor: 2 };
 
+/** Wider than any graph has nodes, so a road's two ends make one number. */
+const ROAD_KEY_STRIDE = 2 ** 26;
+
+/**
+ * More routes than this is not a choice but a list, and each one costs a
+ * search over the whole corridor. A caller wanting dozens wants something
+ * this method is the wrong shape for.
+ */
+const MOST_ROUTES = 10;
+
+/** Rejects options that would make the search unbounded or meaningless. */
+function checkOptions(options: AlternativeRoutesOptions) {
+  const whole = (name: string, value: number) => {
+    if (!Number.isInteger(value)) throw new RangeError(`routeAlternatives: ${name} must be a whole number, not ${value}.`);
+  };
+  const finite = (name: string, value: number, least: number, most: number) => {
+    if (!Number.isFinite(value) || value < least || value > most) {
+      throw new RangeError(`routeAlternatives: ${name} must be between ${least} and ${most}, not ${value}.`);
+    }
+  };
+  if (options.count !== undefined) { whole("count", options.count); finite("count", options.count, 1, MOST_ROUTES); }
+  if (options.maxStretch !== undefined) finite("maxStretch", options.maxStretch, 1, Number.MAX_SAFE_INTEGER);
+  if (options.maxSharing !== undefined) finite("maxSharing", options.maxSharing, 0, 1);
+  if (options.penaltyFactor !== undefined) finite("penaltyFactor", options.penaltyFactor, 1, Number.MAX_SAFE_INTEGER);
+}
+
 const costOfRoute = (result: RouteResult, preference: RoutePreference) =>
   preference === "fastest" ? result.durationSeconds : result.distanceMeters;
 
-/** How much of this route runs along roads already offered, by distance. */
+/**
+ * Which stretch of road an edge is, regardless of which way it is driven.
+ *
+ * A two-way road is two directed edges with different numbers, and a route
+ * that comes back along one is on the same tarmac as a route that went up the
+ * other. Comparing edge numbers would call those two routes different; naming
+ * the road by its endpoints, in a fixed order, does not.
+ */
+function roadOf(graph: RoadGraph, edge: number) {
+  const source = edgeSource(graph, edge);
+  const target = graph.edgeTargets[edge];
+  return source < target ? source * ROAD_KEY_STRIDE + target : target * ROAD_KEY_STRIDE + source;
+}
+
+/** Every stretch of road a route drives, the ends it only part-drives included. */
+function roadsOf(graph: RoadGraph, route: RouteResult) {
+  const roads = new Set<number>();
+  for (const edge of route.edgeIds) roads.add(roadOf(graph, edge));
+  for (const snap of [route.originSnap, route.destinationSnap]) {
+    if (snap.edge >= 0) roads.add(roadOf(graph, snap.edge));
+  }
+  return roads;
+}
+
+/**
+ * How much of this route runs along roads already offered, measured by the
+ * distance actually travelled on them rather than by how many edges are in
+ * common. Junctions are shared by every route that meets at them and cost no
+ * distance, so they do not count towards being the same road.
+ *
+ * The partial edges a route starts and finishes on are counted too. Their
+ * length is what the route's total has over the sum of its whole edges, split
+ * evenly between the two ends, since a result says which road each end sits
+ * on but not how far along it.
+ */
 function sharedFraction(graph: RoadGraph, candidate: RouteResult, used: Set<number>) {
   const scale = graph.edgeDistanceScale ?? 1;
   let shared = 0;
-  let total = 0;
+  let whole = 0;
   for (const edge of candidate.edgeIds) {
     const length = graph.edgeDistancesMeters[edge] * scale;
-    total += length;
-    if (used.has(edge)) shared += length;
+    whole += length;
+    if (used.has(roadOf(graph, edge))) shared += length;
   }
-  // A route made entirely of the partial edges either end snaps to has no
-  // edges to compare; treating it as wholly shared keeps a near-duplicate out.
+  const ends = [candidate.originSnap, candidate.destinationSnap].filter((snap) => snap.edge >= 0);
+  const partial = Math.max(0, candidate.distanceMeters - whole);
+  for (const snap of ends) {
+    if (used.has(roadOf(graph, snap.edge))) shared += partial / ends.length;
+  }
+  const total = whole + partial;
+  // A route with no length at all cannot be told apart from anything, and
+  // treating it as wholly shared keeps a duplicate out rather than in.
   return total > 0 ? shared / total : 1;
 }
 
@@ -79,13 +146,14 @@ export function routeAlternatives(
   preference: RoutePreference = "fastest",
   options: AlternativeRoutesOptions = {},
 ): RouteResult[] {
+  checkOptions(options);
   const { count, maxStretch, maxSharing, penaltyFactor } = { ...DEFAULTS, ...options };
   const best = route(graph, from, to, preference, options);
   if (count <= 1) return [best];
 
   const chosen = [best];
   const ceiling = costOfRoute(best, preference) * maxStretch;
-  const used = new Set(best.edgeIds);
+  const used = roadsOf(graph, best);
   const penalties = new Map<number, number>();
   const penalise = (edges: number[]) => {
     for (const edge of edges) penalties.set(edge, (penalties.get(edge) ?? 1) * penaltyFactor);
@@ -111,7 +179,13 @@ export function routeAlternatives(
     if (costOfRoute(candidate, preference) > ceiling) continue;
     if (sharedFraction(graph, candidate, used) > maxSharing) continue;
     chosen.push(candidate);
-    for (const edge of candidate.edgeIds) used.add(edge);
+    for (const road of roadsOf(graph, candidate)) used.add(road);
   }
-  return chosen;
+  // Candidates are found in whatever order the penalties drove the search,
+  // which is not the order they would be driven in. The best route is the
+  // best by construction and stays first; the rest are put in the order a
+  // reader would compare them, by what they really cost rather than by what
+  // the search was told to believe they cost.
+  const rest = chosen.slice(1).sort((left, right) => costOfRoute(left, preference) - costOfRoute(right, preference));
+  return [best, ...rest];
 }

@@ -6,6 +6,9 @@
  */
 
 import { ConditionKind } from "./conditional";
+import { parseMaxSpeedKph } from "./speed";
+
+export { parseMaxSpeedKph };
 
 export type OsmTags = Record<string, string | undefined>;
 
@@ -210,18 +213,7 @@ function clampSpeed(value: number) {
  * `none`, `signals` and `variable` included — so the caller can fall back to a
  * class default instead of inventing a country-specific table.
  */
-export function parseMaxSpeedKph(value: string | undefined): number | null {
-  if (!value) return null;
-  const text = value.trim().toLowerCase();
-  if (text === "walk") return 7;
-  const match = /^(\d+(?:\.\d+)?)\s*(mph|km\/h|kmh|kph|knots)?$/.exec(text);
-  if (!match) return null;
-  const amount = Number(match[1]);
-  if (!Number.isFinite(amount) || amount <= 0) return null;
-  if (match[2] === "mph") return amount * 1.609344;
-  if (match[2] === "knots") return amount * 1.852;
-  return amount;
-}
+
 
 /** Values that are not a measurement: a sign exists, or does not, but neither states a number. */
 const UNMEASURED = new Set(["default", "below_default", "none", "unsigned", "no_sign", "no", "yes", "unknown"]);

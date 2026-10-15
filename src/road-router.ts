@@ -179,9 +179,13 @@ export class RoadRouter {
     const withVehicle = { vehicle: this.vehicle, ...options };
     if (this.graph) return routeAlternatives(this.graph, from, to, preference, withVehicle);
     if (isBundle(this.loader)) {
-      const { best, graph, widen, reachFor } = await this.bestOverBundle(this.loader, from, to, preference, options);
+      const { best, graphNow, widen, reachFor } = await this.bestOverBundle(this.loader, from, to, preference, options);
+      // Widening replaces the stitched graph, so the search has to be given
+      // the one that exists now. Reading it before the widening would search
+      // the narrower corridor and throw away the tiles just downloaded,
+      // losing exactly the alternatives they were fetched for.
       await widen(reachFor(best) * (options.maxStretch ?? DEFAULT_MAX_STRETCH));
-      return routeAlternatives(graph, from, to, preference, withVehicle);
+      return routeAlternatives(graphNow(), from, to, preference, withVehicle);
     }
     const loader = this.loader!;
     return routeAlternatives(await loader.loadForRoute(from, to), from, to, preference, withVehicle);
@@ -242,15 +246,15 @@ export class RoadRouter {
     // Phase 2: confirm it against every tile that could still beat it. The
     // bound makes each pass cheap, since anything no better is abandoned early.
     for (let pass = 0; pass < MAX_CONFIRMATION_PASSES; pass += 1) {
-      if (!(await widen(reachFor(best)))) return { best, graph: graph!, widen, reachFor };
+      if (!(await widen(reachFor(best)))) return { best, graphNow: () => graph!, widen, reachFor };
       try {
         best = route(graph!, from, to, preference, { costBound: preference === "fastest" ? best.durationSeconds : best.distanceMeters, vehicle: this.vehicle, ...when });
       } catch (error) {
         if ((error as { code?: string }).code !== "NO_ROUTE") throw error;
-        return { best, graph: graph!, widen, reachFor }; // Nothing added beats what we have.
+        return { best, graphNow: () => graph!, widen, reachFor }; // Nothing added beats what we have.
       }
     }
-    return { best, graph: graph!, widen, reachFor };
+    return { best, graphNow: () => graph!, widen, reachFor };
   }
 
   private async routeOverLoader(loader: RouteLoader, from: Coordinate, to: Coordinate, preference: RoutePreference, when: DepartureOptions = {}) {
