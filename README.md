@@ -380,9 +380,14 @@ the figures, so an alternative's distance and duration are its own.
 
 Two routes count as the same road where they travel the same tarmac, measured
 by distance travelled rather than by edges in common. A road driven in the
-opposite direction is the same road; a junction two routes merely pass
-through costs no distance and so does not make them similar. The part-driven
-roads a route starts and finishes on count towards it as well.
+opposite direction is the same road. Two roads that merely join the same pair
+of junctions are not: a slip road beside the road it leaves, or a lane round
+the far side of a square, is a genuine second way there, and the compiled
+graph holds a great many of them — 12,015 such pairs in the Porto to Lisbon
+corridor alone. A junction two routes pass through costs no distance and so
+does not make them similar. The roads a route only part-drives at its two
+ends count for exactly what it drives of them, which
+`RouteSnap.travelledMeters` reports.
 
 **Fewer routes than you asked for is the normal answer.** A road network
 usually has one obvious way through, and returning a second route that is
@@ -918,9 +923,12 @@ What the bundled profiles read, and what they deliberately do not.
 | Surface, gradient and steps beyond a flat penalty | A cycling speed comes from the way class alone. `surface`, `smoothness` and elevation are not read, so a cobbled climb costs the same as smooth level tarmac. |
 | Untagged limits | A road stating no `maxheight` or `maxweight` is treated as open to any lorry. Absence of a tag is not a measurement. |
 | Axle load, trailer and hazmat rules | `maxaxleload`, `hazmat` and trailer-specific access are not read. |
+| Conditional restrictions at the time a road is reached | Every road is judged by the moment the journey starts, not by when it would be reached. See [Routing at a time of day](#routing-at-a-time-of-day). This is not time-dependent routing. |
 | Conditional restrictions without `departAt` | Read only when a route supplies a departure time; without one a time-limited restriction is treated as absent, as before. See [Routing at a time of day](#routing-at-a-time-of-day). |
 | Conditional turn restrictions | `restriction:conditional` on a relation is not read: a morning-peak no-left-turn is enforced at every hour. Only way tags are conditional. |
 | Conditions resting on weather, user group or purpose | `80 @ (wet)`, `no @ (disabled)` and a stay duration are parsed and counted but never acted on, leaving the road open. |
+| More than 65,536 distinct conditional values in one tile | The compile stops rather than dropping the surplus, which would turn a restricted road into an open one. Compile in smaller tiles with `--tile-size-km`. |
+| Temporary closures | Roadworks, events and incidents are not represented at all. A bundle is as current as the extract it was compiled from, and nothing in it changes afterwards. |
 | Reopening a road | Only closures are applied. `access=no` with `access:conditional=yes @ (...)` stays closed at every hour. |
 | Time zones | `departAt` is taken as the local time of the roads travelled; no conversion is done and no clock is consulted. |
 | Temporary closures | Roadworks, events and incidents are not modelled. A bundle is as current as the extract it was compiled from. |

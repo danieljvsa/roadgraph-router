@@ -45,6 +45,32 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A rule table too wide for its index stops the compile.** It used to drop
+  the surplus rows, which turned a restricted road into an unrestricted one
+  with nothing said. A tile holds up to 65,536 distinct conditional values;
+  past that the compile fails and names `--tile-size-km` as the way through.
+
+- **Two roads joining the same pair of junctions are two roads.** Telling
+  alternatives apart by their endpoints alone treated a slip road and the road
+  beside it as one, hiding a genuine second way there. The Porto to Lisbon
+  corridor holds 12,015 such pairs, none the same length as its twin, so the
+  length now separates them while staying equal for the two directions of one
+  road.
+
+- **Each end of a route counts what it actually drives.** The distance driven
+  on the part-roads a route begins and ends on was split evenly between the
+  two, which misreports overlap whenever one end joins its road near the far
+  junction. `RouteSnap.travelledMeters` now carries the real figure.
+
+- **A month selector is read with the window it governs.**
+  `no @ (Oct 22:00-06:00)` stopped at midnight on the thirty-first instead of
+  running to six on the first of November. `TravelTime` may now carry
+  `dayOfMonth`; without one the answer is unchanged, which is right on thirty
+  days in thirty-one.
+
+- **Alternative options are refused before anything is downloaded**, rather
+  than after a remote bundle has been asked for tiles.
+
 - **A window named with a day is read as one window.** `no @ (Fr 22:00-06:00)`
   was matched by asking "is it Friday?" and "is it between 22:00 and 06:00?"
   separately, which answered both ends of it backwards: it applied at two on
