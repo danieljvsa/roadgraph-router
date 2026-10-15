@@ -15,6 +15,7 @@ export {
 export { findNearestNode, route } from "./router";
 export type { RouteOptions } from "./router";
 export type { DepartureOptions } from "./road-router";
+export { routeAlternatives, type AlternativeRoutesOptions } from "./alternatives";
 export { snapToGraph } from "./snap";
 export { createEdgeSpatialIndex, edgePolyline, edgeSource, edgeSpatialIndexFor, nearbyEdgeIds } from "./edge-index";
 export { createSpatialIndex, withSpatialIndex } from "./spatial-index";

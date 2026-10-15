@@ -1,6 +1,7 @@
 import { createRouteGraphLoader, type RouteGraphLoader } from "./manifest";
 import { openRoadGraphBundle, type BundleTile, type RoadGraphBundle } from "./bundle";
 import { route, type RouteOptions } from "./router";
+import { DEFAULT_MAX_STRETCH, routeAlternatives, type AlternativeRoutesOptions } from "./alternatives";
 import { getRoutingProfile, getRoutingProfileById, maxSpeedMpsFor } from "./routing-profile";
 import { RouterError, type Coordinate, type RoadGraph, type RoutePreference, type RouteResult } from "./types";
 import { DEFAULT_VEHICLE_PRESET, resolveVehicle, type VehicleDimensions, type VehicleInput } from "./vehicle";
@@ -165,7 +166,38 @@ export class RoadRouter {
    * graph contains. Because the test measures ground distance rather than
    * counting neighbours, the answer does not depend on the tile size.
    */
+  /**
+   * Several ways there, best first, with up to `count - 1` alternatives after
+   * it. Fewer than asked for means the network held nothing else worth
+   * offering, which is the usual answer where there is one obvious way.
+   *
+   * Over a bundle this downloads a wider corridor than a single route needs:
+   * an alternative may be worse than the best by as much as `maxStretch`, and
+   * the tiles holding it lie outside the corridor that proved the best route.
+   */
+  async routeAlternatives(from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest", options: AlternativeRoutesOptions = {}): Promise<RouteResult[]> {
+    const withVehicle = { vehicle: this.vehicle, ...options };
+    if (this.graph) return routeAlternatives(this.graph, from, to, preference, withVehicle);
+    if (isBundle(this.loader)) {
+      const { best, graph, widen, reachFor } = await this.bestOverBundle(this.loader, from, to, preference, options);
+      await widen(reachFor(best) * (options.maxStretch ?? DEFAULT_MAX_STRETCH));
+      return routeAlternatives(graph, from, to, preference, withVehicle);
+    }
+    const loader = this.loader!;
+    return routeAlternatives(await loader.loadForRoute(from, to), from, to, preference, withVehicle);
+  }
+
   private async routeOverBundle(bundle: RoadGraphBundle, from: Coordinate, to: Coordinate, preference: RoutePreference, when: DepartureOptions = {}) {
+    return (await this.bestOverBundle(bundle, from, to, preference, when)).best;
+  }
+
+  /**
+   * The same corridor walk, stopping with the graph it settled on as well as
+   * the route. Alternatives need the graph, and need to be able to widen it
+   * once more: a second route may be worse than the best by more than the
+   * corridor was ever sized to hold.
+   */
+  private async bestOverBundle(bundle: RoadGraphBundle, from: Coordinate, to: Coordinate, preference: RoutePreference, when: DepartureOptions = {}) {
     const straightLine = haversineMeters(from, to);
     const ceiling = straightLine * (this.options.maxDetourFactor ?? Infinity);
     // How far a given duration can reach depends on the vehicle. Sizing a
@@ -210,15 +242,15 @@ export class RoadRouter {
     // Phase 2: confirm it against every tile that could still beat it. The
     // bound makes each pass cheap, since anything no better is abandoned early.
     for (let pass = 0; pass < MAX_CONFIRMATION_PASSES; pass += 1) {
-      if (!(await widen(reachFor(best)))) return best;
+      if (!(await widen(reachFor(best)))) return { best, graph: graph!, widen, reachFor };
       try {
         best = route(graph!, from, to, preference, { costBound: preference === "fastest" ? best.durationSeconds : best.distanceMeters, vehicle: this.vehicle, ...when });
       } catch (error) {
         if ((error as { code?: string }).code !== "NO_ROUTE") throw error;
-        return best; // Nothing in the added tiles beats what we already have.
+        return { best, graph: graph!, widen, reachFor }; // Nothing added beats what we have.
       }
     }
-    return best;
+    return { best, graph: graph!, widen, reachFor };
   }
 
   private async routeOverLoader(loader: RouteLoader, from: Coordinate, to: Coordinate, preference: RoutePreference, when: DepartureOptions = {}) {

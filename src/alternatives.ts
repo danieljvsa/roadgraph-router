@@ -41,7 +41,10 @@ export type AlternativeRoutesOptions = Omit<RouteOptions, "costPenalties" | "cos
   penaltyFactor?: number;
 };
 
-const DEFAULTS = { count: 3, maxStretch: 1.4, maxSharing: 0.75, penaltyFactor: 2 };
+/** Exported so a bundle can widen its corridor by as much as a route may stretch. */
+export const DEFAULT_MAX_STRETCH = 1.4;
+
+const DEFAULTS = { count: 3, maxStretch: DEFAULT_MAX_STRETCH, maxSharing: 0.75, penaltyFactor: 2 };
 
 const costOfRoute = (result: RouteResult, preference: RoutePreference) =>
   preference === "fastest" ? result.durationSeconds : result.distanceMeters;

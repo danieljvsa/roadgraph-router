@@ -313,6 +313,53 @@ break the guarantee that the route found is the best one.
 - **Turn restriction relations are not conditional.** See the list in
   [What a route here does and does not mean](#what-a-route-here-does-and-does-not-mean).
 
+## More than one way there
+
+`routeAlternatives` returns several routes, best first, for offering a choice
+rather than a single answer.
+
+```js
+const routes = await router.routeAlternatives(from, to, "fastest", { count: 3 });
+// routes[0] is exactly what route() would have returned.
+```
+
+The method is the straightforward one: find the best route, make the roads it
+used dearer to the search than they really are, and search again. A road that
+is the only sensible way through survives the penalty and is used again; one
+that was merely convenient gives way to its neighbour. **The penalty never
+reaches the answer** — every route is reported at the graph's own cost, so an
+alternative's distance and duration are what it would really take.
+
+Candidates are filtered rather than trusted. One that is much worse than the
+best, or that is mostly the same road, is not an alternative anybody wants:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `count` | 3 | How many routes to return at most, the best one included. |
+| `maxStretch` | 1.4 | How much worse than the best an alternative may be. |
+| `maxSharing` | 0.75 | How much of the routes already offered it may reuse, by distance. |
+| `penaltyFactor` | 2 | How much dearer a road already used is made to look. |
+
+**Fewer routes than you asked for is the normal answer.** A road network
+usually has one obvious way through, and returning a second route that is
+three-quarters the same road, or an hour longer, would be worse than
+returning one. `routeAlternatives` always returns at least the best route, and
+raises whatever `route` would raise when there is none.
+
+Alternatives cost roughly one search each. Measured on the Portugal bundle,
+Porto to Lisbon returned three routes — 312.0 km, 319.0 km and 350.5 km — in
+3.4 s against 2.5 s for the single route, downloading 3.0 MB more than the
+29.2 MB the first route needed. A short urban route in Lisbon returned two in
+79 ms with nothing further to download.
+
+Over a bundle this deliberately downloads a wider corridor than one route
+needs: an alternative may be worse than the best by as much as `maxStretch`,
+and the tiles holding it lie outside the corridor that proved the best route.
+
+Everything a single route obeys, these obey: access, turn restrictions,
+barriers, a lorry's dimensions, and conditional restrictions when you pass a
+departure time.
+
 ## Turn restrictions
 
 The compiler reads OSM `type=restriction` relations and the routing graph
@@ -718,6 +765,7 @@ What the bundled profiles read, and what they deliberately do not.
 | Lorry limits | `maxheight`, `maxwidth`, `maxlength`, `maxweight`, each with `:forward`, `:backward` and `:hgv` forms, plus `maxheight:physical` and `maxwidth:physical`; metric and feet-and-inches |
 | Barriers | `barrier` on a node, with `locked` and the access ladder; a bollard stops a car, a stile stops everything but walking, a gate is open unless it says otherwise |
 | Turn restrictions | `no_left_turn`, `no_right_turn`, `no_straight_on`, `no_u_turn`, `no_entry`, `no_exit`, `only_left_turn`, `only_right_turn`, `only_straight_on`, `only_u_turn` |
+| Alternative routes | `routeAlternatives` returns several routes, best first, filtered by how much worse and how much the same they are |
 | Conditional restrictions | `*:conditional` on the access ladder and on `maxspeed`, applied when a route supplies `departAt`; time of day, weekday, month, public holiday and vehicle dimensions; last matching rule wins |
 | Restriction scope | `via` node and `via` way; `restriction:<mode>`, `restriction:motor_vehicle` and `restriction:vehicle` override the generic key; `except` listing one of this vehicle's modes drops the relation for that vehicle alone |
 
@@ -727,7 +775,6 @@ What the bundled profiles read, and what they deliberately do not.
 | --- | --- |
 | A one-way trap | Two points joined on the map but not reachable in the direction asked for — a one-way loop with no way back — still report no route. Snapping again cannot mend that, because both ends are already in the same piece of the network. |
 | Surface, gradient and steps beyond a flat penalty | A cycling speed comes from the way class alone. `surface`, `smoothness` and elevation are not read, so a cobbled climb costs the same as smooth level tarmac. |
-| Alternative routes | Not yet. `routeAlternatives` is the next thing in 0.3.0, now that conditional restrictions are read. |
 | Untagged limits | A road stating no `maxheight` or `maxweight` is treated as open to any lorry. Absence of a tag is not a measurement. |
 | Axle load, trailer and hazmat rules | `maxaxleload`, `hazmat` and trailer-specific access are not read. |
 | Conditional restrictions without `departAt` | Read only when a route supplies a departure time; without one a time-limited restriction is treated as absent, as before. See [Routing at a time of day](#routing-at-a-time-of-day). |

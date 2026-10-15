@@ -29,6 +29,20 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a conditional restriction, costing 14.8 kB — the bundle grew from 40.17 MB
   to 40.18 MB — and about 10 ms on a repeat long-distance route.
 
+- **Alternative routes.** `routeAlternatives(from, to, preference, { count })`
+  returns several routes, best first. It finds the best one, makes the roads
+  it used dearer to the search than they really are, and searches again; the
+  penalty steers the search and never reaches the answer, so every route is
+  reported at the graph's own cost. Candidates far worse than the best, or
+  mostly along the same road, are rejected rather than offered, so fewer
+  routes than asked for is the normal answer on a network with one obvious
+  way through.
+
+  Porto to Lisbon returned three routes — 312.0 km, 319.0 km and 350.5 km —
+  in 3.4 s against 2.5 s for the single route, downloading 3.0 MB beyond the
+  29.2 MB the first route needed. A short urban route returned two in 79 ms
+  with nothing further to download.
+
 - `edgesWithConditionalRestrictions` in the compile report, beside
   `edgesWithPhysicalLimits`, so a region's conditional data can be counted
   rather than assumed.
@@ -49,7 +63,6 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   by `unreadableConditions`, and then left to one side with the road open.
 - **`departAt` is the local time of the roads travelled.** No time-zone
   conversion is done and no clock is consulted.
-- Alternative routes are still to come in 0.3.0.
 
 ### Compatibility
 
