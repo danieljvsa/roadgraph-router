@@ -47,9 +47,6 @@ export const DEFAULT_MAX_STRETCH = 1.4;
 
 const DEFAULTS = { count: 3, maxStretch: DEFAULT_MAX_STRETCH, maxSharing: 0.75, penaltyFactor: 2 };
 
-/** Wider than any graph has nodes, so a road's two ends make one number. */
-const ROAD_KEY_STRIDE = 2 ** 26;
-
 /**
  * More routes than this is not a choice but a list, and each one costs a
  * search over the whole corridor. A caller wanting dozens wants something
@@ -57,8 +54,14 @@ const ROAD_KEY_STRIDE = 2 ** 26;
  */
 const MOST_ROUTES = 10;
 
-/** Rejects options that would make the search unbounded or meaningless. */
-function checkOptions(options: AlternativeRoutesOptions) {
+/**
+ * Rejects options that would make the search unbounded or meaningless.
+ *
+ * Exported so the public entry point can refuse them before it downloads
+ * anything: a caller who passed `count: NaN` should be told so, not billed
+ * for a corridor first.
+ */
+export function checkAlternativeOptions(options: AlternativeRoutesOptions) {
   const whole = (name: string, value: number) => {
     if (!Number.isInteger(value)) throw new RangeError(`routeAlternatives: ${name} must be a whole number, not ${value}.`);
   };
@@ -81,18 +84,31 @@ const costOfRoute = (result: RouteResult, preference: RoutePreference) =>
  *
  * A two-way road is two directed edges with different numbers, and a route
  * that comes back along one is on the same tarmac as a route that went up the
- * other. Comparing edge numbers would call those two routes different; naming
- * the road by its endpoints, in a fixed order, does not.
+ * other, so an edge cannot name itself.
+ *
+ * Its two ends are not enough either. Two different roads often join the same
+ * pair of junctions — a slip road beside the road it leaves, a lane round the
+ * far side of a square — and calling those one road would hide a genuine
+ * alternative. In the Porto to Lisbon corridor alone there are 12,015 such
+ * pairs, and not one of them is the same length as its twin, so the length
+ * tells them apart while staying equal for the two directions of one road.
+ *
+ * The key is a string rather than arithmetic on node numbers: a graph with
+ * more nodes than a packed number can hold would otherwise fold two roads
+ * onto one key without anything saying so.
  */
 function roadOf(graph: RoadGraph, edge: number) {
   const source = edgeSource(graph, edge);
   const target = graph.edgeTargets[edge];
-  return source < target ? source * ROAD_KEY_STRIDE + target : target * ROAD_KEY_STRIDE + source;
+  const ends = source < target ? `${source}:${target}` : `${target}:${source}`;
+  // Rounded to the metre, which both directions of one road agree on and
+  // which quantisation keeps stable.
+  return `${ends}:${Math.round(graph.edgeDistancesMeters[edge] * (graph.edgeDistanceScale ?? 1))}`;
 }
 
 /** Every stretch of road a route drives, the ends it only part-drives included. */
 function roadsOf(graph: RoadGraph, route: RouteResult) {
-  const roads = new Set<number>();
+  const roads = new Set<string>();
   for (const edge of route.edgeIds) roads.add(roadOf(graph, edge));
   for (const snap of [route.originSnap, route.destinationSnap]) {
     if (snap.edge >= 0) roads.add(roadOf(graph, snap.edge));
@@ -111,21 +127,25 @@ function roadsOf(graph: RoadGraph, route: RouteResult) {
  * evenly between the two ends, since a result says which road each end sits
  * on but not how far along it.
  */
-function sharedFraction(graph: RoadGraph, candidate: RouteResult, used: Set<number>) {
+function sharedFraction(graph: RoadGraph, candidate: RouteResult, used: Set<string>) {
   const scale = graph.edgeDistanceScale ?? 1;
   let shared = 0;
-  let whole = 0;
+  let total = 0;
   for (const edge of candidate.edgeIds) {
     const length = graph.edgeDistancesMeters[edge] * scale;
-    whole += length;
+    total += length;
     if (used.has(roadOf(graph, edge))) shared += length;
   }
-  const ends = [candidate.originSnap, candidate.destinationSnap].filter((snap) => snap.edge >= 0);
-  const partial = Math.max(0, candidate.distanceMeters - whole);
-  for (const snap of ends) {
-    if (used.has(roadOf(graph, snap.edge))) shared += partial / ends.length;
+  // Each end contributes what it actually drives of the road it sits on,
+  // which the route reports. Splitting the two ends' total evenly between
+  // them, as this once did, is wrong whenever one end joins its road near
+  // the far junction and the other a few metres from its own.
+  for (const snap of [candidate.originSnap, candidate.destinationSnap]) {
+    if (snap.edge < 0) continue;
+    const travelled = snap.travelledMeters ?? 0;
+    total += travelled;
+    if (used.has(roadOf(graph, snap.edge))) shared += travelled;
   }
-  const total = whole + partial;
   // A route with no length at all cannot be told apart from anything, and
   // treating it as wholly shared keeps a duplicate out rather than in.
   return total > 0 ? shared / total : 1;
@@ -146,7 +166,7 @@ export function routeAlternatives(
   preference: RoutePreference = "fastest",
   options: AlternativeRoutesOptions = {},
 ): RouteResult[] {
-  checkOptions(options);
+  checkAlternativeOptions(options);
   const { count, maxStretch, maxSharing, penaltyFactor } = { ...DEFAULTS, ...options };
   const best = route(graph, from, to, preference, options);
   if (count <= 1) return [best];

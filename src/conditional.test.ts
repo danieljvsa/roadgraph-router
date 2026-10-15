@@ -292,3 +292,62 @@ describe("times that are not times", () => {
     expect(unreadable("no @ (07:60-19:00)")).toBe(true);
   });
 });
+
+describe("a window that runs past the end of a month", () => {
+  // The selector applies to the day a span begins on, so an October evening
+  // rule runs on into the first of November.
+  const october = "no @ (Oct 22:00-06:00)";
+  const inOctober = { weekday: 2, month: 10, dayOfMonth: 15 };
+
+  it("holds on an ordinary October night", () => {
+    expect(valueAt(october, { ...inOctober, minutes: 23 * 60 })).toBe("no");
+    expect(valueAt(october, { ...inOctober, minutes: 2 * 60 })).toBe("no");
+  });
+
+  it("holds into the morning of the first of November", () => {
+    expect(valueAt(october, { weekday: 3, month: 11, dayOfMonth: 1, minutes: 2 * 60 })).toBe("no");
+  });
+
+  it("stops once that morning is over", () => {
+    expect(valueAt(october, { weekday: 3, month: 11, dayOfMonth: 1, minutes: 7 * 60 })).toBeNull();
+  });
+
+  it("does not reach any later November night", () => {
+    expect(valueAt(october, { weekday: 3, month: 11, dayOfMonth: 2, minutes: 2 * 60 })).toBeNull();
+    expect(valueAt(october, { weekday: 3, month: 11, dayOfMonth: 15, minutes: 23 * 60 })).toBeNull();
+  });
+
+  it("carries across the end of a year", () => {
+    const december = "no @ (Dec 22:00-06:00)";
+    expect(valueAt(december, { weekday: 3, month: 1, dayOfMonth: 1, minutes: 2 * 60 })).toBe("no");
+    expect(valueAt(december, { weekday: 3, month: 1, dayOfMonth: 2, minutes: 2 * 60 })).toBeNull();
+  });
+
+  it("treats a missing day of the month as a day that is not the first", () => {
+    // Older callers built a travel time without one; they keep the answer
+    // they always had, which is right on thirty days in thirty-one.
+    expect(valueAt(october, { weekday: 3, month: 11, minutes: 2 * 60 })).toBeNull();
+    expect(valueAt(october, { weekday: 3, month: 10, minutes: 2 * 60 })).toBe("no");
+  });
+
+  it("applies a month and a weekday and a time together", () => {
+    const tag = "no @ (Oct Fr 22:00-06:00)";
+    // Friday night in October.
+    expect(valueAt(tag, { weekday: 4, month: 10, dayOfMonth: 17, minutes: 23 * 60 })).toBe("no");
+    // The Saturday morning it runs into.
+    expect(valueAt(tag, { weekday: 5, month: 10, dayOfMonth: 18, minutes: 2 * 60 })).toBe("no");
+    // The same hours on a Wednesday, or in November.
+    expect(valueAt(tag, { weekday: 2, month: 10, dayOfMonth: 15, minutes: 23 * 60 })).toBeNull();
+    expect(valueAt(tag, { weekday: 4, month: 11, dayOfMonth: 21, minutes: 23 * 60 })).toBeNull();
+  });
+
+  it("leaves a rule with no day or month alone", () => {
+    expect(valueAt("no @ (22:00-06:00)", { weekday: 3, month: 11, dayOfMonth: 1, minutes: 2 * 60 })).toBe("no");
+    expect(valueAt("no @ (22:00-06:00)", { weekday: 3, month: 6, dayOfMonth: 9, minutes: 12 * 60 })).toBeNull();
+  });
+
+  it("reads the day of the month off a date", () => {
+    expect(travelTimeFrom(new Date(2026, 10, 1, 2, 0)).dayOfMonth).toBe(1);
+    expect(travelTimeFrom(new Date(2026, 10, 1, 2, 0)).month).toBe(11);
+  });
+});

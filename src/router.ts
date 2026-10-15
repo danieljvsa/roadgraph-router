@@ -347,10 +347,10 @@ function projectionOf(snap: GraphSnap, edge: number) {
   return snap.kind === "edge" ? snap.projections.find((projection) => projection.edge === edge) : undefined;
 }
 
-function snapSummary(snap: GraphSnap): RouteSnap {
+function snapSummary(snap: GraphSnap, travelledMeters = 0): RouteSnap {
   return snap.kind === "node"
-    ? { node: snap.node, edge: -1, point: snap.point, distanceMeters: snap.distanceMeters }
-    : { node: -1, edge: snap.projections[0].edge, point: snap.point, distanceMeters: snap.distanceMeters };
+    ? { node: snap.node, edge: -1, point: snap.point, distanceMeters: snap.distanceMeters, travelledMeters: 0 }
+    : { node: -1, edge: snap.projections[0].edge, point: snap.point, distanceMeters: snap.distanceMeters, travelledMeters };
 }
 
 /**
@@ -619,12 +619,18 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   let edgeIds: number[] = [];
   let distanceMeters = 0;
   let durationSeconds = 0;
+  // How much of the road each end sits on the route actually drives.
+  let travelledAtOrigin = 0;
+  let travelledAtDestination = 0;
 
   if (direct && direct.cost <= searchCost) {
     for (const point of geometryBetween(direct.origin, direct.destination)) push(point);
     const span = partial(direct.origin, direct.destination.fraction - direct.origin.fraction);
     distanceMeters = span.distance;
     durationSeconds = span.duration;
+    // One road, driven once: the whole of it is recorded at the origin so
+    // that the two ends do not add up to twice the journey.
+    travelledAtOrigin = span.distance;
   } else {
     const { edges, finisher, seed } = outcome!;
     edgeIds = edges;
@@ -635,6 +641,7 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
       const span = partial(entry, 1 - entry.fraction);
       distanceMeters += span.distance;
       durationSeconds += span.duration;
+      travelledAtOrigin = span.distance;
       nodeIds.push(entry.target);
       push(coordinateFor(graph, entry.target));
     } else {
@@ -661,6 +668,7 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
       const span = partial(exit, exit.fraction);
       distanceMeters += span.distance;
       durationSeconds += span.duration;
+      travelledAtDestination = span.distance;
     }
   }
 
@@ -669,8 +677,8 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     edgeIds,
     distanceMeters,
     durationSeconds,
-    originSnap: snapSummary(originSnap),
-    destinationSnap: snapSummary(destinationSnap),
+    originSnap: snapSummary(originSnap, travelledAtOrigin),
+    destinationSnap: snapSummary(destinationSnap, travelledAtDestination),
     geometry: { type: "LineString", coordinates },
   };
 }

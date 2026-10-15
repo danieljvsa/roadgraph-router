@@ -102,6 +102,14 @@ export interface RouteSnap {
   point: Coordinate;
   /** How far the requested coordinate was from that road. */
   distanceMeters: number;
+  /**
+   * How far the route actually travels along that road, for an end that
+   * begins or finishes part-way along one. Zero where the end sits on a
+   * junction, and zero at the destination of a route that never leaves a
+   * single road, whose whole length is reported at the origin instead so
+   * that adding the two up gives the route and not twice the route.
+   */
+  travelledMeters?: number;
 }
 
 export interface RouteResult {

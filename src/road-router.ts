@@ -1,7 +1,7 @@
 import { createRouteGraphLoader, type RouteGraphLoader } from "./manifest";
 import { openRoadGraphBundle, type BundleTile, type RoadGraphBundle } from "./bundle";
 import { route, type RouteOptions } from "./router";
-import { DEFAULT_MAX_STRETCH, routeAlternatives, type AlternativeRoutesOptions } from "./alternatives";
+import { DEFAULT_MAX_STRETCH, checkAlternativeOptions, routeAlternatives, type AlternativeRoutesOptions } from "./alternatives";
 import { getRoutingProfile, getRoutingProfileById, maxSpeedMpsFor } from "./routing-profile";
 import { RouterError, type Coordinate, type RoadGraph, type RoutePreference, type RouteResult } from "./types";
 import { DEFAULT_VEHICLE_PRESET, resolveVehicle, type VehicleDimensions, type VehicleInput } from "./vehicle";
@@ -176,6 +176,10 @@ export class RoadRouter {
    * the tiles holding it lie outside the corridor that proved the best route.
    */
   async routeAlternatives(from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest", options: AlternativeRoutesOptions = {}): Promise<RouteResult[]> {
+    // Checked here, before a single byte is fetched. The search checks them
+    // too, but by the time it runs a remote bundle has already been asked for
+    // tiles that an impossible `count` was never going to use.
+    checkAlternativeOptions(options);
     const withVehicle = { vehicle: this.vehicle, ...options };
     if (this.graph) return routeAlternatives(this.graph, from, to, preference, withVehicle);
     if (isBundle(this.loader)) {

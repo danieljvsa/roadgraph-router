@@ -21,8 +21,11 @@ import type { EdgeConditions, RoadGraph } from "./types";
 import { accessMaskFor, edgeAllowed } from "./access";
 import { parseMaxSpeedKph } from "./speed";
 
-/** The widest rule table the 16-bit stored index can name. */
-export const MAX_STORED_VALUES = 65535;
+/**
+ * How many distinct conditional values one table can hold. The stored index
+ * is sixteen bits wide, so the values are numbered 0 to 65535.
+ */
+export const MAX_STORED_VALUES = 65536;
 
 /** When a journey passes, in the local time of the road it passes on. */
 export type TravelTime = {
@@ -32,6 +35,13 @@ export type TravelTime = {
   minutes: number;
   /** 1 to 12, for a seasonal rule. */
   month: number;
+  /**
+   * The day of the month, 1 to 31. Only a span running past midnight needs
+   * it, to know whether the morning it ends on began in the month before.
+   * Leaving it out treats such a morning as belonging to the current month,
+   * which is right on every day but the first.
+   */
+  dayOfMonth?: number;
   /** Whether it is a public holiday there, which only a caller can know. */
   publicHoliday?: boolean;
 };
@@ -196,24 +206,44 @@ const withinSpan = (minutes: number, span: MinuteSpan) => span.from <= span.to
 
 const YESTERDAY = (weekday: number) => (weekday + 6) % 7;
 
-const onDay = (weekday: number, days: Range[] | undefined) => !days?.length || days.some((range) => withinRange(weekday, range));
+/** The day before this one, as far as a rule's day and month selectors see it. */
+function dayBefore(when: TravelTime) {
+  // Only the first of a month belongs to the month before; every other
+  // morning began in the month it is in.
+  const rolledOver = when.dayOfMonth === 1;
+  return {
+    weekday: YESTERDAY(when.weekday),
+    month: rolledOver ? (when.month === 1 ? 12 : when.month - 1) : when.month,
+  };
+}
+
+/** Whether a rule's day-of-week and month selectors admit this calendar day. */
+function selects(condition: Condition, day: { weekday: number; month: number }) {
+  if (condition.days?.length && !condition.days.some((range) => withinRange(day.weekday, range))) return false;
+  if (condition.months?.length && !condition.months.some((range) => withinRange(day.month - 1, range))) return false;
+  return true;
+}
 
 /**
- * Whether the day and the time hold together.
+ * Whether the calendar day and the time hold together.
  *
  * They cannot be asked separately. `Fr 22:00-06:00` is one span that begins on
  * Friday evening and ends on Saturday morning, so two o'clock on Saturday is
  * inside it and two o'clock on Friday is not. Checking "is it Friday" and "is
  * it between 22:00 and 06:00" one at a time answers both of those backwards.
+ *
+ * The same holds for a month. `Oct 22:00-06:00` begins on an October evening,
+ * and the one that begins on the thirty-first runs on into November, so the
+ * morning half is judged by the day before rather than by the date it is.
  */
 function dayAndTimeHold(condition: Condition, when: TravelTime): boolean {
-  if (!condition.times?.length) return onDay(when.weekday, condition.days);
+  if (!condition.times?.length) return selects(condition, when);
   return condition.times.some((span) => {
-    if (span.from <= span.to) return onDay(when.weekday, condition.days) && withinSpan(when.minutes, span);
+    if (span.from <= span.to) return selects(condition, when) && withinSpan(when.minutes, span);
     // A span running past midnight: the evening half belongs to the day it
     // started on, the morning half to the day before.
-    if (when.minutes >= span.from) return onDay(when.weekday, condition.days);
-    if (when.minutes < span.to) return onDay(YESTERDAY(when.weekday), condition.days);
+    if (when.minutes >= span.from) return selects(condition, when);
+    if (when.minutes < span.to) return selects(condition, dayBefore(when));
     return false;
   });
 }
@@ -224,7 +254,6 @@ export function conditionHolds(condition: Condition, when: TravelTime, vehicle?:
   // the caller is expected to have counted it.
   if (condition.unreadable !== undefined) return false;
   if (condition.publicHoliday && !when.publicHoliday) return false;
-  if (condition.months?.length && !condition.months.some((range) => withinRange(when.month - 1, range))) return false;
   if (!dayAndTimeHold(condition, when)) return false;
   if (condition.vehicle?.length) {
     if (!vehicle) return false;
@@ -268,6 +297,7 @@ export function travelTimeFrom(date: Date, publicHoliday = false): TravelTime {
     weekday: (date.getDay() + 6) % 7,
     minutes: date.getHours() * 60 + date.getMinutes(),
     month: date.getMonth() + 1,
+    dayOfMonth: date.getDate(),
     publicHoliday,
   };
 }
@@ -287,11 +317,15 @@ export function packEdgeConditions(entries: { edge: number; kind: number; value:
   for (const row of rows) {
     let at = index.get(row.value);
     if (at === undefined) {
-      // The stored rule number is 16 bits wide. A region with more distinct
-      // conditional values than that loses the surplus rows entirely rather
-      // than keeping them pointed at whichever rule happened to be first,
-      // which would quietly apply the wrong restriction to a real road.
-      if (values.length > MAX_STORED_VALUES) continue;
+      // A road whose restriction was dropped reads as a road with no
+      // restriction, which is the one failure this table must not have. If
+      // the index cannot name another value, the compile stops and says so
+      // rather than handing back a graph that is quietly wrong.
+      if (values.length >= MAX_STORED_VALUES) {
+        throw new RangeError(
+          `A tile holds more than ${MAX_STORED_VALUES} distinct conditional restrictions, which is more than the stored index can name. Compile the region in smaller tiles with --tile-size-km.`,
+        );
+      }
       at = values.push(row.value) - 1;
       index.set(row.value, at);
     }

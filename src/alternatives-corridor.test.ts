@@ -101,3 +101,32 @@ describe("asking for a single route", () => {
     expect(one.stats.bytes).toBeLessThanOrEqual(plain.stats.bytes);
   });
 });
+
+describe("options that cannot work", () => {
+  const cases: [string, Record<string, number>][] = [
+    ["count: 0", { count: 0 }],
+    ["count: -1", { count: -1 }],
+    ["count: 1000000", { count: 1_000_000 }],
+    ["maxStretch: NaN", { maxStretch: Number.NaN }],
+    ["maxStretch: Infinity", { maxStretch: Number.POSITIVE_INFINITY }],
+    ["maxSharing: 1.5", { maxSharing: 1.5 }],
+    ["penaltyFactor: -2", { penaltyFactor: -2 }],
+  ];
+
+  it("refuses every bad option before fetching a single tile", async () => {
+    for (const [label, options] of cases) {
+      const live = rangeFetcher(await bundle());
+      const router = await RoadRouter.open("https://example.test/x.efrb", live.fetcher, { profile: "car" });
+      const afterOpening = live.stats.requests;
+      await expect(router.routeAlternatives(A, C, "fastest", options)).rejects.toThrow(RangeError);
+      expect(`${label}: ${live.stats.requests}`).toBe(`${label}: ${afterOpening}`);
+    }
+  });
+
+  it("still routes when the options are sound", async () => {
+    const live = rangeFetcher(await bundle());
+    const router = await RoadRouter.open("https://example.test/x.efrb", live.fetcher, { profile: "car" });
+    const routes = await router.routeAlternatives(A, C, "fastest", { count: 2, maxStretch: 1.4, maxSharing: 0.75, penaltyFactor: 2 });
+    expect(routes.length).toBeGreaterThan(0);
+  });
+});

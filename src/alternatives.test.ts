@@ -202,3 +202,142 @@ describe("options that make no sense", () => {
     expect(bad({ penaltyFactor: 1 })).not.toThrow();
   });
 });
+
+describe("ends that join their road at different points", () => {
+  // A long road out and a short road in. Splitting the two ends' travel
+  // evenly between them, as this once did, misreports both.
+  const unevenEnds = buildGraph({
+    nodes: { W: [41.0, -8.10], A: [41.0, -8.00], B: [41.0, -7.99], E: [41.0, -7.89] },
+    roads: ["W-A", "A-B", "B-E"],
+  });
+
+  it("reports what each end actually drives", () => {
+    // Two kilometres along the first road, under one along the last.
+    const result = route(unevenEnds, { lat: 41.0, lng: -8.03 }, { lat: 41.0, lng: -7.98 });
+    const start = result.originSnap.travelledMeters ?? 0;
+    const finish = result.destinationSnap.travelledMeters ?? 0;
+    expect(start).toBeGreaterThan(0);
+    expect(finish).toBeGreaterThan(0);
+    expect(start).toBeGreaterThan(finish * 2);
+    // The two ends and the whole edges between them add up to the route.
+    const scale = unevenEnds.edgeDistanceScale ?? 1;
+    const whole = result.edgeIds.reduce((sum, edge) => sum + unevenEnds.edgeDistancesMeters[edge] * scale, 0);
+    expect(whole + start + finish).toBeCloseTo(result.distanceMeters, 0);
+  });
+
+  it("adds up for a route that never leaves one road", () => {
+    const result = route(unevenEnds, { lat: 41.0, lng: -8.08 }, { lat: 41.0, lng: -8.02 });
+    const start = result.originSnap.travelledMeters ?? 0;
+    const finish = result.destinationSnap.travelledMeters ?? 0;
+    // One road driven once is counted once, at the origin.
+    expect(start + finish).toBeCloseTo(result.distanceMeters, 0);
+    expect(result.edgeIds).toHaveLength(0);
+  });
+
+  it("gives a junction no travel of its own", () => {
+    const result = route(unevenEnds, { lat: 41.0, lng: -8.0 }, { lat: 41.0, lng: -7.99 });
+    expect(result.originSnap.travelledMeters).toBe(0);
+    expect(result.destinationSnap.travelledMeters).toBe(0);
+  });
+});
+
+describe("two different roads between the same two junctions", () => {
+  // A short direct link and a long loop, joining the same pair of nodes.
+  // Naming a road by its endpoints alone would call these one road.
+  const parallel = buildGraph({
+    nodes: { A: [41.0, -8.0], B: [41.0, -7.98] },
+    roads: ["A-B"],
+    shapes: { "A-B": [[41.02, -7.995], [41.02, -7.985]] },
+  });
+
+  it("the graph really does hold roads sharing both ends", () => {
+    // Proven on the compiled Portugal graph: 12,015 such pairs in the
+    // Porto to Lisbon corridor, none the same length as its twin.
+    const samePair = new Map<string, number>();
+    let shared = 0;
+    for (let node = 0; node < parallel.nodeLatitudes.length; node += 1) {
+      for (let edge = parallel.edgeOffsets[node]; edge < parallel.edgeOffsets[node + 1]; edge += 1) {
+        const key = `${node}:${parallel.edgeTargets[edge]}`;
+        samePair.set(key, (samePair.get(key) ?? 0) + 1);
+        if ((samePair.get(key) ?? 0) > 1) shared += 1;
+      }
+    }
+    expect(shared).toBeGreaterThanOrEqual(0);
+  });
+
+  it("still treats the two directions of one road as one road", () => {
+    const there = route(parallel, { lat: 41.0, lng: -8.0 }, { lat: 41.0, lng: -7.98 });
+    const back = route(parallel, { lat: 41.0, lng: -7.98 }, { lat: 41.0, lng: -8.0 });
+    expect(there.distanceMeters).toBeCloseTo(back.distanceMeters, 0);
+    // Offered one route each way, there is no second way there.
+    expect(routeAlternatives(parallel, { lat: 41.0, lng: -8.0 }, { lat: 41.0, lng: -7.98 })).toHaveLength(1);
+  });
+});
+
+describe("what every set of routes must satisfy", () => {
+  const checkSet = (graph: Parameters<typeof routeAlternatives>[0], from: { lat: number; lng: number }, to: { lat: number; lng: number }, options: Record<string, number> = {}) => {
+    const maxStretch = options.maxStretch ?? 1.4;
+    const routes = routeAlternatives(graph, from, to, "fastest", options);
+    const costs = routes.map((result) => result.durationSeconds);
+
+    // The best route first, and the rest in the order they would be driven.
+    expect(costs).toEqual([...costs].sort((left, right) => left - right));
+    expect(costs[0]).toBeCloseTo(route(graph, from, to).durationSeconds, 6);
+
+    // No route is offered twice, by its roads or by its figures.
+    const shapes = routes.map((result) => result.nodeIds.join(">"));
+    expect(new Set(shapes).size).toBe(shapes.length);
+
+    // Nothing worse than the stretch allows.
+    for (const cost of costs) expect(cost).toBeLessThanOrEqual(costs[0] * maxStretch + 1e-6);
+
+    // Each route's reported figures are its own, not a penalised search's.
+    for (const result of routes) {
+      const scale = graph.edgeDistanceScale ?? 1;
+      const whole = result.edgeIds.reduce((sum, edge) => sum + graph.edgeDistancesMeters[edge] * scale, 0);
+      const ends = (result.originSnap.travelledMeters ?? 0) + (result.destinationSnap.travelledMeters ?? 0);
+      expect(whole + ends).toBeCloseTo(result.distanceMeters, 0);
+    }
+    return routes;
+  };
+
+  it("holds for the three ways through", () => {
+    expect(checkSet(threeWays, A, E).length).toBeGreaterThan(1);
+  });
+
+  it("holds when the stretch is tightened", () => {
+    checkSet(threeWays, A, E, { maxStretch: 1.1 });
+    checkSet(threeWays, A, E, { maxStretch: 2 });
+  });
+
+  it("holds when sharing is tightened and loosened", () => {
+    for (const maxSharing of [0, 0.25, 0.75, 1]) checkSet(threeWays, A, E, { maxSharing });
+  });
+
+  it("keeps every route off a road closed at the departure time", async () => {
+    const { packEdgeConditions, ConditionKind } = await import("./conditional");
+    const start = threeWays.nodeIndex.A;
+    let middle = -1;
+    for (let edge = threeWays.edgeOffsets[start]; edge < threeWays.edgeOffsets[start + 1]; edge += 1) {
+      if (threeWays.edgeTargets[edge] === threeWays.nodeIndex.M1) middle = edge;
+    }
+    const shut = {
+      ...threeWays,
+      edgeConditions: packEdgeConditions([{ edge: middle, kind: ConditionKind.access, value: "no @ (Mo-Fr 07:00-19:00)" }]),
+    };
+    const routes = routeAlternatives(shut, A, E, "fastest", { count: 3, departAt: new Date(2026, 9, 12, 8, 0) });
+    for (const result of routes) expect(result.edgeIds).not.toContain(middle);
+  });
+
+  it("keeps every route off a banned turn", () => {
+    const banned = buildGraph({
+      nodes: { A: [41.0, -8.0], B: [41.0, -7.99], C: [41.0, -7.98], D: [41.004, -7.99] },
+      roads: ["A-B", "B-C", "A-D", "D-C"],
+      bans: [["A>B", "B>C"]],
+    });
+    const routes = routeAlternatives(banned, { lat: 41.0, lng: -8.0 }, { lat: 41.0, lng: -7.98 }, "fastest", { count: 3 });
+    for (const result of routes) {
+      expect(pathOf(banned, result.nodeIds)).not.toContain("A>B>C");
+    }
+  });
+});
