@@ -681,16 +681,25 @@ because there is less to decompress.
 Portugal compiled for car, truck and motorcycle, before and after the
 restrictions were read:
 
-| | Without | With | |
+Both compiled back to back on the same machine, so the two columns are
+comparable:
+
+| | 0.2.0 compiler | 0.3.0 compiler | |
 | --- | --- | --- | --- |
 | Final EFRB | 40.17 MB | **40.18 MB** | +14.8 kB, or +0.04% |
-| Compile time | 7 min 46 s | 8 min 36 s | the tags are read in the pass already made |
-| Peak RSS | 1.64 GB | 1.47 GB | unchanged within run-to-run variation |
+| Compile time | 8 min 01 s | 8 min 05 s | +1% |
+| Peak RSS | 1.35 GB | 1.52 GB | +0.17 GB, holding the tag text |
 | Routing edges | 2,760,171 | 2,760,171 | identical graph |
 | Edges with a conditional restriction | 0 | **3,328** | |
 
-Asking for a departure time cost about 10 ms on a repeat Porto–Lisbon lorry
-route, 138 ms against 148 ms.
+A region whose roads carry no conditional restriction compiles to the same
+file as before, byte for byte: Monaco for a car is 26,177 bytes from either
+compiler.
+
+Asking for a departure time costs nothing measurable. Routing Porto to Lisbon
+by car, three runs each: 2,294 ms cold and 208 ms repeated without one,
+2,252 ms and 206 ms with one — a difference smaller than the spread between
+runs.
 
 The **Ponte 25 de Abril**, the bridge carrying the A2 into Lisbon, is tagged
 `hgv:conditional = no @ (05:00-02:00)`: lorries may use it for three hours a
@@ -711,6 +720,57 @@ Of Portugal's conditional values, the ones this library cannot answer are
 left alone rather than guessed at. 555 trunk and primary roads carry
 `maxspeed:conditional` values such as `90 @ sun`, which is not a condition
 OpenStreetMap defines; they keep their posted limit.
+
+### Against the earlier versions
+
+0.1.0, 0.2.0 and this release reading the same file — the car bundle 0.1.0
+published, 38.03 MB — so the comparison is of the engines rather than of
+formats that changed alongside them. Cold is a fresh reader; repeated is the
+same route asked for twice.
+
+| Journey | 0.1.0 | 0.2.0 | 0.3.0 |
+| --- | --- | --- | --- |
+| Opening the bundle | 1 ms | 1 ms | 1 ms |
+| Lisbon, across town | 245 / 14 ms | 289 / 8 ms | 290 / 9 ms |
+| Bragança, rural | 269 / 140 ms | 251 / 4 ms | 281 / 3 ms |
+| Porto to Lisbon | 2,715 / 2,104 ms | 1,991 / 281 ms | 1,976 / 284 ms |
+| Porto to Faro | 3,653 / 3,258 ms | 2,253 / 427 ms | 2,244 / 416 ms |
+| Braga to Évora | no route | no route | 6,176 / 3,166 ms |
+
+Every version that can read a bundle finds the same roads: 312.02 km from
+Porto to Lisbon and 553.20 km from Porto to Faro, on all three.
+
+0.2.0 is where the long routes improved, and the gain is almost entirely in
+asking twice: the corridor it has already stitched is kept, so a repeated
+Porto–Faro route went from 3.3 s to 0.4 s. **0.3.0 routes at the same speed as
+0.2.0** — the differences above are smaller than the spread between runs of
+the same binary.
+
+Braga to Évora is the exception, and it is not a slowdown: both earlier
+versions spent their time failing. 0.2.0 widened its corridor to the whole
+country over 7.9 s before reporting no route; 0.3.0 finishes on the nearest
+road it can reach in 2.3 s. A point genuinely off the network still fails
+about as fast as it always did, 810 ms against 866 ms.
+
+### What each version can read
+
+| | 0.1.0 bundle | 0.2.0 bundle | 0.3.0 bundle |
+| --- | --- | --- | --- |
+| 0.1.0 | yes | no | no |
+| 0.2.0 | yes | yes | no |
+| 0.3.0 | yes | yes | yes |
+
+A 0.2.0 reader opens a 0.3.0 bundle and then fails on the first tile whose
+roads carry a conditional restriction — the chunk is longer than it expects.
+A bundle without any reads as before.
+
+### What the package costs
+
+| | 0.1.0 | 0.2.0 | 0.3.0 |
+| --- | --- | --- | --- |
+| Tarball | 46.4 kB | 75.9 kB | 91.0 kB |
+| Unpacked | 182.8 kB | 289.3 kB | 342.1 kB |
+| Bundled for a browser, gzipped | 13.6 kB | 21.1 kB | 24.8 kB |
 
 ### Nothing routes differently
 

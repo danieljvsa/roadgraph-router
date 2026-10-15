@@ -84,8 +84,15 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`departAt` is the local time of the roads travelled.** No time-zone
   conversion is done and no clock is consulted.
 
-The browser build grew from 21.1 kB gzipped to 24.5 kB, measured the same way
-on both; importing only `RoadRouter` is 19.7 kB.
+Measured against the earlier releases on one machine: routing is as fast as
+0.2.0 — Porto to Lisbon 2,252 ms cold and 206 ms repeated, against 2,252 and
+208 — and the compiler is 1% slower back to back, 8 min 05 s against
+8 min 01 s, for 0.17 GB more memory. The browser build grew from 21.1 kB
+gzipped to 24.8 kB, and the published tarball from 75.9 kB to 91.0 kB.
+
+Braga to Évora is the one journey that changed materially, and it changed
+from failing to working: 0.2.0 spent 7.9 s widening its corridor before
+reporting no route, where this release finishes in 2.3 s.
 
 ### Compatibility
 
