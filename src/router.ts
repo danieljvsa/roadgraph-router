@@ -65,12 +65,13 @@ function searchContext(graph: RoadGraph, destinationPoint: Coordinate, preferenc
   const destinationLongitude = destinationPoint.lng;
   const toCost = preference === "fastest" ? 1 / maxSpeedMps : 1;
   return {
-    // A conditional speed limit only ever raises a duration, so the heuristic
+    // An overridden cost only ever exceeds the graph's own — a conditional
+    // limit slows an edge and a penalty makes it dearer — so the heuristic
     // built from the graph's fastest edge stays a lower bound and the search
-    // still returns the best route.
-    costOf: (edge: number) => preference === "fastest"
-      ? (slowed?.get(edge) ?? graph.edgeDurationsSeconds[edge] * durationScale)
-      : graph.edgeDistancesMeters[edge] * distanceScale,
+    // still returns the best route under the costs it was given.
+    costOf: (edge: number) => slowed?.get(edge) ?? (preference === "fastest"
+      ? graph.edgeDurationsSeconds[edge] * durationScale
+      : graph.edgeDistancesMeters[edge] * distanceScale),
     // Called once per relaxation, millions of times on a long route, so it
     // reads the coordinate arrays directly and avoids a haversine's four
     // trigonometric calls for a number that only has to be a lower bound.
@@ -377,7 +378,37 @@ export type RouteOptions = {
   departAt?: Date | TravelTime;
   /** Whether that day is a public holiday, which only a caller can know. */
   publicHoliday?: boolean;
+  /**
+   * Multipliers making certain edges dearer to the search than they really
+   * are, used to push a search away from a route already found. The route
+   * reported back is always priced at the graph's own cost, so a penalty
+   * changes which roads are chosen and never what they are said to cost.
+   */
+  costPenalties?: ReadonlyMap<number, number>;
 };
+
+/**
+ * The per-edge costs a search should use: the conditional slowdowns, with any
+ * penalty folded in on top. Absent both, the search reads the graph directly.
+ */
+function withPenalties(
+  graph: RoadGraph,
+  preference: RoutePreference,
+  slowed: Map<number, number> | undefined,
+  penalties: ReadonlyMap<number, number> | undefined,
+): Map<number, number> | undefined {
+  if (!penalties?.size) return slowed;
+  const distanceScale = graph.edgeDistanceScale ?? 1;
+  const durationScale = graph.edgeDurationScale ?? 1;
+  const costs = new Map(slowed);
+  for (const [edge, multiplier] of penalties) {
+    const base = costs.get(edge) ?? (preference === "fastest"
+      ? graph.edgeDurationsSeconds[edge] * durationScale
+      : graph.edgeDistancesMeters[edge] * distanceScale);
+    costs.set(edge, base * multiplier);
+  }
+  return costs;
+}
 
 /** Reads whichever form of departure time a caller supplied. */
 export function departureTime(options: Pick<RouteOptions, "departAt" | "publicHoliday">): TravelTime | undefined {
@@ -455,9 +486,12 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   const distanceScale = graph.edgeDistanceScale ?? 1;
   const durationScale = graph.edgeDurationScale ?? 1;
   const when = departureTime(options);
-  const slowed = preference === "fastest" && when ? conditionalDurations(graph, conditionsOf(graph), when, options.vehicle) : undefined;
+  const conditionallySlowed = preference === "fastest" && when ? conditionalDurations(graph, conditionsOf(graph), when, options.vehicle) : undefined;
+  // A penalty makes an edge dearer to the search without making it dearer in
+  // the answer: the distance and duration reported below are the real ones.
+  const slowed = withPenalties(graph, preference, conditionallySlowed, options.costPenalties);
   const costOf = (edge: number) => preference === "fastest"
-    ? (slowed?.get(edge) ?? graph.edgeDurationsSeconds[edge] * durationScale)
+    ? (conditionallySlowed?.get(edge) ?? graph.edgeDurationsSeconds[edge] * durationScale)
     : graph.edgeDistancesMeters[edge] * distanceScale;
 
   const seeds = seedsFor(originSnap, costOf);
@@ -529,9 +563,10 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     const scale = graph.coordinateScale ?? 1;
     for (const edge of edges) {
       distanceMeters += graph.edgeDistancesMeters[edge] * distanceScale;
-      // The same slowed duration the search planned with, so a route held up
-      // by a night speed limit is not reported at the daytime time.
-      durationSeconds += slowed?.get(edge) ?? graph.edgeDurationsSeconds[edge] * durationScale;
+      // The conditional slowdown the search planned with, so a route held up
+      // by a night speed limit is not reported at the daytime time. Never the
+      // search penalties, which are a way of steering and not a real cost.
+      durationSeconds += conditionallySlowed?.get(edge) ?? graph.edgeDurationsSeconds[edge] * durationScale;
       if (graph.edgeShapeOffsets && graph.edgeShapeLatitudes && graph.edgeShapeLongitudes) {
         for (let point = graph.edgeShapeOffsets[edge]; point < graph.edgeShapeOffsets[edge + 1]; point += 1) {
           coordinates.push([graph.edgeShapeLongitudes[point] / scale, graph.edgeShapeLatitudes[point] / scale]);

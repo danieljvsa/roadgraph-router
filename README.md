@@ -595,6 +595,42 @@ Downloads are roughly 35% smaller for short routes and 47% smaller for long
 ones, and graph load is *faster* than before despite the varint decoding,
 because there is less to decompress.
 
+### What conditional restrictions cost, and what they catch
+
+Portugal compiled for car, truck and motorcycle, before and after the
+restrictions were read:
+
+| | Without | With | |
+| --- | --- | --- | --- |
+| Final EFRB | 40.17 MB | **40.18 MB** | +14.8 kB, or +0.04% |
+| Compile time | 7 min 46 s | 8 min 36 s | the tags are read in the pass already made |
+| Peak RSS | 1.64 GB | 1.47 GB | unchanged within run-to-run variation |
+| Routing edges | 2,760,171 | 2,760,171 | identical graph |
+| Edges with a conditional restriction | 0 | **3,328** | |
+
+Asking for a departure time cost about 10 ms on a repeat Porto–Lisbon lorry
+route, 138 ms against 148 ms.
+
+The **Ponte 25 de Abril**, the bridge carrying the A2 into Lisbon, is tagged
+`hgv:conditional = no @ (05:00-02:00)`: lorries may use it for three hours a
+night. Routing Almada to Lisbon across it:
+
+| Vehicle | Departure | Distance | Duration | Crossing |
+| --- | --- | --- | --- | --- |
+| Car | any hour | 12.2 km | 12 min | Ponte 25 de Abril |
+| Truck | none given | 13.0 km | 14 min | Ponte 25 de Abril |
+| Truck | 10:00 | **63.4 km** | **51 min** | Ponte Vasco da Gama |
+| Truck | 03:00 | 13.0 km | 14 min | Ponte 25 de Abril |
+
+The lorry without a departure time takes a bridge it is banned from for
+twenty-one hours of the day. That is the gap this reads, and the 51-minute
+detour is what obeying the sign actually costs.
+
+Of Portugal's conditional values, the ones this library cannot answer are
+left alone rather than guessed at. 555 trunk and primary roads carry
+`maxspeed:conditional` values such as `90 @ sun`, which is not a condition
+OpenStreetMap defines; they keep their posted limit.
+
 ### Nothing routes differently
 
 `tools/compare-bundles.mjs` routes the same random pairs through two bundles

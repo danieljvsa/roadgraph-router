@@ -21,10 +21,13 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that span the new year and several windows in one rule. Where more than one
   rule matches, the last wins, which is what OpenStreetMap specifies.
 
-  Compiled on the Monaco extract, where Avenue Pasteur carries
-  `motorcycle:conditional = no @ (22:00-07:00)`, a motorcycle crossing it
-  travels 183 m at midday and detours 3081 m at 23:00, while a car is
-  unaffected at either hour.
+  Measured on Portugal, where the Ponte 25 de Abril carries
+  `hgv:conditional = no @ (05:00-02:00)`: routing Almada to Lisbon, a lorry
+  with no departure time takes the bridge in 13.0 km, at 03:00 takes it in
+  13.0 km, and at 10:00 detours 63.4 km over the Ponte Vasco da Gama. A car
+  crosses in 12.2 km at every hour. 3,328 of Portugal's 2,760,171 edges carry
+  a conditional restriction, costing 14.8 kB — the bundle grew from 40.17 MB
+  to 40.18 MB — and about 10 ms on a repeat long-distance route.
 
 - `edgesWithConditionalRestrictions` in the compile report, beside
   `edgesWithPhysicalLimits`, so a region's conditional data can be counted
