@@ -9,7 +9,7 @@ export { componentSizes, componentsFor } from "./connectivity";
 export { accessAvoiding, countAvoided, touchesArea, type AvoidArea } from "./avoid";
 export { accessForVehicle, countBlocked, fromDecimetres, fromHalfTonnes, packEdgeLimits, toDecimetres, toHalfTonnes } from "./limits";
 export {
-  ConditionKind, accessAtTime, conditionalDurations, conditionalValue, conditionHolds, conditionsOf, conditionsOnEdge,
+  ConditionKind, MAX_STORED_VALUES, accessAtTime, conditionalDurations, conditionalValue, conditionHolds, conditionsOf, conditionsOnEdge,
   countClosedAt, packEdgeConditions, parseConditional, parseEdgeConditions, travelTimeFrom, unreadableConditions,
   type Circumstances, type Condition, type ConditionalRule, type MinuteSpan, type ParsedConditions, type TravelTime, type VehicleComparison,
 } from "./conditional";

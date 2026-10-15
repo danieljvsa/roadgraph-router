@@ -362,6 +362,27 @@ break the guarantee that the route found is the best one.
 - **Turn restriction relations are not conditional.** See the list in
   [What a route here does and does not mean](#what-a-route-here-does-and-does-not-mean).
 
+### Everything a route can be told
+
+| Option | Meaning |
+| --- | --- |
+| `departAt` | When the journey starts, as a `Date` or as `{ weekday, minutes, month, dayOfMonth }`. Without it, conditional restrictions are ignored. |
+| `timeZone` | The IANA zone the roads are in, such as `"Europe/Lisbon"`. Without it a `Date` is read as this machine reads it. |
+| `publicHoliday` | Whether that day is one where the roads are. |
+| `circumstances` | What the map cannot know: `{ conditions, userGroups, purposes }`. |
+| `avoid` | Circles of road that are shut, as `{ lat, lng, radiusMeters }`. |
+| `vehicle` | The lorry being routed, where the graph states physical limits. |
+| `finishOnANearbyRoad` | `false` to be refused outright when the point cannot be reached. |
+
+```js
+const route = await router.route(origin, destination, "fastest", {
+  departAt: new Date("2026-10-15T08:00:00Z"),
+  timeZone: "Europe/Lisbon",
+  circumstances: { conditions: ["wet"] },
+  avoid: [{ lat: 38.7223, lng: -9.1393, radiusMeters: 150 }],
+});
+```
+
 ## More than one way there
 
 `routeAlternatives` returns several routes, best first, for offering a choice
@@ -393,6 +414,7 @@ forever or returning something arbitrary.
 | `maxStretch` | 1.4 | How much worse than the best an alternative may be. |
 | `maxSharing` | 0.75 | How much of the routes already offered it may reuse, by distance. |
 | `penaltyFactor` | 2 | How much dearer a road already used is made to look. |
+| `searchWiderCorridor` | `true` | Whether to fetch the wider corridor an alternative might lie in. `false` keeps the download to what one route needed. |
 
 Routes come back in the order they would be driven: the best first, then the
 rest by what they really cost. The penalties steer the search and never reach

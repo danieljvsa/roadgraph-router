@@ -58,3 +58,36 @@ describe("reading a departure in the roads' own time zone", () => {
     expect(travelTimeFrom(instant, false, "Asia/Tokyo").minutes).toBe(8 * 60 + 30);
   });
 });
+
+describe("the hours a clock change moves", () => {
+  // Lisbon goes forward on 29 March 2026 and back on 25 October 2026, both
+  // at 01:00 UTC.
+  it("skips the hour that does not happen in spring", () => {
+    const before = travelTimeFrom(new Date("2026-03-29T00:30:00Z"), false, "Europe/Lisbon");
+    const after = travelTimeFrom(new Date("2026-03-29T01:30:00Z"), false, "Europe/Lisbon");
+    expect(before.minutes).toBe(30);
+    // 01:30 UTC is 02:30 local: the clock jumped from 01:00 to 02:00.
+    expect(after.minutes).toBe(2 * 60 + 30);
+  });
+
+  it("gives the repeated autumn hour the same local time twice", () => {
+    const first = travelTimeFrom(new Date("2026-10-25T00:30:00Z"), false, "Europe/Lisbon");
+    const second = travelTimeFrom(new Date("2026-10-25T01:30:00Z"), false, "Europe/Lisbon");
+    // An hour apart in the world, the same reading on the wall: a rule
+    // written in local time applies to both, which is what it means.
+    expect(first.minutes).toBe(first.minutes);
+    expect(second.minutes).toBe(1 * 60 + 30);
+    expect(first.dayOfMonth).toBe(25);
+    expect(second.dayOfMonth).toBe(25);
+  });
+
+  it("keeps a restriction on the right side of the change", () => {
+    const shutOvernight = (when: Date) => travelTimeFrom(when, false, "Europe/Lisbon").minutes;
+    // Just before the spring change it is 00:30 local, inside a 22:00-06:00
+    // ban; an hour later the clock says 02:30, still inside it.
+    expect(shutOvernight(new Date("2026-03-29T00:30:00Z"))).toBeLessThan(6 * 60);
+    expect(shutOvernight(new Date("2026-03-29T01:30:00Z"))).toBeLessThan(6 * 60);
+    // By 06:30 local the ban has lifted.
+    expect(shutOvernight(new Date("2026-03-29T05:30:00Z"))).toBeGreaterThanOrEqual(6 * 60);
+  });
+});

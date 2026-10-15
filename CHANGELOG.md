@@ -72,6 +72,15 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A road is identified by its shape in order, not by a sum of its points.**
+  Adding coordinates up does not care which point came first, so a road
+  bending north then east and one bending east then north read as the same
+  road and one of them would be dropped as a duplicate alternative.
+
+- **A closure standing on the date line shuts the roads under it.** The
+  projection it was tested against subtracted longitudes at face value, so a
+  road a few metres away measured half a world off.
+
 - **A rule table too wide for its index stops the compile.** It used to drop
   the surplus rows, which turned a restricted road into an unrestricted one
   with nothing said. A tile holds up to 65,536 distinct conditional values;
