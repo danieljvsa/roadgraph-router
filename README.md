@@ -15,17 +15,23 @@ say are forbidden** to the chosen vehicle. That is weaker than a statement
 that the route is legal, or that the vehicle will physically fit, and the gap
 matters most for a lorry.
 
-Three kinds of rule are read and obeyed: tags on the way, such as access,
-direction and signed limits; turn restriction relations; and barriers on
-nodes. Everything below is **not read at all**, and a road governed only by
-one of them is treated as open:
+Four kinds of rule are read and obeyed: tags on the way, such as access,
+direction and signed limits; turn restriction relations; barriers on nodes;
+and, when you supply a departure time, conditional restrictions on the way.
+Everything below is **not read**, and a road governed only by one of them is
+treated as open:
 
-- **Time-dependent access.** `access:conditional`, `restriction:conditional`,
-  `hgv:conditional` and every other time-of-day or day-of-week rule. A street
-  closed to lorries overnight, a bus lane that is shared outside peak hours,
-  a market square pedestrianised on Sundays — all appear permanently open.
+- **Conditional restrictions, unless you pass `departAt`.** Without a
+  departure time a street closed to lorries overnight or a square
+  pedestrianised on Sundays appears permanently open. See
+  [Routing at a time of day](#routing-at-a-time-of-day) for what is read when
+  you do pass one, and what is still not.
+- **Conditional turn restrictions.** `restriction:conditional` on a turn
+  restriction relation is not read, so a no-left-turn that applies only in the
+  morning peak is enforced at every hour of the day.
 - **Seasonal and weather rules.** Winter closures, snow-chain requirements,
-  flood gates.
+  flood gates. A conditional value resting on weather, such as
+  `80 @ (wet)`, is counted but never acted on.
 - **Temporary closures.** Roadworks, events, landslides. Nothing in a compiled
   bundle changes after the compile, so a bundle is as current as the extract
   it was built from and no more.
@@ -39,21 +45,14 @@ one of them is treated as open:
   limit is treated as passable by any vehicle.
 
 For a lorry this means a route may pass under a bridge too low for it, over a
-structure too weak for it, or along a street it is banned from at the hour you
-travel. **Do not use this engine as the sole basis for dispatching a heavy
-vehicle.** Anything safety-critical needs a surveyed freight dataset and a
-routing engine that reads conditional restrictions.
-
-**Conditional restrictions are a known gap, and the first thing in 0.3.0.**
-Reading `access:conditional`, `restriction:conditional` and `hgv:conditional`
-comes ahead of alternative routes, because time-dependent access is the
-limitation most likely to make a lorry route wrong rather than merely longer.
-Until then this section describes the engine as it is, not as it is meant to
-stay.
+structure too weak for it, or along a street banned to it by a rule nobody
+tagged on the way. **Do not use this engine as the sole basis for dispatching
+a heavy vehicle.** Anything safety-critical needs a surveyed freight dataset.
 
 The compiler reports what it understood. `turnRestrictionsRead` against
-`turnRestrictionsSkipped`, and `barriersRead`, in `<output>.json` tell you how
-much of a region's restriction data was used.
+`turnRestrictionsSkipped`, `barriersRead` and
+`edgesWithConditionalRestrictions`, in `<output>.json`, tell you how much of a
+region's restriction data was used.
 
 ## Install
 
@@ -236,6 +235,83 @@ from the bounding box. A truck does not change shape when it crosses a border.
 > load and hazardous goods rules are not read at all. See
 > [What a route here does and does not mean](#what-a-route-here-does-and-does-not-mean)
 > before relying on one of these routes for a heavy vehicle.
+
+## Routing at a time of day
+
+Some roads are only closed at certain hours. A street may be shut to lorries
+overnight, a square pedestrianised on Sundays, a bridge limited by weight in
+one season. OpenStreetMap writes these as `*:conditional` tags, and this
+library reads them when — and only when — you say when the journey starts.
+
+```js
+const route = await router.route(from, to, "fastest", {
+  departAt: new Date("2026-03-16T08:00:00"),
+});
+```
+
+`departAt` is in the **local time of the roads being travelled**. This library
+does not convert time zones and does not consult a clock: a `Date` is read for
+its weekday, hour, minute and month as your runtime reports them, so a caller
+routing in a region other than its own must do the conversion first. You can
+pass the parts directly instead of a `Date`:
+
+```js
+// Monday, 08:00, in March.
+await router.route(from, to, "fastest", {
+  departAt: { weekday: 0, minutes: 8 * 60, month: 3 },
+});
+```
+
+Public holidays are a calendar this library does not carry, so a rule written
+`no @ (PH)` applies only if you say the day is one:
+
+```js
+await router.route(from, to, "fastest", { departAt, publicHoliday: true });
+```
+
+### What is read
+
+A `value @ condition` list is read from the way's access tags — `access`,
+`vehicle`, `motor_vehicle` and the profile's own key, such as `hgv` — and from
+`maxspeed`. Where several rules match the same moment, the **last** one wins,
+which is what OpenStreetMap specifies and why the tagging convention is
+general first and specific last.
+
+Conditions resting on time of day, weekday, month and the vehicle's own
+dimensions are answered. `no @ (Mo-Fr 07:00-19:00)`,
+`no @ (22:00-06:00)`, `no @ (Nov-Feb)` and `no @ (weight>7.5)` all work, as do
+several windows in one rule and conditions combined with `AND`.
+
+An access rule evaluating to `no`, `private`, `destination` or a permit-style
+value closes the road. `destination` counts as closed because this library has
+no notion of a journey's purpose, and treating "only if you live here" as open
+would route strangers down a residents' street.
+
+A conditional `maxspeed` slows the edges it applies to, and the route reports
+the slower duration rather than the one it was planned against. A conditional
+limit can only **slow** a road, never speed it up: the search's bound is built
+from the profile's ceiling, and an edge quicker than the graph says would
+break the guarantee that the route found is the best one.
+
+### What is not
+
+- **Nothing happens without `departAt`.** Leaving it out ignores conditional
+  restrictions entirely, which is how this library behaved before it could
+  read them.
+- **Only closures are applied.** A road the plain tags already forbid stays
+  forbidden even where a conditional value would open it, because the compiled
+  mask has already dropped it. This errs towards refusing a road that is in
+  fact usable, which is the direction this library errs in everywhere else.
+- **One moment, not an arrival time per edge.** The whole route is judged by
+  when it set out. A long route crossing a boundary as a restriction begins is
+  judged by its departure, not by when it would actually arrive there.
+- **Conditions it cannot answer are never acted on.** Weather, user groups,
+  the purpose of access and a stay duration are not things a compiled graph
+  knows. A rule resting on one — `80 @ (wet)` — is parsed, counted and then
+  ignored, leaving the road open. `unreadableConditions` reports how many of a
+  tag's rules fell into this.
+- **Turn restriction relations are not conditional.** See the list in
+  [What a route here does and does not mean](#what-a-route-here-does-and-does-not-mean).
 
 ## Turn restrictions
 
@@ -606,6 +682,7 @@ What the bundled profiles read, and what they deliberately do not.
 | Lorry limits | `maxheight`, `maxwidth`, `maxlength`, `maxweight`, each with `:forward`, `:backward` and `:hgv` forms, plus `maxheight:physical` and `maxwidth:physical`; metric and feet-and-inches |
 | Barriers | `barrier` on a node, with `locked` and the access ladder; a bollard stops a car, a stile stops everything but walking, a gate is open unless it says otherwise |
 | Turn restrictions | `no_left_turn`, `no_right_turn`, `no_straight_on`, `no_u_turn`, `no_entry`, `no_exit`, `only_left_turn`, `only_right_turn`, `only_straight_on`, `only_u_turn` |
+| Conditional restrictions | `*:conditional` on the access ladder and on `maxspeed`, applied when a route supplies `departAt`; time of day, weekday, month, public holiday and vehicle dimensions; last matching rule wins |
 | Restriction scope | `via` node and `via` way; `restriction:<mode>`, `restriction:motor_vehicle` and `restriction:vehicle` override the generic key; `except` listing one of this vehicle's modes drops the relation for that vehicle alone |
 
 **Not supported**
@@ -614,23 +691,28 @@ What the bundled profiles read, and what they deliberately do not.
 | --- | --- |
 | A one-way trap | Two points joined on the map but not reachable in the direction asked for — a one-way loop with no way back — still report no route. Snapping again cannot mend that, because both ends are already in the same piece of the network. |
 | Surface, gradient and steps beyond a flat penalty | A cycling speed comes from the way class alone. `surface`, `smoothness` and elevation are not read, so a cobbled climb costs the same as smooth level tarmac. |
-| Alternative routes | Not in 0.2.0. `routeAlternatives` is planned for 0.3.0, after conditional restrictions. |
+| Alternative routes | Not yet. `routeAlternatives` is the next thing in 0.3.0, now that conditional restrictions are read. |
 | Untagged limits | A road stating no `maxheight` or `maxweight` is treated as open to any lorry. Absence of a tag is not a measurement. |
 | Axle load, trailer and hazmat rules | `maxaxleload`, `hazmat` and trailer-specific access are not read. |
-| Conditional restrictions | `restriction:conditional`, `access:conditional`, `hgv:conditional` and every time-of-day, day-of-week or seasonal rule are ignored, so a time-limited restriction is treated as absent. **Scheduled for 0.3.0**; see [What a route here does and does not mean](#what-a-route-here-does-and-does-not-mean). |
+| Conditional restrictions without `departAt` | Read only when a route supplies a departure time; without one a time-limited restriction is treated as absent, as before. See [Routing at a time of day](#routing-at-a-time-of-day). |
+| Conditional turn restrictions | `restriction:conditional` on a relation is not read: a morning-peak no-left-turn is enforced at every hour. Only way tags are conditional. |
+| Conditions resting on weather, user group or purpose | `80 @ (wet)`, `no @ (disabled)` and a stay duration are parsed and counted but never acted on, leaving the road open. |
+| Reopening a road | Only closures are applied. `access=no` with `access:conditional=yes @ (...)` stays closed at every hour. |
+| Time zones | `departAt` is taken as the local time of the roads travelled; no conversion is done and no clock is consulted. |
 | Temporary closures | Roadworks, events and incidents are not modelled. A bundle is as current as the extract it was compiled from. |
 | Zone-level rules | Lorry bans, low-emission zones, permit areas and tolls that apply to an area rather than to a way are not read. |
 | `via` ways longer than four edges | Skipped rather than approximated, and counted as `turnRestrictionsSkipped` in the compile report. |
 | Restrictions spanning a tile boundary | Dropped for tiles that do not hold every edge of the run, rather than enforced in a shortened form. |
 | Turn costs and traffic signals | Not modelled; a turn costs nothing beyond the roads it joins. |
 | Live traffic, elevation, ferries as a distinct mode | Not modelled. Ferry ways are excluded with everything that is not a road. |
-| `motor_vehicle:conditional`, toll avoidance | Not read. |
+| Toll avoidance | Not read. |
 | A barrier this table has not met | Treated as passable. Inventing a closure severs a road that is probably open, and the tag may simply be unfamiliar; an `access` tag on the node still decides. |
 | EFRT v1 | Carries topology only: encoding to it drops geometry and turn restrictions. Use EFR2 for anything that needs them. |
 
 The compiler reports what it skipped. `turnRestrictionsRead` against
-`turnRestrictionsSkipped` in `<output>.json` tells you how much of a region's
-restriction data was understood.
+`turnRestrictionsSkipped`, and `edgesWithConditionalRestrictions`, in
+`<output>.json` tell you how much of a region's restriction data was
+understood.
 
 ## Upgrading from 0.1.0
 

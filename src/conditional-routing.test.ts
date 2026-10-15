@@ -2,6 +2,7 @@ import { packEdgeConditions, ConditionKind, countClosedAt, conditionsOf } from "
 import { decodeProfileChunk, encodeProfileChunk } from "./codec";
 import { compactGraph } from "./compact";
 import { route } from "./router";
+import { mergeRoadGraphs } from "./merge";
 import { buildGraph, pathOf } from "./test-support";
 import type { RoadGraph } from "./types";
 
@@ -171,5 +172,47 @@ describe("carrying conditions through a profile chunk", () => {
       edgeDurationsSeconds: Uint16Array.from(compacted.edgeDurationsSeconds),
       edgeConditions: packEdgeConditions([{ edge: 9999, kind: ConditionKind.access, value: CLOSED_IN_WORKING_HOURS }]),
     })).toThrow(/outside the graph/);
+  });
+});
+
+describe("conditions crossing a tile boundary", () => {
+  const westTile = {
+    nodeLatitudes: new Float64Array([37, 37]), nodeLongitudes: new Float64Array([-8, -7.9]),
+    edgeOffsets: new Uint32Array([0, 1, 1]), edgeTargets: new Uint32Array([1]),
+    edgeDistancesMeters: new Float32Array([100]), edgeDurationsSeconds: new Float32Array([10]),
+    edgeConditions: packEdgeConditions([{ edge: 0, kind: ConditionKind.access, value: CLOSED_IN_WORKING_HOURS }]),
+  };
+  const eastTile = {
+    nodeLatitudes: new Float64Array([37, 37]), nodeLongitudes: new Float64Array([-7.9, -7.8]),
+    edgeOffsets: new Uint32Array([0, 1, 1]), edgeTargets: new Uint32Array([1]),
+    edgeDistancesMeters: new Float32Array([100]), edgeDurationsSeconds: new Float32Array([10]),
+    edgeConditions: packEdgeConditions([{ edge: 0, kind: ConditionKind.access, value: "no @ (Sa,Su)" }]),
+  };
+
+  it("keeps what each tile said, rebased onto the merged edges", () => {
+    const merged = mergeRoadGraphs([westTile, eastTile]);
+    expect(merged.edgeConditions?.values.sort()).toEqual([CLOSED_IN_WORKING_HOURS, "no @ (Sa,Su)"].sort());
+    expect(merged.edgeConditions?.edges).toHaveLength(2);
+    expect(merged.edgeConditions!.edges[0]).not.toBe(merged.edgeConditions!.edges[1]);
+  });
+
+  it("closes the road the hour closes and leaves the other open", () => {
+    const merged = mergeRoadGraphs([westTile, eastTile]);
+    const parsed = conditionsOf(merged);
+    expect(countClosedAt(merged, parsed, { weekday: 0, minutes: 8 * 60, month: 3 })).toBe(1);
+    expect(countClosedAt(merged, parsed, { weekday: 5, minutes: 8 * 60, month: 3 })).toBe(1);
+    expect(countClosedAt(merged, parsed, { weekday: 0, minutes: 22 * 60, month: 3 })).toBe(0);
+  });
+
+  it("stops a route that has to cross a shut road", () => {
+    const merged = mergeRoadGraphs([westTile, eastTile]);
+    const ends = [{ lat: 37, lng: -8 }, { lat: 37, lng: -7.8 }] as const;
+    expect(route(merged, ends[0], ends[1]).distanceMeters).toBe(200);
+    expect(() => route(merged, ends[0], ends[1], "fastest", { departAt: mondayMorning })).toThrow();
+  });
+
+  it("keeps one copy when overlapping tiles both describe the same road", () => {
+    const sameRoadTwice = mergeRoadGraphs([westTile, { ...westTile }]);
+    expect(sameRoadTwice.edgeConditions?.edges).toHaveLength(1);
   });
 });

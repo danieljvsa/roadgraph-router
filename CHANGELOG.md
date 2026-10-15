@@ -6,6 +6,56 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Conditional restrictions, when a route says when it starts.**
+  `router.route(from, to, "fastest", { departAt })` closes the roads shut at
+  that moment to both the search and the snapping, and slows the ones a
+  conditional speed limit slows. The reported duration is the slowed one, not
+  the one the route was planned against.
+
+  `*:conditional` is read from the access ladder — `access`, `vehicle`,
+  `motor_vehicle` and the profile's own key — and from `maxspeed`. Conditions
+  resting on time of day, weekday, month, public holiday and the vehicle's own
+  dimensions are answered, including windows that run past midnight, seasons
+  that span the new year and several windows in one rule. Where more than one
+  rule matches, the last wins, which is what OpenStreetMap specifies.
+
+  Compiled on the Monaco extract, where Avenue Pasteur carries
+  `motorcycle:conditional = no @ (22:00-07:00)`, a motorcycle crossing it
+  travels 183 m at midday and detours 3081 m at 23:00, while a car is
+  unaffected at either hour.
+
+- `edgesWithConditionalRestrictions` in the compile report, beside
+  `edgesWithPhysicalLimits`, so a region's conditional data can be counted
+  rather than assumed.
+
+### Known limitations
+
+- **Nothing changes without `departAt`.** Omitting it ignores conditional
+  restrictions entirely, which is how the library behaved before.
+- **Only closures are applied.** A road the plain tags already forbid stays
+  forbidden where a conditional value would open it, which errs towards
+  refusing a usable road rather than permitting a forbidden one.
+- **One moment for the whole route**, rather than an arrival time per edge. A
+  long route is judged by when it set out.
+- **`restriction:conditional` on a turn restriction relation is still not
+  read.** A morning-peak no-left-turn is enforced at every hour.
+- **Conditions this library cannot answer are counted, not guessed.** Weather,
+  user groups, the purpose of access and a stay duration are parsed, reported
+  by `unreadableConditions`, and then left to one side with the road open.
+- **`departAt` is the local time of the roads travelled.** No time-zone
+  conversion is done and no clock is consulted.
+- Alternative routes are still to come in 0.3.0.
+
+### Compatibility
+
+A bundle whose roads carry no conditional restriction is byte for byte the
+file 0.2.0 wrote: the new section lives in profile-chunk header bytes that
+every version so far left as zero. Every bundle published so far still opens
+and routes identically. A bundle that does carry conditional restrictions
+cannot be opened by 0.2.0 or earlier.
+
 ## [0.2.0] - 2026-10-15
 
 Multi-vehicle routing. One bundle can now serve a car, a motorcycle and a
@@ -114,12 +164,13 @@ ship too, in a bundle of their own. Alternative routes moved to 0.3.0.
 
 ### Known limitations
 
-- **Conditional restrictions are not read. They are the first item of
-  0.3.0.** `access:conditional`, `restriction:conditional` and
-  `hgv:conditional` are ignored, so a street closed to lorries overnight or a
-  square pedestrianised on Sundays appears permanently open. It is the
-  limitation most likely to make a route wrong rather than merely longer,
-  particularly for a lorry, so it is scheduled ahead of alternative routes.
+- **Conditional restrictions are not read in this release.**
+  `access:conditional`, `restriction:conditional` and `hgv:conditional` are
+  ignored, so a street closed to lorries overnight or a square pedestrianised
+  on Sundays appears permanently open. It is the limitation most likely to
+  make a route wrong rather than merely longer, particularly for a lorry, so
+  it was scheduled ahead of alternative routes and is addressed under
+  Unreleased above.
 - An active-travel bundle at country scale cannot be compiled with small
   tiles: Portugal for walking and cycling at 40 km tiles exceeds the
   compiler's 3 GB ceiling and is refused. The default 120 km works, at the
