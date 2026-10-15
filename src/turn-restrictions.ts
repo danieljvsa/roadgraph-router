@@ -1,4 +1,5 @@
 import type { RoadGraph } from "./types";
+import { edgeAllowed } from "./access";
 
 /**
  * Turn restrictions are stored as banned ordered edge pairs. A pair
@@ -20,11 +21,15 @@ export function buildTurnRestrictionIndex(graph: RoadGraph): TurnRestrictionInde
   if (fromEdges.length !== toEdges.length) throw new Error("Turn restriction arrays must have the same length.");
   const index: TurnRestrictionIndex = new Map();
   for (let pair = 0; pair < fromEdges.length; pair += 1) {
+    // A shared restriction list carries every vehicle's bans; this vehicle's
+    // mask says which of them it obeys. `except=hgv` lifts one for lorries and
+    // leaves it standing for cars.
+    if (!edgeAllowed(graph.restrictionMask, pair)) continue;
     const banned = index.get(fromEdges[pair]);
     if (banned) banned.add(toEdges[pair]);
     else index.set(fromEdges[pair], new Set([toEdges[pair]]));
   }
-  return index;
+  return index.size ? index : null;
 }
 
 export function isTurnBanned(index: TurnRestrictionIndex, fromEdge: number, toEdge: number) {
@@ -73,7 +78,11 @@ export function buildTurnSequenceIndex(graph: RoadGraph): TurnSequenceIndex | nu
   if (!offsets || !edges || offsets.length < 2) return null;
   const sequences: number[][] = [];
   const startingAt = new Map<number, number[]>();
+  // Sequences sit after the pairs in the vehicle's restriction mask, so their
+  // bits start where the pairs' end.
+  const pairs = graph.turnRestrictionFromEdges?.length ?? 0;
   for (let index = 0; index + 1 < offsets.length; index += 1) {
+    if (!edgeAllowed(graph.restrictionMask, pairs + index)) continue;
     const sequence = Array.from(edges.subarray(offsets[index], offsets[index + 1]));
     if (sequence.length < 3) continue;
     const id = sequences.length;
@@ -98,4 +107,58 @@ export function packTurnSequences(sequences: number[][]) {
   let at = 0;
   for (const sequence of ordered) for (const edge of sequence) turnRestrictionSequenceEdges[at++] = edge;
   return { turnRestrictionSequenceOffsets, turnRestrictionSequenceEdges };
+}
+
+
+/**
+ * Which junctions a search has to remember its approach at.
+ *
+ * Obeying a banned turn means knowing which road you arrived on, and the only
+ * state that can express that is "arrived at this node along that edge" — one
+ * state per directed edge rather than one per node. Carrying that everywhere
+ * doubles the search for the sake of the few junctions that need it: in a
+ * Portugal corridor, 16,620 junctions of 1,244,262 carry a restriction, which
+ * is 1.3%.
+ *
+ * So the approach is remembered only where it can change the answer. A node is
+ * guarded when a banned pair turns on it, or when any edge of a banned run
+ * ends there — a run spans several junctions, and the search has to know how
+ * far along it has driven at each of them.
+ */
+export type GuardedJunctions = {
+  /** One byte per node: does arriving matter here? */
+  guarded: Uint8Array;
+  /** For an edge ending at a guarded node, its own state; -1 otherwise. */
+  stateOfEdge: Int32Array;
+  /** The edge each guarded state arrived along. */
+  edgeOfState: Int32Array;
+  /** How many states the guarded junctions take up. */
+  count: number;
+};
+
+const guardedCache = new WeakMap<RoadGraph, GuardedJunctions>();
+
+export function guardedJunctionsFor(graph: RoadGraph, restrictions: TurnRestrictionIndex | null, sequences: TurnSequenceIndex | null): GuardedJunctions {
+  const held = guardedCache.get(graph);
+  if (held) return held;
+
+  const nodes = graph.nodeLatitudes.length;
+  const edges = graph.edgeTargets.length;
+  const guarded = new Uint8Array(nodes);
+  if (restrictions) for (const edge of restrictions.keys()) guarded[graph.edgeTargets[edge]] = 1;
+  if (sequences) {
+    for (const sequence of sequences.sequences) {
+      for (const edge of sequence) guarded[graph.edgeTargets[edge]] = 1;
+    }
+  }
+
+  const stateOfEdge = new Int32Array(edges).fill(-1);
+  let count = 0;
+  for (let edge = 0; edge < edges; edge += 1) if (guarded[graph.edgeTargets[edge]]) stateOfEdge[edge] = count++;
+  const edgeOfState = new Int32Array(count);
+  for (let edge = 0; edge < edges; edge += 1) if (stateOfEdge[edge] >= 0) edgeOfState[stateOfEdge[edge]] = edge;
+
+  const index: GuardedJunctions = { guarded, stateOfEdge, edgeOfState, count };
+  guardedCache.set(graph, index);
+  return index;
 }

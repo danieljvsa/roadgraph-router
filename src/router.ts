@@ -2,12 +2,14 @@ import { MinPriorityQueue } from "./priority-queue";
 import type { Coordinate, GeoJsonPosition, RoadGraph, RoutePreference, RouteResult, RouteSnap } from "./types";
 import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
-import { buildTurnRestrictionIndex, buildTurnSequenceIndex, type TurnRestrictionIndex, type TurnSequenceIndex } from "./turn-restrictions";
-import { carRoutingProfile } from "./routing-profile";
+import { edgeAllowed } from "./access";
+import { accessForVehicle } from "./limits";
+import { componentSizes, componentsFor } from "./connectivity";
+import { searchBoundsFor, straightLineAtMost } from "./search-bounds";
+import type { VehicleDimensions } from "./vehicle";
+import { buildTurnRestrictionIndex, buildTurnSequenceIndex, guardedJunctionsFor, type TurnRestrictionIndex, type TurnSequenceIndex } from "./turn-restrictions";
+import { profileOf } from "./routing-profile";
 import { coordinateFor, geometryAfter, geometryBefore, geometryBetween, haversineMeters, snapToGraph, type EdgeProjection, type GraphSnap } from "./snap";
-
-/** Matches the profile's speed ceiling so the fastest-route heuristic stays admissible. */
-const MAX_CAR_SPEED_MPS = (carRoutingProfile.maxSpeedKph * 1000) / 3600;
 
 /** Entering the graph: traverse the tail of `edge` to reach `node`. `edge` is -1 at a junction. */
 type Seed = { node: number; edge: number; cost: number };
@@ -49,12 +51,27 @@ export function findNearestNode(graph: RoadGraph, coordinate: Coordinate, maxDis
 function searchContext(graph: RoadGraph, destinationPoint: Coordinate, preference: RoutePreference) {
   const distanceScale = graph.edgeDistanceScale ?? 1;
   const durationScale = graph.edgeDurationScale ?? 1;
+  // Both bounds are measured from the graph rather than assumed, and cached
+  // with it. The speed ceiling has to cover the fastest edge the graph
+  // actually holds, which quantisation can push above the profile's own
+  // ceiling; dividing by the smaller number would overestimate what remains
+  // and let A* settle for a route that is not the best one.
+  const { maxSpeedMps, longitudeMetresPerDegree } = searchBoundsFor(graph);
+  const coordinateScale = graph.coordinateScale ?? 1;
+  const latitudes = graph.nodeLatitudes;
+  const longitudes = graph.nodeLongitudes;
+  const destinationLatitude = destinationPoint.lat;
+  const destinationLongitude = destinationPoint.lng;
+  const toCost = preference === "fastest" ? 1 / maxSpeedMps : 1;
   return {
     costOf: (edge: number) => preference === "fastest" ? graph.edgeDurationsSeconds[edge] * durationScale : graph.edgeDistancesMeters[edge] * distanceScale,
-    heuristicFor: (node: number) => {
-      const remaining = haversineMeters(coordinateFor(graph, node), destinationPoint);
-      return preference === "fastest" ? remaining / MAX_CAR_SPEED_MPS : remaining;
-    },
+    // Called once per relaxation, millions of times on a long route, so it
+    // reads the coordinate arrays directly and avoids a haversine's four
+    // trigonometric calls for a number that only has to be a lower bound.
+    heuristicFor: (node: number) => straightLineAtMost(
+      latitudes[node] / coordinateScale, longitudes[node] / coordinateScale,
+      destinationLatitude, destinationLongitude, longitudeMetresPerDegree,
+    ) * toCost,
   };
 }
 
@@ -64,7 +81,7 @@ type SearchOutcome = { edges: number[]; finisher: Finisher; seed: Seed } | null;
  * Node-labelled A*. Valid only when no turn is forbidden, because the cost of
  * reaching a node is then independent of how the node was reached.
  */
-function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, costBound = Infinity): SearchOutcome {
+function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, costBound: number, access: Uint8Array | undefined): SearchOutcome {
   const { costOf, heuristicFor } = searchContext(graph, destinationPoint, preference);
   const nodeCount = graph.nodeLatitudes.length;
   const costs = new Float64Array(nodeCount).fill(Infinity);
@@ -90,6 +107,7 @@ function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Fi
       if (total < best) { best = total; bestNode = node; bestFinisher = finisher; }
     }
     for (let edge = graph.edgeOffsets[node]; edge < graph.edgeOffsets[node + 1]; edge += 1) {
+      if (!edgeAllowed(access, edge)) continue;
       const target = graph.edgeTargets[edge];
       const cost = costs[node] + costOf(edge);
       if (cost >= costs[target]) continue;
@@ -109,23 +127,42 @@ function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Fi
 }
 
 /**
- * Edge-labelled A*. The search state is "arrived at a node along edge e", the
- * smallest state that can express a banned turn — and exactly the state a
- * mid-edge start already provides, so entering the graph part-way along a road
- * needs no special case and still obeys restrictions on the very first turn.
+ * A* that remembers how it arrived, but only where that can change the answer.
+ *
+ * A banned turn can only be obeyed by a search that knows which road it came
+ * in on, and the state expressing that is "arrived at this node along that
+ * edge" — one state per directed edge instead of one per node. Carrying it
+ * everywhere costs twice the search for the sake of the 1.3% of junctions that
+ * ban anything. Here a guarded junction gets that state and every other
+ * junction is just itself, which is exactly the same answer for about half the
+ * work.
+ *
+ * Nothing is lost by forgetting the approach elsewhere: a junction is guarded
+ * precisely when a ban or a banned run turns on it, so an unguarded one has no
+ * rule that could depend on how it was reached. A mid-edge start still arrives
+ * along a known edge, so entering part-way along a road obeys a restriction on
+ * the very first turn as before.
  */
-function searchByEdge(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, restrictions: TurnRestrictionIndex | null, sequenceIndex: TurnSequenceIndex | null, costBound = Infinity): SearchOutcome {
+function searchWithRestrictions(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, restrictions: TurnRestrictionIndex | null, sequenceIndex: TurnSequenceIndex | null, costBound: number, access: Uint8Array | undefined): SearchOutcome {
   const { costOf, heuristicFor } = searchContext(graph, destinationPoint, preference);
-  const edgeCount = graph.edgeTargets.length;
-  const costs = new Float64Array(edgeCount).fill(Infinity);
-  const previousState = new Int32Array(edgeCount).fill(-1);
+  const targets = graph.edgeTargets;
+  const { guarded, stateOfEdge, edgeOfState, count: guardedStates } = guardedJunctionsFor(graph, restrictions, sequenceIndex);
+
+  // States below `guardedStates` are an arrival at a guarded junction along one
+  // edge; the next `nodes` are the junctions where arriving does not matter;
+  // anything above is a partly-driven banned run.
+  const nodes = graph.nodeLatitudes.length;
+  const plainBase = guardedStates;
+  const stateCount = guardedStates + nodes;
+  const costs = new Float64Array(stateCount).fill(Infinity);
+  const cameFrom = new Int32Array(stateCount).fill(-1);
+  const cameVia = new Int32Array(stateCount).fill(-1);
   const seedOf = new Map<number, Seed>();
   const queue = new MinPriorityQueue<number>();
 
   // A banned run of three or more edges needs to remember how much of it has
-  // been driven, which a plain "arrived along edge e" state cannot hold. Those
-  // few states live alongside the typed arrays rather than widening them, so
-  // the ordinary case keeps costing exactly one array slot per edge.
+  // been driven, which neither state above can hold. Those few live alongside
+  // the typed arrays rather than widening them.
   const sequences = sequenceIndex?.sequences ?? [];
   const startingAt = sequenceIndex?.startingAt;
   const partialEdge: number[] = [];
@@ -136,31 +173,48 @@ function searchByEdge(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Fi
   const stride = sequenceIndex?.stride ?? 1;
   const encode = (sequence: number, position: number) => sequence * stride + position;
 
-  const edgeOf = (state: number) => state < edgeCount ? state : partialEdge[state - edgeCount];
-  const matchesOf = (state: number) => state < edgeCount ? undefined : partialMatches[state - edgeCount];
-  const costOfState = (state: number) => state < edgeCount ? costs[state] : partialCost[state - edgeCount];
+  const nodeOf = (state: number) => {
+    if (state < guardedStates) return targets[edgeOfState[state]];
+    if (state < stateCount) return state - plainBase;
+    return targets[partialEdge[state - stateCount]];
+  };
+  /** The edge a state arrived along, which only a guarded state is asked for. */
+  const arrivalOf = (state: number) => {
+    if (state < guardedStates) return edgeOfState[state];
+    if (state < stateCount) return cameVia[state];
+    return partialEdge[state - stateCount];
+  };
+  const matchesOf = (state: number) => state < stateCount ? undefined : partialMatches[state - stateCount];
+  const costOfState = (state: number) => state < stateCount ? costs[state] : partialCost[state - stateCount];
+  /** An unguarded junction has no rule that could depend on the approach. */
+  const bansAt = (state: number) => state < guardedStates || state >= stateCount ? restrictions?.get(arrivalOf(state)) : undefined;
 
-  const relax = (state: number, cost: number, from: number, seed: Seed | null) => {
-    if (state < edgeCount) {
+  const relax = (state: number, cost: number, from: number, via: number, seed: Seed | null) => {
+    if (state < stateCount) {
       if (cost >= costs[state]) return;
       costs[state] = cost;
-      previousState[state] = from;
+      cameFrom[state] = from;
+      cameVia[state] = via;
       if (from === -1 && seed) seedOf.set(state, seed);
     } else {
-      const slot = state - edgeCount;
+      const slot = state - stateCount;
       if (cost >= partialCost[slot]) return;
       partialCost[slot] = cost;
       partialPrevious[slot] = from;
     }
-    queue.push(state, cost + heuristicFor(graph.edgeTargets[edgeOf(state)]));
+    queue.push(state, cost + heuristicFor(nodeOf(state)));
   };
 
+  /** Where arriving along `edge` lands, once any part-driven run is accounted for. */
   const stateFor = (edge: number, matches: number[]) => {
-    if (!matches.length) return edge;
+    if (!matches.length) {
+      const node = targets[edge];
+      return guarded[node] ? stateOfEdge[edge] : plainBase + node;
+    }
     const key = `${edge}:${matches.sort((a, b) => a - b).join(",")}`;
     let id = partialIds.get(key);
     if (id === undefined) {
-      id = edgeCount + partialEdge.length;
+      id = stateCount + partialEdge.length;
       partialIds.set(key, id);
       partialEdge.push(edge);
       partialMatches.push(matches);
@@ -199,12 +253,12 @@ function searchByEdge(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Fi
   let bestSeed: Seed | null = null;
 
   const considerFinishers = (state: number, node: number, seed: Seed | null) => {
-    const edge = edgeOf(state);
-    const banned = restrictions?.get(edge);
+    const banned = bansAt(state);
+    const edge = arrivalOf(state);
     for (const finisher of finishers.get(node) ?? []) {
       if (finisher.edge >= 0 && banned?.has(finisher.edge)) continue;
       // Finishing part-way along an edge still counts as driving it.
-      if (finisher.edge >= 0 && advance(edge, matchesOf(state), finisher.edge) === null) continue;
+      if (finisher.edge >= 0 && edge >= 0 && advance(edge, matchesOf(state), finisher.edge) === null) continue;
       const total = costOfState(state) + finisher.cost;
       if (total < best) { best = total; bestArrival = state; bestFinisher = finisher; bestSeed = seed; }
     }
@@ -212,9 +266,10 @@ function searchByEdge(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Fi
 
   for (const seed of seeds) {
     if (seed.edge >= 0) {
-      // Already on a road: the seed *is* an arrival state at seed.node.
-      relax(seed.edge, seed.cost, -1, seed);
-      considerFinishers(seed.edge, seed.node, seed);
+      // Already on a road: the seed *is* an arrival at seed.node.
+      const state = stateFor(seed.edge, []);
+      relax(state, seed.cost, -1, seed.edge, seed);
+      considerFinishers(state, seed.node, seed);
       continue;
     }
     // Starting at a junction: no arriving edge, so no restriction applies yet.
@@ -223,33 +278,37 @@ function searchByEdge(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Fi
       if (total < best) { best = total; bestArrival = -1; bestFinisher = finisher; bestSeed = seed; }
     }
     for (let edge = graph.edgeOffsets[seed.node]; edge < graph.edgeOffsets[seed.node + 1]; edge += 1) {
-      relax(edge, seed.cost + costOf(edge), -1, seed);
+      if (!edgeAllowed(access, edge)) continue;
+      relax(stateFor(edge, []), seed.cost + costOf(edge), -1, edge, seed);
     }
   }
 
   while (queue.size) {
     if (queue.minimumPriority >= best) break;
     const state = queue.pop()!;
-    const edge = edgeOf(state);
+    const node = nodeOf(state);
     const matches = matchesOf(state);
-    const node = graph.edgeTargets[edge];
-    const banned = restrictions?.get(edge);
+    const banned = bansAt(state);
+    const arrival = arrivalOf(state);
     considerFinishers(state, node, null);
     for (let next = graph.edgeOffsets[node]; next < graph.edgeOffsets[node + 1]; next += 1) {
-      if (banned?.has(next)) continue;
-      const carried = advance(edge, matches, next);
+      if (banned?.has(next) || !edgeAllowed(access, next)) continue;
+      // Only a guarded or part-driven state can be inside a banned run.
+      const carried = arrival >= 0 && (state < guardedStates || state >= stateCount) ? advance(arrival, matches, next) : [];
       if (carried === null) continue;
-      relax(stateFor(next, carried), costOfState(state) + costOf(next), state, null);
+      relax(stateFor(next, carried), costOfState(state) + costOf(next), state, next, null);
     }
   }
 
   if (!bestFinisher) return null;
   const chain: number[] = [];
-  for (let state = bestArrival; state !== -1; state = state < edgeCount ? previousState[state] : partialPrevious[state - edgeCount]) {
-    chain.push(edgeOf(state));
+  for (let state = bestArrival; state !== -1; ) {
+    const via = state < stateCount ? cameVia[state] : partialEdge[state - stateCount];
+    if (via >= 0) chain.push(via);
+    state = state < stateCount ? cameFrom[state] : partialPrevious[state - stateCount];
   }
   chain.reverse();
-  const seed = bestSeed ?? (chain.length ? seedOf.get(chain[0])! : seeds[0]);
+  const seed = bestSeed ?? (chain.length ? seedOf.get(stateFor(chain[0], [])) ?? seeds[0] : seeds[0]);
   // A seed that supplied its own edge entered part-way along it, so that first
   // entry is not a full hop between two nodes.
   if (seed.edge >= 0 && chain[0] === seed.edge) chain.shift();
@@ -290,13 +349,76 @@ function snapSummary(snap: GraphSnap): RouteSnap {
  * makes re-checking a route against extra map tiles far cheaper than the
  * original search.
  */
-export type RouteOptions = { costBound?: number };
+export type RouteOptions = {
+  costBound?: number;
+  /**
+   * The lorry being routed, where the graph states physical limits. Roads it
+   * is too large or too heavy for are closed to the search and to snapping.
+   */
+  vehicle?: VehicleDimensions;
+};
+
+/** The node a snap stands on, for asking which piece of the network it is in. */
+function nodeOfSnap(snap: GraphSnap) {
+  return snap.kind === "node" ? snap.node : snap.projections[0].source;
+}
+
+/**
+ * A second attempt for a route that failed because an end snapped to the wrong
+ * piece of the network.
+ *
+ * Snapping finds the nearest road, which near a disconnected stub is the stub
+ * — a path fragment behind a fence, a service road in a compound, a stretch
+ * clipped at the edge of a tile. The route then fails although a usable road
+ * was a few metres further. Here the two ends are compared: if they sit in
+ * different pieces, the end in the smaller one is snapped again, this time
+ * only to roads joined to the other end.
+ *
+ * It runs only after a failure, so an ordinary route never pays for labelling
+ * the network.
+ */
+function reconnect(graph: RoadGraph, from: Coordinate, to: Coordinate, preference: RoutePreference, options: RouteOptions, access: Uint8Array | undefined): RouteResult | null {
+  const originSnap = snapToGraph(graph, from, undefined, access);
+  const destinationSnap = snapToGraph(graph, to, undefined, access);
+  if (!originSnap || !destinationSnap) return null;
+
+  const labels = componentsFor(graph);
+  const originLabel = labels[nodeOfSnap(originSnap)];
+  const destinationLabel = labels[nodeOfSnap(destinationSnap)];
+  // Both ends already in one piece: the search failed for some other reason,
+  // a one-way trap most likely, and a different snap will not mend it.
+  if (originLabel === destinationLabel) return null;
+
+  const sizes = componentSizes(labels);
+  // The end in the smaller piece is the one that snapped somewhere useless.
+  const moveOrigin = (sizes.get(originLabel) ?? 0) <= (sizes.get(destinationLabel) ?? 0);
+  const wanted = moveOrigin ? destinationLabel : originLabel;
+  const accept = (node: number) => labels[node] === wanted;
+  try {
+    return routeBetween(graph, from, to, preference, options, access, moveOrigin ? accept : undefined, moveOrigin ? undefined : accept);
+  } catch {
+    // Nothing joined to the other end is within snapping range either.
+    return null;
+  }
+}
 
 export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest", options: RouteOptions = {}): RouteResult {
   assertGraph(graph);
-  const originSnap = snapToGraph(graph, from);
+  // The vehicle narrows the profile's own mask, so every later step — snapping
+  // included — sees one answer about which roads are usable.
+  const access = accessForVehicle(graph, options.vehicle);
+  try {
+    return routeBetween(graph, from, to, preference, options, access);
+  } catch (error) {
+    if (!(error instanceof RouterError) || error.code !== "NO_ROUTE") throw error;
+    return reconnect(graph, from, to, preference, options, access) ?? (() => { throw error; })();
+  }
+}
+
+function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, preference: RoutePreference, options: RouteOptions, access: Uint8Array | undefined, acceptOrigin?: (node: number) => boolean, acceptDestination?: (node: number) => boolean): RouteResult {
+  const originSnap = snapToGraph(graph, from, undefined, access, acceptOrigin);
   if (!originSnap) throw new RouterError("ORIGIN_NOT_ON_GRAPH", "No routable road is close to the origin.");
-  const destinationSnap = snapToGraph(graph, to);
+  const destinationSnap = snapToGraph(graph, to, undefined, access, acceptDestination);
   if (!destinationSnap) throw new RouterError("DESTINATION_NOT_ON_GRAPH", "No routable road is close to the destination.");
 
   const distanceScale = graph.edgeDistanceScale ?? 1;
@@ -331,10 +453,10 @@ export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   const outcome: SearchOutcome = sameNode
     ? { edges: [], finisher: finisherList[0], seed: seeds[0] }
     : restrictions || sequenceIndex
-      ? searchByEdge(graph, seeds, finishers, destinationSnap.point, preference, restrictions, sequenceIndex, costBound)
-      : searchByNode(graph, seeds, finishers, destinationSnap.point, preference, costBound);
+      ? searchWithRestrictions(graph, seeds, finishers, destinationSnap.point, preference, restrictions, sequenceIndex, costBound, access)
+      : searchByNode(graph, seeds, finishers, destinationSnap.point, preference, costBound, access);
   if (direct && direct.cost >= costBound) direct = null;
-  if (!outcome && !direct) throw new RouterError("NO_ROUTE", "No car route connects the selected points.");
+  if (!outcome && !direct) throw new RouterError("NO_ROUTE", `No ${profileOf(graph).name} route connects the selected points.`);
 
   const searchCost = outcome ? outcome.seed.cost + outcome.edges.reduce((sum, edge) => sum + costOf(edge), 0) + outcome.finisher.cost : Infinity;
   const partial = (projection: EdgeProjection, fraction: number) => ({

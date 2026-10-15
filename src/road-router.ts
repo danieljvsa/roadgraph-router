@@ -1,14 +1,12 @@
 import { createRouteGraphLoader, type RouteGraphLoader } from "./manifest";
 import { openRoadGraphBundle, type BundleTile, type RoadGraphBundle } from "./bundle";
 import { route } from "./router";
-import { carRoutingProfile } from "./routing-profile";
+import { getRoutingProfile, getRoutingProfileById, maxSpeedMpsFor } from "./routing-profile";
 import { RouterError, type Coordinate, type RoadGraph, type RoutePreference, type RouteResult } from "./types";
+import { DEFAULT_VEHICLE_PRESET, resolveVehicle, type VehicleDimensions, type VehicleInput } from "./vehicle";
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type RouteLoader = Pick<RouteGraphLoader | RoadGraphBundle, "loadForRoute"> & Partial<Pick<RoadGraphBundle, "loadExpandedForRoute">>;
-
-/** The fastest any edge can be travelled, which bounds how far a given duration can reach. */
-const MAX_SPEED_MPS = (carRoutingProfile.maxSpeedKph * 1000) / 3600;
 
 /**
  * How much further than the straight line the first attempt is willing to look.
@@ -24,7 +22,23 @@ const INITIAL_DETOUR_FACTOR = 1.4;
  * graph holds; a finite value trades that proof for a smaller download and
  * still ignores tile size, since the limit is a ground distance.
  */
-export type RoadRouterOptions = { maxDetourFactor?: number };
+export type RoadRouterOptions = {
+  maxDetourFactor?: number;
+  /** How many stitched corridors a bundle keeps; see `BundleOpenOptions`. */
+  mergedCacheSize?: number;
+  /**
+   * Which vehicle to route as. Only a multi-profile bundle offers a choice;
+   * leaving it out uses the vehicle the bundle was compiled around.
+   */
+  profile?: string;
+  /**
+   * The lorry's size and weight, for a profile whose routes depend on them. A
+   * preset name, a set of dimensions, or a preset with fields overridden.
+   * `null` turns the filtering off, which is a decision to accept routes no
+   * real lorry may be able to drive.
+   */
+  vehicle?: VehicleInput | null;
+};
 const MINIMUM_BUDGET_METERS = 5_000;
 
 /** Widening steps used only while no route has been found at all. */
@@ -50,20 +64,86 @@ function haversineMeters(a: Coordinate, b: Coordinate) {
  * manifest, or an already-decoded graph.
  */
 export class RoadRouter {
-  private constructor(private readonly graph?: RoadGraph, private readonly loader?: RouteLoader, private readonly options: RoadRouterOptions = {}) {}
+  private constructor(private readonly graph?: RoadGraph, private readonly loader?: RouteLoader, private readonly options: RoadRouterOptions = {}, private readonly profileId?: number, private readonly bundleVehicle?: string) {
+    const profile = getRoutingProfileById(profileId ?? 0);
+    // Caller first, then whatever the bundle was compiled to suggest, then the
+    // library's own default. Each layer is visible rather than guessed at.
+    //
+    // Dimensions are carried past the vehicles that cannot act on them, which
+    // is what lets a reader move from a lorry to a car and back: they wait,
+    // unused, and apply again on the way back. Pairing them with a vehicle
+    // that cannot use them is refused in open(), where the caller made the
+    // pairing, rather than here, where carrying them is the point.
+    this.vehicle = profile?.usesPhysicalLimits && options.vehicle !== null
+      ? resolveVehicle(options.vehicle ?? undefined, bundleVehicle ?? DEFAULT_VEHICLE_PRESET)
+      : undefined;
+  }
+
+  /** The lorry these routes are for, where the profile depends on one. */
+  readonly vehicle?: VehicleDimensions;
 
   static fromGraph(graph: RoadGraph) {
     return new RoadRouter(graph);
   }
 
+  /**
+   * Asking for dimensions a profile cannot act on is a mistake worth saying
+   * out loud: accepting them silently would look like they had been applied.
+   * It is checked where the caller made the pairing, not when switching
+   * profiles, where carrying them over is deliberate.
+   */
+  private static assertVehicleApplies(profileId: number, options: RoadRouterOptions) {
+    if (options.vehicle === undefined || options.vehicle === null) return;
+    const profile = getRoutingProfileById(profileId);
+    if (profile && !profile.usesPhysicalLimits) {
+      throw new Error(`The "${profile.name}" profile does not use vehicle dimensions; only a profile that stores physical limits does.`);
+    }
+  }
+
   static async open(source: string | RoadGraph, fetcher?: FetchLike, options: RoadRouterOptions = {}) {
-    if (typeof source !== "string") return RoadRouter.fromGraph(source);
-    if (source.endsWith(".efrb")) return new RoadRouter(undefined, await openRoadGraphBundle(source, fetcher), options);
+    if (typeof source !== "string") {
+      RoadRouter.assertVehicleApplies(source.profileId ?? 0, options);
+      return new RoadRouter(source, undefined, options, source.profileId);
+    }
+    if (source.endsWith(".efrb")) {
+      const bundle = await openRoadGraphBundle(source, fetcher, { mergedCacheSize: options.mergedCacheSize, profile: options.profile });
+      RoadRouter.assertVehicleApplies(bundle.profileId, options);
+      return new RoadRouter(undefined, bundle, options, bundle.profileId, bundle.defaultVehicle);
+    }
     return new RoadRouter(undefined, await createRouteGraphLoader(source, fetcher), options);
   }
 
+  /** The vehicle this router is routing as, when the source names one. */
+  get profile() {
+    return getRoutingProfileById(this.profileId ?? 0)?.name;
+  }
+
+  /**
+   * Every vehicle this source can be read as, so a caller can offer a choice
+   * without knowing how the bundle was compiled. A bundle holding one vehicle
+   * reports that one, and a plain graph reports none.
+   */
+  get profiles(): string[] {
+    if (!isBundle(this.loader)) return this.profile ? [this.profile] : [];
+    return this.loader.profiles.map((id) => getRoutingProfileById(id)?.name).filter((name): name is string => Boolean(name));
+  }
+
+  /**
+   * The same bundle read as another vehicle. The shared half of every tile is
+   * already downloaded and stays so, which is the point of storing the road
+   * network once: switching vehicle costs only the small per-vehicle chunks.
+   */
+  withProfile(name: string): RoadRouter {
+    const wanted = getRoutingProfile(name);
+    if (!isBundle(this.loader)) throw new Error("Only a multi-profile bundle can be read as another vehicle.");
+    if (!this.loader.profiles.includes(wanted.id)) {
+      throw new Error(`This routing bundle does not hold the "${name}" profile. It holds: ${this.loader.profiles.map((id) => getRoutingProfileById(id)?.name ?? `id ${id}`).join(", ")}.`);
+    }
+    return new RoadRouter(undefined, this.loader, this.options, wanted.id, this.bundleVehicle);
+  }
+
   async route(from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest"): Promise<RouteResult> {
-    if (this.graph) return route(this.graph, from, to, preference);
+    if (this.graph) return route(this.graph, from, to, preference, { vehicle: this.vehicle });
     if (isBundle(this.loader)) return this.routeOverBundle(this.loader, from, to, preference);
     return this.routeOverLoader(this.loader!, from, to, preference);
   }
@@ -80,7 +160,14 @@ export class RoadRouter {
   private async routeOverBundle(bundle: RoadGraphBundle, from: Coordinate, to: Coordinate, preference: RoutePreference) {
     const straightLine = haversineMeters(from, to);
     const ceiling = straightLine * (this.options.maxDetourFactor ?? Infinity);
-    const reachFor = (result: RouteResult) => Math.min(ceiling, preference === "fastest" ? result.durationSeconds * MAX_SPEED_MPS : result.distanceMeters);
+    // How far a given duration can reach depends on the vehicle. Sizing a
+    // walk's tile budget with a car's top speed would ask for a radius of
+    // tiles forty times larger than the walk can cross.
+    // A multi-profile bundle's header records the fastest vehicle it holds, so
+    // the ceiling for the one actually selected comes from the profile itself.
+    const selected = this.profileId ?? bundle.profileId;
+    const maxSpeedMps = maxSpeedMpsFor({ profileId: selected, maxSpeedKph: bundle.profiles.length > 1 ? undefined : bundle.maxSpeedKph || undefined });
+    const reachFor = (result: RouteResult) => Math.min(ceiling, preference === "fastest" ? result.durationSeconds * maxSpeedMps : result.distanceMeters);
     let budget = Math.max(MINIMUM_BUDGET_METERS, Math.min(ceiling, straightLine * INITIAL_DETOUR_FACTOR));
 
     let loaded: BundleTile[] = [];
@@ -92,7 +179,7 @@ export class RoadRouter {
       const wanted = bundle.tilesWithinBudget(from, to, nextBudget);
       if (wanted.length <= loaded.length && wanted.every((tile) => loaded.some((held) => held.id === tile.id))) return false;
       loaded = wanted;
-      graph = await bundle.loadTiles(wanted);
+      graph = await bundle.loadTiles(wanted, selected);
       return true;
     };
 
@@ -103,21 +190,21 @@ export class RoadRouter {
     for (const factor of [1, ...SEARCH_WIDENING_FACTORS]) {
       if (factor !== 1 && !(await widen(factor === Infinity ? Infinity : budget * factor))) break;
       try {
-        best = route(graph!, from, to, preference);
+        best = route(graph!, from, to, preference, { vehicle: this.vehicle });
         break;
       } catch (error) {
         failure = error;
         if ((error as { code?: string }).code !== "NO_ROUTE") throw error;
       }
     }
-    if (!best) throw failure ?? new RouterError("NO_ROUTE", "No car route connects the selected points.");
+    if (!best) throw failure ?? new RouterError("NO_ROUTE", "No route connects the selected points.");
 
     // Phase 2: confirm it against every tile that could still beat it. The
     // bound makes each pass cheap, since anything no better is abandoned early.
     for (let pass = 0; pass < MAX_CONFIRMATION_PASSES; pass += 1) {
       if (!(await widen(reachFor(best)))) return best;
       try {
-        best = route(graph!, from, to, preference, { costBound: preference === "fastest" ? best.durationSeconds : best.distanceMeters });
+        best = route(graph!, from, to, preference, { costBound: preference === "fastest" ? best.durationSeconds : best.distanceMeters, vehicle: this.vehicle });
       } catch (error) {
         if ((error as { code?: string }).code !== "NO_ROUTE") throw error;
         return best; // Nothing in the added tiles beats what we already have.
@@ -129,13 +216,13 @@ export class RoadRouter {
   private async routeOverLoader(loader: RouteLoader, from: Coordinate, to: Coordinate, preference: RoutePreference) {
     const graph = await loader.loadForRoute(from, to);
     try {
-      return route(graph, from, to, preference);
+      return route(graph, from, to, preference, { vehicle: this.vehicle });
     } catch (error) {
       if (!(error instanceof Error) || (error as { code?: string }).code !== "NO_ROUTE" || !loader.loadExpandedForRoute) throw error;
       // A straight geographic corridor may omit a tile holding a bridge, a
       // one-way detour, or a road around a physical obstacle. Retry once with
       // the immediate ring of neighbouring tiles before reporting no route.
-      return route(await loader.loadExpandedForRoute(from, to), from, to, preference);
+      return route(await loader.loadExpandedForRoute(from, to), from, to, preference, { vehicle: this.vehicle });
     }
   }
 }

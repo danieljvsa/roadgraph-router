@@ -1,6 +1,8 @@
 import type { RoadGraph } from "./types";
 import { withSpatialIndex } from "./spatial-index";
 import { packTurnRestrictions, packTurnSequences } from "./turn-restrictions";
+import { accessMaskFor, edgeAllowed } from "./access";
+import { packEdgeLimits, fromDecimetres, fromHalfTonnes } from "./limits";
 
 const COORDINATE_SCALE = 10_000_000;
 /** Two edges count as the same road when their lengths agree to the centimetre. */
@@ -30,26 +32,67 @@ function nodeKey(latitude: number, longitude: number) {
 export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
   if (!graphs.length) throw new Error("At least one road graph is required.");
   if (graphs.length === 1) return graphs[0];
+  // Merging graphs compiled for different vehicles would produce a network
+  // that is legal for neither, so the profiles have to agree.
+  const profileId = graphs[0].profileId;
+  for (const graph of graphs) {
+    if (graph.profileId !== profileId) throw new Error("Cannot merge road graphs compiled for different routing profiles.");
+  }
 
   // 1. Stitch the node tables on shared coordinates.
-  const nodeIds = new Map<string, number>();
-  const latitudes: number[] = [];
-  const longitudes: number[] = [];
+  //
+  // A country-sized corridor stitches well over a million node copies, so this
+  // loop is the merge. Tiles compiled together share a coordinate scale, which
+  // means their stored integers can be compared directly: no divide, no round
+  // and no string key per copy. The integers are packed into one number
+  // relative to the region's own corner, and that only works while the region
+  // is small enough for the product to stay exact, so the general path stays
+  // for anything larger or for tiles that disagree on a scale.
+  const scale = graphs[0].coordinateScale ?? 1;
+  const uniformScale = graphs.every((graph) => (graph.coordinateScale ?? 1) === scale);
+  let minLatitude = Infinity;
+  let minLongitude = Infinity;
+  let span = Infinity;
+  if (uniformScale) {
+    let maxLatitude = -Infinity;
+    let maxLongitude = -Infinity;
+    for (const graph of graphs) {
+      for (let index = 0; index < graph.nodeLatitudes.length; index += 1) {
+        const latitude = graph.nodeLatitudes[index];
+        const longitude = graph.nodeLongitudes[index];
+        if (latitude < minLatitude) minLatitude = latitude;
+        if (latitude > maxLatitude) maxLatitude = latitude;
+        if (longitude < minLongitude) minLongitude = longitude;
+        if (longitude > maxLongitude) maxLongitude = longitude;
+      }
+    }
+    span = maxLongitude - minLongitude + 1;
+    if ((maxLatitude - minLatitude + 1) * span > Number.MAX_SAFE_INTEGER) span = Infinity;
+  }
+  const packed = Number.isFinite(span);
+
+  const totalNodes = graphs.reduce((sum, graph) => sum + graph.nodeLatitudes.length, 0);
+  const mergedLatitudes = new Int32Array(totalNodes);
+  const mergedLongitudes = new Int32Array(totalNodes);
+  let nodeCount = 0;
+  const nodeIds = new Map<number | string, number>();
   const nodeMaps: Uint32Array[] = [];
   let candidateEdges = 0;
   for (const graph of graphs) {
-    const coordinateScale = graph.coordinateScale ?? 1;
+    const graphScale = graph.coordinateScale ?? 1;
     const nodeMap = new Uint32Array(graph.nodeLatitudes.length);
     for (let index = 0; index < graph.nodeLatitudes.length; index += 1) {
-      const lat = graph.nodeLatitudes[index] / coordinateScale;
-      const lng = graph.nodeLongitudes[index] / coordinateScale;
-      const key = nodeKey(lat, lng);
+      const rawLatitude = graph.nodeLatitudes[index];
+      const rawLongitude = graph.nodeLongitudes[index];
+      const key = packed
+        ? (rawLatitude - minLatitude) * span + (rawLongitude - minLongitude)
+        : nodeKey(rawLatitude / graphScale, rawLongitude / graphScale);
       let mergedIndex = nodeIds.get(key);
       if (mergedIndex === undefined) {
-        mergedIndex = latitudes.length;
+        mergedIndex = nodeCount++;
         nodeIds.set(key, mergedIndex);
-        latitudes.push(lat);
-        longitudes.push(lng);
+        mergedLatitudes[mergedIndex] = graphScale === COORDINATE_SCALE ? rawLatitude : Math.round((rawLatitude / graphScale) * COORDINATE_SCALE);
+        mergedLongitudes[mergedIndex] = graphScale === COORDINATE_SCALE ? rawLongitude : Math.round((rawLongitude / graphScale) * COORDINATE_SCALE);
       }
       nodeMap[index] = mergedIndex;
     }
@@ -57,7 +100,6 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
     candidateEdges += graph.edgeTargets.length;
   }
   nodeIds.clear();
-  const nodeCount = latitudes.length;
 
   // 2. Reserve one slot per incoming copy, grouped by source node, so each
   //    node's copies sit together and can be deduplicated by a short scan.
@@ -155,16 +197,53 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
     }
   }
 
-  // 5. Rebase every tile's restrictions onto the merged edge numbering.
+  // 5. Rebase every tile's restrictions, access and limits onto the merged
+  //    edge numbering. All three are written against edge numbers that the
+  //    merge has just changed, and a corridor that lost them would route a
+  //    lorry under a bridge it does not fit through.
   const bannedPairs: [number, number][] = [];
   const bannedSequences: number[][] = [];
+  const hasAccess = graphs.some((graph) => graph.edgeAccess);
+  const mergedAccess = hasAccess ? accessMaskFor(edgeCount, () => true) : undefined;
+  const limitRows = new Map<number, { heightMeters?: number; widthMeters?: number; lengthMeters?: number; weightTonnes?: number }>();
   for (let index = 0; index < graphs.length; index += 1) {
     const graph = graphs[index];
     const edgeMap = edgeMaps[index];
     const rebase = (edge: number) => slotToEdge[edgeMap[edge]];
+
+    if (mergedAccess) {
+      // A road one tile says this vehicle may not use is one it may not use,
+      // whichever tile the merge happened to take the edge from.
+      for (let edge = 0; edge < graph.edgeTargets.length; edge += 1) {
+        if (edgeAllowed(graph.edgeAccess, edge)) continue;
+        const merged = rebase(edge);
+        if (merged >= 0) mergedAccess[merged >> 3] &= ~(1 << (merged & 7));
+      }
+    }
+
+    const limits = graph.edgeLimits;
+    if (limits) {
+      for (let row = 0; row < limits.edges.length; row += 1) {
+        const merged = rebase(limits.edges[row]);
+        if (merged < 0) continue;
+        const existing = limitRows.get(merged) ?? {};
+        // Two tiles describing the same road must agree; where they do not,
+        // the stricter limit is the safe one to keep.
+        const stricter = (left: number | undefined, right: number) => (left === undefined ? right : Math.min(left, right));
+        if (limits.heightDecimetres[row]) existing.heightMeters = stricter(existing.heightMeters, fromDecimetres(limits.heightDecimetres[row]));
+        if (limits.widthDecimetres[row]) existing.widthMeters = stricter(existing.widthMeters, fromDecimetres(limits.widthDecimetres[row]));
+        if (limits.lengthDecimetres[row]) existing.lengthMeters = stricter(existing.lengthMeters, fromDecimetres(limits.lengthDecimetres[row]));
+        if (limits.weightHalfTonnes[row]) existing.weightTonnes = stricter(existing.weightTonnes, fromHalfTonnes(limits.weightHalfTonnes[row]));
+        limitRows.set(merged, existing);
+      }
+    }
+
     const { turnRestrictionFromEdges: fromEdges, turnRestrictionToEdges: toEdges } = graph;
     if (fromEdges && toEdges) {
       for (let pair = 0; pair < fromEdges.length; pair += 1) {
+        // A restriction this vehicle is excepted from is dropped here rather
+        // than carried as a mask, so the merged graph needs no mask at all.
+        if (!edgeAllowed(graph.restrictionMask, pair)) continue;
         const fromEdge = rebase(fromEdges[pair]);
         const toEdge = rebase(toEdges[pair]);
         if (fromEdge >= 0 && toEdge >= 0) bannedPairs.push([fromEdge, toEdge]);
@@ -173,7 +252,9 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
     const offsets = graph.turnRestrictionSequenceOffsets;
     const sequenceEdges = graph.turnRestrictionSequenceEdges;
     if (!offsets || !sequenceEdges) continue;
+    const pairCount = fromEdges?.length ?? 0;
     for (let sequence = 0; sequence + 1 < offsets.length; sequence += 1) {
+      if (!edgeAllowed(graph.restrictionMask, pairCount + sequence)) continue;
       const rebased: number[] = [];
       for (let at = offsets[sequence]; at < offsets[sequence + 1]; at += 1) rebased.push(rebase(sequenceEdges[at]));
       // A run that lost an edge to clipping cannot be enforced, and keeping a
@@ -181,15 +262,20 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
       if (rebased.every((edge) => edge >= 0)) bannedSequences.push(rebased);
     }
   }
+  const mergedLimits = packEdgeLimits([...limitRows].map(([edge, limits]) => ({ edge, limits })));
 
   return withSpatialIndex({
-    nodeLatitudes: Int32Array.from(latitudes, (value) => Math.round(value * COORDINATE_SCALE)),
-    nodeLongitudes: Int32Array.from(longitudes, (value) => Math.round(value * COORDINATE_SCALE)),
+    nodeLatitudes: mergedLatitudes.slice(0, nodeCount),
+    nodeLongitudes: mergedLongitudes.slice(0, nodeCount),
     coordinateScale: COORDINATE_SCALE,
     edgeOffsets,
     edgeTargets,
     edgeDistancesMeters,
     edgeDurationsSeconds,
+    ...(profileId ? { profileId } : {}),
+    ...(graphs[0].maxSpeedKph ? { maxSpeedKph: graphs[0].maxSpeedKph } : {}),
+    ...(mergedAccess ? { edgeAccess: mergedAccess } : {}),
+    ...(mergedLimits ? { edgeLimits: mergedLimits } : {}),
     ...(pointCount ? { edgeShapeOffsets, edgeShapeLatitudes, edgeShapeLongitudes } : {}),
     ...(bannedPairs.length ? packTurnRestrictions(bannedPairs) : {}),
     ...(bannedSequences.length ? packTurnSequences(bannedSequences) : {}),

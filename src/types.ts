@@ -37,6 +37,35 @@ export interface RoadGraph {
   edgeDistanceScale?: number;
   /** Edge duration values are multiplied by this scale. Omitted means seconds. */
   edgeDurationScale?: number;
+  /**
+   * The routing profile this graph was compiled for, as a `ProfileId`. Absent
+   * means the graph predates profile metadata, and every such graph is a car
+   * graph. A graph only answers for the vehicle it was compiled for: a car
+   * graph has no footpaths in it to walk along.
+   */
+  profileId?: number;
+  /**
+   * The profile's speed ceiling in km/h, carried so a reader can bound its A*
+   * heuristic and its tile budget without knowing the profile's rules. Absent
+   * falls back to the profile's own ceiling.
+   */
+  maxSpeedKph?: number;
+  /**
+   * One bit per edge saying whether this profile may use it, present only on a
+   * graph assembled from a shared topology that several profiles share. Absent
+   * means every edge is usable. See `./access`.
+   */
+  edgeAccess?: Uint8Array;
+  /**
+   * The physical limits in force on the few edges that state any. Present only
+   * for a profile whose routes depend on the vehicle's size. See `./limits`.
+   */
+  edgeLimits?: EdgeLimits;
+  /**
+   * One bit per turn restriction, saying whether this vehicle obeys it. The
+   * pairs come first, then the sequences. Absent means all of them apply.
+   */
+  restrictionMask?: Uint8Array;
   /** Optional intermediate vertices per directed edge, stored using coordinateScale. */
   edgeShapeOffsets?: Uint32Array;
   edgeShapeLatitudes?: Int32Array;
@@ -96,4 +125,50 @@ export class RouterError extends Error {
     super(message);
     this.name = "RouterError";
   }
+}
+
+/**
+ * Signed height, width, length and weight limits, for the edges that have them.
+ *
+ * A side table rather than four columns over every edge: the overwhelming
+ * majority of roads state no limit at all, so columns would spend four bytes
+ * per edge saying nothing nearly everywhere. `edges` is sorted, and the four
+ * arrays run alongside it. A zero means the limit is not stated, which is not
+ * the same as a limit of zero.
+ */
+export interface EdgeLimits {
+  edges: Uint32Array;
+  /** Tenths of a metre. */
+  heightDecimetres: Uint8Array;
+  widthDecimetres: Uint8Array;
+  lengthDecimetres: Uint8Array;
+  /** Half-tonnes. */
+  weightHalfTonnes: Uint8Array;
+}
+
+/**
+ * A tile's vehicle-independent half: everything a v7 `shared` chunk holds.
+ * It is not routable on its own — a profile supplies the durations.
+ */
+export type SharedRoadGraph = Omit<RoadGraph, "edgeDurationsSeconds" | "edgeDurationScale" | "profileId" | "maxSpeedKph" | "edgeAccess">;
+
+/** A tile's vehicle-dependent half: what a v7 `profile` chunk holds. */
+export interface ProfileChunk {
+  profileId: number;
+  maxSpeedKph: number;
+  edgeDurationScale: number;
+  edgeDurationsSeconds: Uint16Array;
+  /** One bit per edge; absent means this profile may use every road in the tile. */
+  edgeAccess?: Uint8Array;
+  /** Signed limits for the few edges that state any; absent for vehicles whose size does not matter. */
+  edgeLimits?: EdgeLimits;
+  /**
+   * One bit per turn restriction the shared chunk holds, saying whether this
+   * vehicle obeys it. `except=hgv` lifts a restriction for lorries and not for
+   * cars, so a shared restriction list needs a per-vehicle answer. Absent
+   * means every restriction applies.
+   */
+  restrictionMask?: Uint8Array;
+  /** How many restrictions that mask covers: the pairs, then the sequences. */
+  restrictionCount?: number;
 }

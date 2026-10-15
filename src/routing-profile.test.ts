@@ -117,5 +117,5 @@ describe("car routing profile: turn restriction relations", () => {
 
 it("reports unknown profiles by name", () => {
   expect(getRoutingProfile("car")).toBe(car);
-  expect(() => getRoutingProfile("bicycle")).toThrow(/Unknown routing profile/);
+  expect(() => getRoutingProfile("hovercraft")).toThrow(/Unknown routing profile/);
 });
