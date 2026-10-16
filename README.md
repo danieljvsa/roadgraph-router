@@ -1370,11 +1370,11 @@ This routing bundle was compiled for a profile this build does not support (id 6
 
 | | 0.1.0 | 0.2.0 | 0.3.0 | 0.4.0 |
 | --- | --- | --- | --- | --- |
-| Tarball | 46.4 kB | 75.9 kB | 91.0 kB | 128.7 kB |
-| Unpacked | 182.8 kB | 289.3 kB | 342.1 kB | 453.7 kB |
-| Bundled for a browser, gzipped | 13.6 kB | 21.1 kB | 24.8 kB | **31.0 kB** |
+| Tarball | 46.4 kB | 75.9 kB | 91.0 kB | 136.3 kB |
+| Unpacked | 182.8 kB | 289.3 kB | 342.1 kB | 476.4 kB |
+| Bundled for a browser, gzipped | 13.6 kB | 21.1 kB | 24.8 kB | **32.2 kB** |
 
-Railways cost a road-only application about **3.5 kB gzipped** that it will
+Railways cost a road-only application about **4.7 kB gzipped** that it will
 not use, measured as the whole public surface bundled with esbuild: 27.5 kB
 before, 31.0 kB after. It is not zero and it is not tree-shakeable, because
 `routingProfiles` is a registry that names every profile, and the constraint

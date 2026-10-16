@@ -244,8 +244,8 @@ describes how trains are normally run, not what the track permits.
 
 ### Cost
 
-Railways add about **3.5 kB gzipped** to a browser bundle that will never use
-them — 27.5 kB to 31.0 kB for the whole public surface. It is not
+Railways add about **4.7 kB gzipped** to a browser bundle that will never use
+them — 27.5 kB to 32.2 kB for the whole public surface. It is not
 tree-shakeable: `routingProfiles` names every profile and the constraint
 module is reached from `route()`. Hiding it behind a dynamic import would make
 profile lookup asynchronous, which is a worse trade. Runtime dependencies are
