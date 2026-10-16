@@ -7,6 +7,13 @@ export { searchBoundsFor, straightLineAtMost } from "./search-bounds";
 export type { SearchBounds } from "./search-bounds";
 export { componentSizes, componentsFor } from "./connectivity";
 export { accessAvoiding, countAvoided, touchesArea, type AvoidArea } from "./avoid";
+export {
+  Electrification, RailFrequency, RailService, RailUsage, UNKNOWN_RAILWAY, RAILWAY_ATTRIBUTE_KEYS,
+  accessForRailway, constrainsAnything, countRailwayBlocked, packEdgeRailway, parseElectrification, parseFrequency,
+  parseGaugeMm, parseService, parseUsage, parseVoltage, railwayAttributesFor, railwayCertainty, railwayOf, railwayRefusal,
+  type RailFrequencyName, type RailUsageName, type RailwayCertainty, type RailwayConstraints,
+} from "./railway";
+export { createMetroProfile, createTrainProfile, isRailwayProfile, metroRoutingProfile, trainRoutingProfile, type RailwayInclusion, type RailwayProfileOptions } from "./railway-profile";
 export { accessForVehicle, countBlocked, fromDecimetres, fromHalfTonnes, packEdgeLimits, toDecimetres, toHalfTonnes } from "./limits";
 export {
   ConditionKind, MAX_STORED_VALUES, accessAtTime, conditionalDurations, conditionalValue, conditionHolds, conditionsOf, conditionsOnEdge,
@@ -31,10 +38,10 @@ export { ProfileId, carRoutingProfile, getRoutingProfile, getRoutingProfileById,
 export { DEFAULT_VEHICLE_PRESET, VEHICLE_PRESETS, VehiclePresetId, resolveVehicle, vehiclePreset, vehiclePresetName } from "./vehicle";
 export type { CompactGraphOptions } from "./compact";
 export type { BundleBounds, BundleChunkRef, BundleEncodeOptions, BundleGraphTile, BundleOpenOptions, BundleProfiledTile, BundleTile, RoadGraphBundle } from "./bundle";
-export type { Coordinate, CoordinateStorage, EdgeConditions, EdgeLimits, GeoJsonLineString, GeoJsonPosition, ProfileChunk, RouteSnap, EdgeWeightStorage, NodeSpatialIndex, RoadGraph, RoutePreference, RouteResult, RouterErrorCode, SharedRoadGraph } from "./types";
+export type { Coordinate, CoordinateStorage, EdgeConditions, EdgeLimits, EdgeRailway, GeoJsonLineString, GeoJsonPosition, ProfileChunk, RouteSnap, EdgeWeightStorage, NodeSpatialIndex, RoadGraph, RoutePreference, RouteResult, RouterErrorCode, SharedRoadGraph } from "./types";
 export type { GraphBounds, GraphTile, RouteGraphLoader, RouteGraphManifest } from "./manifest";
 export type { GuardedJunctions, TurnRestrictionIndex, TurnSequenceIndex } from "./turn-restrictions";
 export type { EdgeProjection, GraphSnap } from "./snap";
 export type { EdgeSpatialIndex } from "./edge-index";
-export type { OsmTags, ParsedTurnRestriction, RoutingProfile, TurnRestrictionKind, VehicleLimits, WayTraversal } from "./routing-profile";
+export type { NetworkKind, OsmTags, ParsedTurnRestriction, RailwayAttributes, RoutingProfile, TurnRestrictionKind, VehicleLimits, WayTraversal } from "./routing-profile";
 export type { VehicleDimensions, VehicleInput } from "./vehicle";

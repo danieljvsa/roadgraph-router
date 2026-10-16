@@ -64,6 +64,12 @@ export interface RoadGraph {
   /** Conditional restrictions for the edges that carry one; absent when none do. */
   edgeConditions?: EdgeConditions;
   /**
+   * What the track is, for a railway profile: gauge, electrification, what the
+   * line is for. Absent on every road graph, and on a railway graph whose
+   * tracks state nothing at all. See `./railway`.
+   */
+  edgeRailway?: EdgeRailway;
+  /**
    * One bit per turn restriction, saying whether this vehicle obeys it. The
    * pairs come first, then the sequences. Absent means all of them apply.
    */
@@ -178,10 +184,47 @@ export interface EdgeConditions {
 }
 
 /**
+ * What the tracks of a railway graph are made of.
+ *
+ * Unlike the limits and conditions above, nearly every railway edge states
+ * something, so a row per edge would be the wrong shape. It is stored the
+ * other way round instead: a table of the distinct combinations that occur,
+ * and one 16-bit row index per edge. A whole line is built to one gauge and
+ * one electrical system, so in the Portugal extract several thousand edges
+ * collapse onto a few dozen rows.
+ *
+ * Row 0 always states nothing, which is what an edge with no railway tags
+ * points at. Every value is a *stated* fact: zero and `unknown` mean the way
+ * was silent, never that the answer is no. See `./railway`.
+ */
+export interface EdgeRailway {
+  /** Per edge: which row applies. Zero means the track stated nothing. */
+  edgeRows: Uint16Array;
+  /** Track gauge in millimetres; 0 when unstated. */
+  gaugeMm: Uint16Array;
+  /** The second gauge of a dual-gauge track; 0 when there is none. */
+  secondGaugeMm: Uint16Array;
+  /** Contact system voltage; 0 when unstated. */
+  voltage: Uint16Array;
+  /** The second voltage of a dual-system track; 0 when there is none. */
+  secondVoltage: Uint16Array;
+  /** See `Electrification` in `./railway`. */
+  electrification: Uint8Array;
+  /** See `RailFrequency` in `./railway`. */
+  frequency: Uint8Array;
+  /** The second frequency of a dual-system track; `unknown` when there is none. */
+  secondFrequency: Uint8Array;
+  /** See `RailUsage` in `./railway`. */
+  usage: Uint8Array;
+  /** See `RailService` in `./railway`. */
+  service: Uint8Array;
+}
+
+/**
  * A tile's vehicle-independent half: everything a v7 `shared` chunk holds.
  * It is not routable on its own — a profile supplies the durations.
  */
-export type SharedRoadGraph = Omit<RoadGraph, "edgeDurationsSeconds" | "edgeDurationScale" | "profileId" | "maxSpeedKph" | "edgeAccess">;
+export type SharedRoadGraph = Omit<RoadGraph, "edgeDurationsSeconds" | "edgeDurationScale" | "profileId" | "maxSpeedKph" | "edgeAccess" | "edgeRailway">;
 
 /** A tile's vehicle-dependent half: what a v7 `profile` chunk holds. */
 export interface ProfileChunk {
@@ -195,6 +238,8 @@ export interface ProfileChunk {
   edgeLimits?: EdgeLimits;
   /** Conditional restrictions for the edges that carry one; absent when none do. */
   edgeConditions?: EdgeConditions;
+  /** What the track is, for a railway profile; absent for every road vehicle. */
+  edgeRailway?: EdgeRailway;
   /**
    * One bit per turn restriction the shared chunk holds, saying whether this
    * vehicle obeys it. `except=hgv` lifts a restriction for lorries and not for

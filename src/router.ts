@@ -4,6 +4,7 @@ import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
 import { edgeAllowed } from "./access";
 import { accessForVehicle } from "./limits";
+import { accessForRailway, type RailwayConstraints } from "./railway";
 import { accessAvoiding, type AvoidArea } from "./avoid";
 import { accessAtTime, conditionalDurations, conditionsOf, travelTimeFrom, type Circumstances, type TravelTime } from "./conditional";
 import { componentSizes, componentsFor } from "./connectivity";
@@ -368,6 +369,14 @@ export type RouteOptions = {
    */
   vehicle?: VehicleDimensions;
   /**
+   * What the train being routed can run on, where the graph describes its
+   * track. Track whose tags contradict a constraint is closed to the search
+   * and to snapping; track that says nothing stays open, because silence in
+   * OSM is an absent survey rather than a statement of incompatibility. See
+   * `./railway` for the full policy and for `strictUnknown`, which reverses it.
+   */
+  railway?: RailwayConstraints;
+  /**
    * When the journey starts, in the local time of the roads being travelled.
    *
    * Leaving it out ignores every conditional restriction, which is what this
@@ -505,9 +514,12 @@ export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   // The vehicle narrows the profile's own mask, so every later step — snapping
   // included — sees one answer about which roads are usable.
   const vehicleAccess = accessForVehicle(graph, options.vehicle);
+  // What the train can run on narrows it the same way, and composes with the
+  // step before it: each one takes the mask the last one produced.
+  const trackAccess = accessForRailway(graph, options.railway, vehicleAccess);
   // The departure time narrows the mask further, so snapping and search agree
   // about which roads are usable at the moment the journey starts.
-  const timed = accessAtTime(graph, conditionsOf(graph), departureTime(options), options.vehicle, vehicleAccess, options.circumstances);
+  const timed = accessAtTime(graph, conditionsOf(graph), departureTime(options), options.vehicle, trackAccess, options.circumstances);
   // What the caller knows is shut comes last: it outranks anything the map
   // has to say about the road being open.
   const access = accessAvoiding(graph, options.avoid, timed);

@@ -1,7 +1,7 @@
 {
   "name": "roadgraph-router",
-  "version": "0.3.0",
-  "description": "Compile any OpenStreetMap PBF extract into compact, range-addressable routing bundles and route over them with A* in Node.js or the browser.",
+  "version": "0.4.0",
+  "description": "Compile any OpenStreetMap PBF extract into compact, range-addressable routing bundles and route over them with A* in Node.js or the browser. Roads for five vehicle profiles, and railway infrastructure for train and metro.",
   "private": false,
   "type": "module",
   "main": "./dist/index.js",
@@ -23,7 +23,10 @@
     "offline",
     "browser",
     "turn-restrictions",
-    "geojson"
+    "geojson",
+    "railway",
+    "rail-routing",
+    "metro"
   ],
   "repository": {
     "type": "git",

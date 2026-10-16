@@ -25,19 +25,36 @@ async function loadLibrary() {
   }
 }
 
-/** `--profile car,truck` compiles one bundle both vehicles can be routed on. */
-async function loadProfiles(names) {
+/**
+ * `--profile car,truck` compiles one bundle both vehicles can be routed on.
+ *
+ * A road and a railway share no topology beyond the ground they cross, so a
+ * bundle may hold several road profiles or several railway profiles but never
+ * both: a shared chunk holding both networks would make every road-routing
+ * user download the track, which is exactly what this refuses.
+ */
+async function loadProfiles(names, include) {
   const library = await loadLibrary();
   const wanted = names.split(",").map((name) => name.trim()).filter(Boolean);
   if (!wanted.length) throw new Error("--profile needs at least one vehicle.");
   if (new Set(wanted).size !== wanted.length) throw new Error("--profile lists the same vehicle twice.");
-  return { library, profiles: wanted.map((name) => library.getRoutingProfile(name)) };
+  const profiles = wanted.map((name) => {
+    if (name === "train") return library.createTrainProfile({ include });
+    if (name === "metro") return library.createMetroProfile({ include });
+    return library.getRoutingProfile(name);
+  });
+  const networks = new Set(profiles.map((entry) => entry.networkKind));
+  if (networks.size > 1) {
+    throw new Error("--profile cannot mix road and railway profiles in one bundle: they share no topology, and a combined bundle would make every road user download the track. Compile them separately.");
+  }
+  if (include?.length && networks.has("road")) throw new Error("--railway-include only applies to the train and metro profiles.");
+  return { library, profiles, networkKind: profiles[0].networkKind };
 }
 
 /** Reports a problem the way a command-line tool should, without a stack trace. */
 function fail(message) { console.error(`roadgraph-compile: ${message}`); process.exit(1); }
 
-function usage() { console.error("Usage: roadgraph-compile input.osm.pbf --output region.efrb [--profile car,truck,motorcycle] [--default-vehicle articulated] [--tile-size-km 120] [--padding-km 2] [--compression gzip|none] [--shape-tolerance-m 2] [--max-memory-mb 2048] [--bbox minLon,minLat,maxLon,maxLat]"); }
+function usage() { console.error("Usage: roadgraph-compile input.osm.pbf --output region.efrb [--profile car,truck,motorcycle|train|metro] [--railway-include disused,narrow_gauge] [--default-vehicle articulated] [--tile-size-km 120] [--padding-km 2] [--compression gzip|none] [--shape-tolerance-m 2] [--max-memory-mb 2048] [--bbox minLon,minLat,maxLon,maxLat]"); }
 function opt(name, fallback) { const i = process.argv.indexOf(name); return i < 0 ? fallback : process.argv[i + 1]; }
 function inputArg() { const values = process.argv.slice(2); for (let i = 0; i < values.length; i += 1) { if (values[i].startsWith("--")) { i += 1; continue; } return values[i]; } return undefined; }
 function parseBounds(value) { const p = value?.split(",").map(Number); return p?.length === 4 && p.every(Number.isFinite) && p[0] < p[2] && p[1] < p[3] ? { minLon: p[0], minLat: p[1], maxLon: p[2], maxLat: p[3] } : undefined; }
@@ -88,6 +105,9 @@ function createTileGraph(tile, profileCount) {
     // Sparse: almost no road states a height or a weight.
     edgeLimits: perProfile(() => new Map()),
     edgeConditions: perProfile(() => []),
+    // What the track is, for a railway profile. Keyed by edge because an edge
+    // states one set of facts whichever way it is run over.
+    edgeRailway: perProfile(() => new Map()),
     restrictions: perProfile(() => []),
     runs: perProfile(() => []),
   };
@@ -218,7 +238,7 @@ function encodeEfr2(graph, library, profiles) {
     ...(runs.length ? { turnRestrictionSequenceOffsets: runOffsets, turnRestrictionSequenceEdges: Uint32Array.from(runs.flat()) } : {}),
   };
 
-  const split = profiles.length > 1 || profiles.some((entry) => entry.usesPhysicalLimits);
+  const split = profiles.length > 1 || profiles.some((entry) => entry.usesPhysicalLimits || entry.usesRailwayAttributes);
   if (!split) {
     // One vehicle writes one chunk, and that chunk is its whole graph, so the
     // conditional restrictions belong in it. Without this a bundle compiled
@@ -227,12 +247,13 @@ function encodeEfr2(graph, library, profiles) {
       graph.edgeConditions[0].map((row) => ({ ...row, edge: placement[row.edge] })),
     );
     const encoded = library.encodeCompactGraph(onlyConditions ? { ...assembled, edgeConditions: onlyConditions } : assembled);
-    return { shared: encoded, profiles: [], limitedEdges: 0, conditionalEdges: onlyConditions?.edges.length ?? 0 };
+    return { shared: encoded, profiles: [], limitedEdges: 0, conditionalEdges: onlyConditions?.edges.length ?? 0, railwayRows: 0 };
   }
 
   const restrictionCount = banned.length + runs.length;
   let limitedEdges = 0;
   let conditionalEdges = 0;
+  let railwayRows = 0;
   const chunks = profiles.map((entry, profileIndex) => {
     const usable = graph.edgeUsable[profileIndex].view();
     // `placement` maps a built edge to its stored position, so the mask is
@@ -248,6 +269,10 @@ function encodeEfr2(graph, library, profiles) {
       graph.edgeConditions[profileIndex].map((row) => ({ ...row, edge: placement[row.edge] })),
     );
     conditionalEdges += edgeConditions?.edges.length ?? 0;
+    const railwayEntries = [];
+    for (const [edge, railway] of graph.edgeRailway[profileIndex]) railwayEntries.push({ edge: placement[edge], railway });
+    const edgeRailway = railwayEntries.length ? library.packEdgeRailway(railwayEntries, edges) : undefined;
+    railwayRows = Math.max(railwayRows, edgeRailway?.gaugeMm.length ?? 0);
     const restrictionMask = library.accessMaskFor(restrictionCount, (index) => index < banned.length
       ? pairOwners[pairOrder[index]].has(profileIndex)
       : runOwners[runOrder[index - banned.length]].has(profileIndex));
@@ -259,10 +284,11 @@ function encodeEfr2(graph, library, profiles) {
       edgeAccess,
       ...(edgeConditions ? { edgeConditions } : {}),
       ...(edgeLimits ? { edgeLimits } : {}),
+      ...(edgeRailway ? { edgeRailway } : {}),
       ...(restrictionCount ? { restrictionCount, restrictionMask } : {}),
     });
   });
-  return { shared: library.encodeSharedGraph(assembled), profiles: chunks, limitedEdges, conditionalEdges };
+  return { shared: library.encodeSharedGraph(assembled), profiles: chunks, limitedEdges, conditionalEdges, railwayRows };
 }
 
 /** Writes the fixed-size directory, then streams each chunk straight from the
@@ -398,8 +424,8 @@ async function firstPass(file, roadFile, limitBytes, profiles) {
     keeperNodes.add(refs[0]); keeperNodes.add(refs[refs.length - 1]);
     await write(stream, {
       id: entity.id, refs,
-      forward: lanes.map((lane) => lane?.forward ? { speed: lane.forwardSpeedKph, limits: lane.forwardLimits ?? null, conditions: lane.conditions ?? null } : null),
-      reverse: lanes.map((lane) => lane?.backward ? { speed: lane.backwardSpeedKph, limits: lane.backwardLimits ?? null, conditions: lane.conditions ?? null } : null),
+      forward: lanes.map((lane) => lane?.forward ? { speed: lane.forwardSpeedKph, limits: lane.forwardLimits ?? null, conditions: lane.conditions ?? null, railway: lane.railway ?? null } : null),
+      reverse: lanes.map((lane) => lane?.backward ? { speed: lane.backwardSpeedKph, limits: lane.backwardLimits ?? null, conditions: lane.conditions ?? null, railway: lane.railway ?? null } : null),
     });
   }
   await new Promise((resolve, reject) => stream.end((error) => error ? reject(error) : resolve()));
@@ -542,6 +568,7 @@ async function build(roadFile, coordinates, topology, layout, bounds, tolerance,
         graph.edgeDurations[profileIndex].push(distance / (speed * (1000 / 3600)));
         graph.edgeUsable[profileIndex].push(lane ? 1 : 0);
         if (lane?.limits) graph.edgeLimits[profileIndex].set(index, lane.limits);
+        if (lane?.railway) graph.edgeRailway[profileIndex].set(index, lane.railway);
         if (lane?.conditions) for (const condition of lane.conditions) graph.edgeConditions[profileIndex].push({ edge: index, ...condition });
       }
       graph.edgeWay.push(tracked ? wayId : 0);
@@ -615,6 +642,7 @@ async function build(roadFile, coordinates, topology, layout, bounds, tolerance,
 
 const input = inputArg(), outputOption = opt("--output"), profileName = opt("--profile", "car"), compression = opt("--compression", "gzip"), tileSizeKm = Number(opt("--tile-size-km", "120")), paddingKm = Number(opt("--padding-km", "2")), tolerance = Number(opt("--shape-tolerance-m", "2")), requested = parseBounds(opt("--bbox"));
 const maxMemoryMb = Number(opt("--max-memory-mb", "2048")), defaultVehicle = opt("--default-vehicle");
+const railwayInclude = (opt("--railway-include") ?? "").split(",").map((name) => name.trim()).filter(Boolean);
 /**
  * The coordinate index needs `node:sqlite`, which arrived in Node 22.5. The
  * import itself sits in the second pass, by which point the first pass has
@@ -634,7 +662,11 @@ else if (!process.env.ROADGRAPH_HEAP_LIMITED) {
   process.exitCode = result.status ?? 1;
 }
 else {
-  const { library, profiles } = await loadProfiles(profileName);
+  // Choosing the profiles is the first thing that can go wrong, and an
+  // unknown name or an impossible combination is a user's mistake rather than
+  // a crash — so it is reported the way every other mistake here is.
+  const { library, profiles, networkKind } = await loadProfiles(profileName, railwayInclude)
+    .catch((error) => fail(error instanceof Error ? error.message : String(error)));
   const profile = profiles[0];
   if (defaultVehicle && !profiles.some((entry) => entry.usesPhysicalLimits)) fail("--default-vehicle only applies to a profile whose routes depend on the vehicle's size, such as truck.");
   if (defaultVehicle) library.vehiclePreset(defaultVehicle);
@@ -660,6 +692,7 @@ else {
     const spillPath = resolve(workspace, "chunks.bin"), spill = createWriteStream(spillPath), chunks = [];
     let limitedEdges = 0;
     let conditionalEdges = 0;
+    let railwayRows = 0;
     for (let index = 0; index < built.graphs.length; index += 1) {
       const graph = built.graphs[index];
       const encoded = encodeEfr2(graph, library, profiles);
@@ -667,6 +700,7 @@ else {
       // shared row before the rows that depend on it.
       limitedEdges += encoded.limitedEdges ?? 0;
       conditionalEdges += encoded.conditionalEdges ?? 0;
+      railwayRows = Math.max(railwayRows, encoded.railwayRows ?? 0);
       for (const [profileId, buffer] of [[0, encoded.shared], ...encoded.profiles.map((chunk, at) => [profiles[at].id, chunk])]) {
         const raw = new Uint8Array(buffer);
         const data = compression === "gzip" ? gzipSync(raw, { level: constants.Z_BEST_COMPRESSION }) : raw;
@@ -677,11 +711,11 @@ else {
       memoryGuard(limitBytes, "writing compressed tiles", 1000);
     }
     await new Promise((done, fail) => spill.end((error) => error ? fail(error) : done()));
-    const split = profiles.length > 1 || profiles.some((entry) => entry.usesPhysicalLimits);
+    const split = profiles.length > 1 || profiles.some((entry) => entry.usesPhysicalLimits || entry.usesRailwayAttributes);
     const bundleBytes = await writeBundle(output, chunks, compression, spillPath, profiles, split, defaultVehicle, library.VehiclePresetId);
     await verifyBundle(output, built.graphs.length);
     const nodesBefore = storedNodes, nodesAfter = built.routingNodes, edges = built.routingEdges, rawBytes = chunks.reduce((sum, chunk) => sum + chunk.rawBytes, 0);
-    const report = { formatVersion: 1, input: file, inputBytes: source.size, profile: profiles.map((entry) => entry.name).join(","), compression: `${compression}-per-tile`, tileSizeKm, paddingKm, pbfPasses: 2, tiles: built.graphs.length, relevantOsmWays: first.ways, relevantOsmNodes, relevantOsmNodesExact: false, routingNodesBeforeSimplification: nodesBefore, routingNodesAfterSimplification: nodesAfter, reductionPercent: Number((100 * (1 - nodesAfter / Math.max(1, nodesBefore))).toFixed(2)), routingEdges: edges, turnRestrictionsRead: first.restrictions.length, turnRestrictionsSkipped: first.skippedRestrictions, conditionalTurnRestrictionsIgnored: first.conditionalRestrictions, barriersRead: first.barrierCount, barrierBans: built.barrierBans, bannedTurnPairs: built.bannedTurns, bannedTurnRuns: built.bannedRuns, layout: split ? "shared-plus-profile" : "single-chunk", profiles: profiles.map((entry) => entry.name), defaultVehicle: defaultVehicle ?? null, edgesWithPhysicalLimits: limitedEdges, edgesWithConditionalRestrictions: conditionalEdges, uncompressedGraphBytes: rawBytes, bundleBytes, compressionRatio: Number((bundleBytes / Math.max(1, rawBytes)).toFixed(4)), peakRssBytes: Math.max(observedPeakRss, process.memoryUsage().rss), elapsedMilliseconds: Math.round(performance.now() - started) };
+    const report = { formatVersion: 1, input: file, inputBytes: source.size, profile: profiles.map((entry) => entry.name).join(","), compression: `${compression}-per-tile`, tileSizeKm, paddingKm, pbfPasses: 2, tiles: built.graphs.length, relevantOsmWays: first.ways, relevantOsmNodes, relevantOsmNodesExact: false, routingNodesBeforeSimplification: nodesBefore, routingNodesAfterSimplification: nodesAfter, reductionPercent: Number((100 * (1 - nodesAfter / Math.max(1, nodesBefore))).toFixed(2)), routingEdges: edges, turnRestrictionsRead: first.restrictions.length, turnRestrictionsSkipped: first.skippedRestrictions, conditionalTurnRestrictionsIgnored: first.conditionalRestrictions, barriersRead: first.barrierCount, barrierBans: built.barrierBans, bannedTurnPairs: built.bannedTurns, bannedTurnRuns: built.bannedRuns, layout: split ? "shared-plus-profile" : "single-chunk", profiles: profiles.map((entry) => entry.name), defaultVehicle: defaultVehicle ?? null, networkKind, railwayInclude, distinctRailwayAttributeRows: railwayRows, edgesWithPhysicalLimits: limitedEdges, edgesWithConditionalRestrictions: conditionalEdges, uncompressedGraphBytes: rawBytes, bundleBytes, compressionRatio: Number((bundleBytes / Math.max(1, rawBytes)).toFixed(4)), peakRssBytes: Math.max(observedPeakRss, process.memoryUsage().rss), elapsedMilliseconds: Math.round(performance.now() - started) };
     await writeFile(`${output}.json`, `${JSON.stringify(report, null, 2)}\n`);
     console.table({ input_mb: (source.size / 1e6).toFixed(1), pbf_passes: report.pbfPasses, relevant_ways: first.ways.toLocaleString(), relevant_nodes: relevantOsmNodes.toLocaleString(), nodes_before: nodesBefore.toLocaleString(), nodes_after: nodesAfter.toLocaleString(), reduction_percent: report.reductionPercent, routing_edges: edges.toLocaleString(), turn_restrictions: first.restrictions.length.toLocaleString(), barriers: first.barrierCount.toLocaleString(), banned_turn_pairs: built.bannedTurns.toLocaleString(), banned_turn_runs: built.bannedRuns.toLocaleString(), tiles: built.graphs.length, raw_mb: (rawBytes / 1e6).toFixed(1), efrb_mb: (bundleBytes / 1e6).toFixed(1), compression_ratio: report.compressionRatio, peak_rss_mb: (report.peakRssBytes / 1e6).toFixed(1), elapsed_seconds: (report.elapsedMilliseconds / 1000).toFixed(1) });
   } catch (error) {

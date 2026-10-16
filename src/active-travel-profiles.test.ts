@@ -121,8 +121,8 @@ describe("turn restrictions", () => {
 });
 
 describe("the registry", () => {
-  it("offers all five by name", () => {
-    expect(Object.keys(routingProfiles)).toEqual(["car", "motorcycle", "truck", "bicycle", "pedestrian"]);
+  it("offers every profile by name, the five road ones first", () => {
+    expect(Object.keys(routingProfiles)).toEqual(["car", "motorcycle", "truck", "bicycle", "pedestrian", "train", "metro"]);
     expect(getRoutingProfile("bicycle")).toBe(bike);
     expect(getRoutingProfile("pedestrian")).toBe(foot);
   });
