@@ -350,10 +350,23 @@ function projectionOf(snap: GraphSnap, edge: number) {
   return snap.kind === "edge" ? snap.projections.find((projection) => projection.edge === edge) : undefined;
 }
 
-function snapSummary(snap: GraphSnap, travelledMeters = 0): RouteSnap {
-  return snap.kind === "node"
-    ? { node: snap.node, edge: -1, point: snap.point, distanceMeters: snap.distanceMeters, travelledMeters: 0 }
-    : { node: -1, edge: snap.projections[0].edge, point: snap.point, distanceMeters: snap.distanceMeters, travelledMeters };
+/**
+ * Where a route really joined or left the network.
+ *
+ * `used` is the projection the search actually took. Without it this reported
+ * the nearest one instead, which was the same road whenever the only
+ * candidates were the two directions of one carriageway — and is not, now
+ * that a railway snap offers the other platform tracks at a station. A route
+ * that left from the far platform said it left from the near one, and
+ * `routeAlternatives` compared the wrong roads when deciding whether two
+ * routes were the same.
+ */
+function snapSummary(snap: GraphSnap, travelledMeters = 0, used?: EdgeProjection): RouteSnap {
+  if (snap.kind === "node") {
+    return { node: snap.node, edge: -1, point: snap.point, distanceMeters: snap.distanceMeters, travelledMeters: 0 };
+  }
+  const projection = used ?? snap.projections[0];
+  return { node: -1, edge: projection.edge, point: projection.point, distanceMeters: projection.distanceMeters, travelledMeters };
 }
 
 /**
@@ -454,23 +467,31 @@ export type RouteOptions = {
  * reported back is the graph's own, exactly as a caller's `costPenalties` are
  * documented to behave.
  *
- * Only for `shortest`. A `fastest` search already prefers the running line,
- * because a siding is modelled at 25 km/h and the line beside it is not, and
- * charging twice would be double counting.
+ * A `fastest` search is already part of the way there, because a siding is
+ * modelled at 25 km/h and the line beside it is not, so it carries the smaller
+ * share. Neither is a ban: where a siding is the only way through, it is still
+ * used, and `excludeServiceTracks` is what forbids it.
  */
 const SERVICE_TRACK_DISTANCE_MULTIPLIER = 4;
+const SERVICE_TRACK_DURATION_MULTIPLIER = 2;
 
 function serviceTrackCosts(graph: RoadGraph, preference: RoutePreference, slowed: Map<number, number> | undefined) {
   const table = graph.edgeRailway;
-  if (!table || preference !== "shortest") return slowed;
+  if (!table) return slowed;
   const distanceScale = graph.edgeDistanceScale ?? 1;
+  const durationScale = graph.edgeDurationScale ?? 1;
+  // A siding is already modelled at 25 km/h, so a `fastest` search is part of
+  // the way there on its own and needs the smaller share of the penalty.
+  const multiplier = preference === "shortest" ? SERVICE_TRACK_DISTANCE_MULTIPLIER : SERVICE_TRACK_DURATION_MULTIPLIER;
   let costs: Map<number, number> | undefined;
   for (let edge = 0; edge < graph.edgeTargets.length; edge += 1) {
     const row = table.edgeRows[edge];
     if (!row || table.service[row] === RailService.running) continue;
     costs ??= new Map(slowed);
-    const base = costs.get(edge) ?? graph.edgeDistancesMeters[edge] * distanceScale;
-    costs.set(edge, base * SERVICE_TRACK_DISTANCE_MULTIPLIER);
+    const base = costs.get(edge) ?? (preference === "fastest"
+      ? graph.edgeDurationsSeconds[edge] * durationScale
+      : graph.edgeDistancesMeters[edge] * distanceScale);
+    costs.set(edge, base * multiplier);
   }
   return costs ?? slowed;
 }
@@ -706,7 +727,14 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   let travelledAtOrigin = 0;
   let travelledAtDestination = 0;
 
+  // The projections the route really began and ended on, which is what the
+  // result reports and what the geometry starts from.
+  let enteredOn: EdgeProjection | undefined;
+  let leftOn: EdgeProjection | undefined;
+
   if (direct && direct.cost <= searchCost) {
+    enteredOn = direct.origin;
+    leftOn = direct.destination;
     for (const point of geometryBetween(direct.origin, direct.destination)) push(point);
     const span = partial(direct.origin, direct.destination.fraction - direct.origin.fraction);
     distanceMeters = span.distance;
@@ -718,7 +746,10 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     const { edges, finisher, seed } = outcome!;
     edgeIds = edges;
     const entry = seed.edge >= 0 ? projectionOf(originSnap, seed.edge) : undefined;
-    push(originSnap.point);
+    enteredOn = entry;
+    // The geometry starts where the route starts, which is the point on the
+    // track it entered rather than on whichever track happened to be nearest.
+    push(entry?.point ?? originSnap.point);
     if (entry) {
       for (const point of geometryAfter(entry).slice(1)) push(point);
       const span = partial(entry, 1 - entry.fraction);
@@ -746,6 +777,7 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
       push(coordinateFor(graph, graph.edgeTargets[edge]));
     }
     const exit = finisher.edge >= 0 ? projectionOf(destinationSnap, finisher.edge) : undefined;
+    leftOn = exit;
     if (exit) {
       for (const point of geometryBefore(exit)) push(point);
       const span = partial(exit, exit.fraction);
@@ -755,8 +787,8 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     }
   }
 
-  const origin = snapSummary(originSnap, travelledAtOrigin);
-  const destination = snapSummary(destinationSnap, travelledAtDestination);
+  const origin = snapSummary(originSnap, travelledAtOrigin, enteredOn);
+  const destination = snapSummary(destinationSnap, travelledAtDestination, leftOn);
   return {
     nodeIds,
     edgeIds,

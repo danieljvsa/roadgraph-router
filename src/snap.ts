@@ -201,10 +201,20 @@ export function snapToGraph(graph: RoadGraph, coordinate: Coordinate, maxDistanc
   // Landing on a junction is reported as that node, which keeps routes between
   // exact node coordinates behaving as they always have. A caller asking for
   // every nearby road wants the choice, so it is not collapsed to one node.
+  //
+  // A railway station is the exception, and it is not a small one. A station
+  // node sits on one of the platform tracks, and the others — the opposite
+  // direction among them — are separate ways a few metres away. Collapsing to
+  // the node throws them away and the route has to leave in whatever direction
+  // that one track runs: 36 of Metro do Porto's 49 stations collapsed this
+  // way, and Aliados to Faria Guimarães, two stops apart on one line, came
+  // back as 7.4 km one way and 1.0 km the other. Track keeps its projections,
+  // and the node remains reachable as the projection at the end of its own edge.
+  const collapseToNode = !everyNearbyRoad && !graph.edgeRailway;
   const startMeters = best.fraction * totalLengthOf(best);
   const endMeters = (1 - best.fraction) * totalLengthOf(best);
-  if (!everyNearbyRoad && startMeters <= NODE_SNAP_TOLERANCE_METERS) return { kind: "node", node: best.source, point: best.polyline[0], distanceMeters: best.distanceMeters };
-  if (!everyNearbyRoad && endMeters <= NODE_SNAP_TOLERANCE_METERS) return { kind: "node", node: best.target, point: best.polyline[best.polyline.length - 1], distanceMeters: best.distanceMeters };
+  if (collapseToNode && startMeters <= NODE_SNAP_TOLERANCE_METERS) return { kind: "node", node: best.source, point: best.polyline[0], distanceMeters: best.distanceMeters };
+  if (collapseToNode && endMeters <= NODE_SNAP_TOLERANCE_METERS) return { kind: "node", node: best.target, point: best.polyline[best.polyline.length - 1], distanceMeters: best.distanceMeters };
 
   // Normally only the nearest road is offered, as the forward and reverse copy
   // of one stretch: a route should begin on the road you are standing on, not

@@ -566,9 +566,38 @@ deviates by a mean of **0.0 m** and a worst of **3.0 m**, with no point more
 than 10 m off the line. Before these three rules it ran through the yard and
 along a Linha D platform, deviating by up to 31 m.
 
-All three rules apply only where `edgeRailway` is present. A road graph snaps
+**A station snap keeps its other platforms.** A snap landing on a junction is
+reported as that node, which is right for a road and wrong for a station: the
+station node sits on one of the platform tracks, and collapsing to it throws
+the others away, so the route had to leave in that one track's direction.
+Thirty-six of Metro do Porto's forty-nine stations collapsed this way, and
+Aliados to Faria Guimarães — two stops apart on one line — came back as 7.4 km
+one way and 1.0 km the other. Track keeps its projections; the node is still
+reachable as the end of its own edge.
+
+All four rules apply only where `edgeRailway` is present. A road graph snaps
 and costs exactly as it always has, which 30 road routes across three profiles
 confirm.
+
+### How far these answers were checked
+
+Every rule above came from a route that looked wrong on a map, so the measure
+is how closely routes follow the track that real services run over — the ways
+of each line's `type=route` relation. The relations are a yardstick only;
+nothing in the package reads them.
+
+| Network | Routes entirely on served track | Furthest stray |
+| --- | --- | --- |
+| Metro do Porto | **120 of 120** | 6 m |
+| Portugal, conventional railway | 149 of 150 | one line with no passenger relation mapped |
+| Ireland, conventional railway | 144 of 150 | 121 m, all at one station approach |
+| Lisbon metro | 74 of 120 | 223 m — see below |
+
+Lisbon is not a routing fault. Twenty-eight per cent of its mapped subway
+track — 80 km — is tagged `service=yard`, and forbidding service track makes
+**127 of its 190 station pairs unroutable**. The network as mapped depends on
+that track for connectivity, so a route has to use it; raising the penalty
+would change the price and not the path.
 
 > Route relations are read by nothing in this package. They were used **once**,
 > by hand, to check an answer against the line as mapped. They describe

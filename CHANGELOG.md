@@ -43,6 +43,27 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   point more than 10 m off. Before, it ran through the yard and down a Linha D
   platform, up to 31 m off.
 
+- **A station snap threw away every platform but one.** A snap that lands on a
+  junction is reported as that node, which suits a road and not a station: the
+  station node sits on one platform track and the others are separate ways
+  beside it. Thirty-six of Metro do Porto's forty-nine stations collapsed this
+  way, so a route could only leave in that one track's direction — Aliados to
+  Faria Guimarães, two stops apart on one line, was 7.4 km one way and 1.0 km
+  the other. Track keeps its projections now.
+
+- **A route reported the wrong end.** `originSnap.edge` named the nearest
+  candidate rather than the one the search actually entered on, and the
+  geometry started there too. The two were the same road whenever the only
+  candidates were the two directions of one carriageway, and stopped being
+  the same once a railway snap offered the other platforms — so a route that
+  left from the far platform said it left from the near one, and
+  `routeAlternatives` compared the wrong roads when judging whether two routes
+  were alike, discarding genuine alternatives.
+
+  Swept over real networks: Metro do Porto now follows the track its services
+  run over on **120 of 120** routes, Portugal's conventional railway on 149 of
+  150 and Ireland's on 144 of 150.
+
 ### Fixed, in the release audit
 
 - **A railway signed below 5 km/h was routed at 5 km/h.** The floor that keeps

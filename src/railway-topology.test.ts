@@ -387,14 +387,24 @@ describe("choosing a platform to start from", () => {
     expect(touched.every((edge) => railwayOf(graph, edge)?.service === 0)).toBe(true);
   });
 
-  // A point genuinely in the yard still snaps to the yard: this is a
-  // preference between near-ties, not a refusal to see service track.
+  // The preference is worth 30 m, so a siding wins where it is more than that
+  // nearer than any running line — which is what being inside a yard means.
+  // It is a preference between near-ties, not a refusal to see service track.
   it("still snaps into a yard for a point that is really in one", async () => {
-    const { graph } = await compile("platform-choice", [], []);
-    const snapped = snapToGraph(graph, at(41.0100, -8.60012), 50);
+    const { graph } = await compile("deep-yard", [
+      { id: 1, lat: 41.000, lon: -8.6000 }, { id: 2, lat: 41.010, lon: -8.6000 }, { id: 3, lat: 41.020, lon: -8.6000 },
+      // A yard well away from the running line, not a track beside a platform.
+      { id: 11, lat: 41.009, lon: -8.6020 }, { id: 12, lat: 41.011, lon: -8.6020 },
+    ], [
+      { id: 100, refs: [1, 2], tags: RAIL },
+      { id: 101, refs: [2, 3], tags: RAIL },
+      { id: 102, refs: [11, 12], tags: { ...RAIL, service: "yard" } },
+    ], ["--profile", "train"]);
+    const snapped = snapToGraph(graph, at(41.0100, -8.6020), 200);
     expect(snapped).not.toBeNull();
     const edge = snapped!.kind === "edge" ? snapped!.projections[0].edge : -1;
-    if (edge >= 0) expect(railwayOf(graph, edge)?.service).not.toBe(0);
+    expect(edge).toBeGreaterThanOrEqual(0);
+    expect(railwayOf(graph, edge)?.service).not.toBe(0);
   });
 });
 
@@ -436,6 +446,37 @@ describe("starting in the direction the journey needs", () => {
     const south = route(graph, at(41.0180, -8.60003), at(41.0020, -8.60003), "shortest");
     expect(south.distanceMeters).toBeLessThan(2_100);
     expect(south.geometry.coordinates[south.geometry.coordinates.length - 1][1]).toBeLessThan(south.geometry.coordinates[0][1]);
+  });
+
+  // A station node sits on one of the platform tracks. Reporting a snap that
+  // lands on it as "that node" threw away every other track at the station,
+  // so the route had to leave in that one track's direction: 36 of Metro do
+  // Porto's 49 stations collapsed this way, and Aliados to Faria Guimarães,
+  // two stops apart on one line, was 7.4 km one way and 1.0 km the other.
+  it("does not collapse a station snap to one node and lose the other platforms", async () => {
+    const { graph } = await compile("station-node", [
+      // Northbound track, with a node exactly at the station.
+      { id: 1, lat: 41.000, lon: -8.6000 }, { id: 2, lat: 41.010, lon: -8.6000 }, { id: 3, lat: 41.020, lon: -8.6000 },
+      // Southbound track beside it, 8 m west, with no node at the station.
+      { id: 11, lat: 41.000, lon: -8.60010 }, { id: 13, lat: 41.020, lon: -8.60010 },
+    ], [
+      { id: 100, refs: [1, 2], tags: { ...RAIL, oneway: "yes" } },
+      { id: 101, refs: [2, 3], tags: { ...RAIL, oneway: "yes" } },
+      { id: 102, refs: [13, 11], tags: { ...RAIL, oneway: "yes" } },
+    ], ["--profile", "train"]);
+
+    // Standing at the station node itself, which is on the northbound track.
+    const atStation = at(41.010, -8.6000);
+    const snapped = snapToGraph(graph, atStation, 60);
+    // Track keeps its projections rather than collapsing to the node, so the
+    // southbound platform is still a candidate.
+    expect(snapped?.kind).toBe("edge");
+
+    // Northwards is on the track under your feet.
+    expect(route(graph, atStation, at(41.020, -8.6000), "shortest").distanceMeters).toBeLessThan(1_500);
+    // Southwards needs the other platform, and finds it.
+    const south = route(graph, atStation, at(41.0005, -8.60010), "shortest");
+    expect(south.distanceMeters).toBeLessThan(3_000);
   });
 
   // The wider tolerance is for graphs that describe track. A road must keep
@@ -717,12 +758,17 @@ describe("constraints against a compiled network", () => {
 
 describe("alternatives over track", () => {
   it("offers a second way round where the network holds one", async () => {
+    // Each branch is mapped as two ways meeting at its middle, so that middle
+    // node is named by two ways and survives simplification. A branch that
+    // collapses to one edge makes the whole journey a single edge, which has
+    // no alternatives to offer and is not what a network looks like.
     const { graph } = await compile("alternatives", [
       { id: 1, lat: 41.0, lon: -8.60 }, { id: 2, lat: 41.0, lon: -8.56 },
-      { id: 10, lat: 41.02, lon: -8.58 }, { id: 20, lat: 40.98, lon: -8.58 },
+      { id: 10, lat: 41.02, lon: -8.585 }, { id: 11, lat: 41.02, lon: -8.575 },
+      { id: 20, lat: 40.98, lon: -8.585 }, { id: 21, lat: 40.98, lon: -8.575 },
     ], [
-      { id: 100, refs: [1, 10, 2], tags: RAIL },
-      { id: 101, refs: [1, 20, 2], tags: RAIL },
+      { id: 100, refs: [1, 10], tags: RAIL }, { id: 101, refs: [10, 11], tags: RAIL }, { id: 102, refs: [11, 2], tags: RAIL },
+      { id: 103, refs: [1, 20], tags: RAIL }, { id: 104, refs: [20, 21], tags: RAIL }, { id: 105, refs: [21, 2], tags: RAIL },
     ]);
     const routes = routeAlternatives(graph, at(41.0, -8.60), at(41.0, -8.56), "shortest", { count: 2 });
     expect(routes.length).toBe(2);
