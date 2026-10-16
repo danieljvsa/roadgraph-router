@@ -6,6 +6,29 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.4.0] - 2026-10-16
 
+### Fixed, after review of real Metro do Porto routes
+
+- **A railway route began in the depot.** Snapping took the nearest rail, and
+  every platform has a yard track or a crossover a few metres beside it: at
+  Trindade the yard is 4.6 m from the station node and the running line 6.7 m.
+  Routes started in the sidings and crossed out, which looks like a routing
+  fault and is really a snapping one. Service track now carries a 30 m penalty
+  when candidates are ranked — a preference, not a ban, so a point genuinely
+  inside a yard still snaps there.
+
+- **A route could be forced to leave in the wrong direction.** Two directed
+  edges within half a metre of the best were treated as the same road, which
+  is right for a carriageway carrying both directions at identical distance
+  and wrong for a railway, where the two directions are separate one-way
+  tracks several metres apart. Only the nearer was offered, so the journey had
+  to go that way: Trindade to Senhor de Matosinhos came back as 16.1 km
+  instead of 11.8. A graph that describes its track now uses a 25 m tolerance,
+  about the width of a station throat, so every platform track is offered and
+  the search takes the one the journey needs.
+
+  Both rules apply only where railway attributes are present; a road graph
+  snaps exactly as it did, which 30 road routes across three profiles confirm.
+
 ### Fixed, in the release audit
 
 - **A railway signed below 5 km/h was routed at 5 km/h.** The floor that keeps
@@ -219,7 +242,7 @@ Portugal, `portugal-latest.osm.pbf` at 425 MB, on one machine:
 | Routing edges | 23,273 | 2,777 | 26,052 | 2,759,810 |
 
 Porto Campanhã to Lisboa Santa Apolónia is 336.0 km over 22 range requests
-and 265 kB, 89 ms cold and 4.2 ms warm. Metro do Porto's Linha A is 11.9 km
+and 265 kB, 89 ms cold and 4.2 ms warm. Metro do Porto's Linha A is 11.8 km
 out of a 17.3 kB bundle. The distances check against the real network — the
 Linha do Norte between those stations is about 336 km, Linha A about 12 — and
 the *durations* do not, by design: they are line-speed estimates and are

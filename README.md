@@ -373,7 +373,7 @@ const result = await router.route(
 
 ```ts
 const metro = await RoadRouter.open("porto-metro.efrb", undefined, { profile: "metro" });
-const trip = await metro.route(trindade, senhorDeMatosinhos, "shortest"); // 11.9 km, Linha A end to end
+const trip = await metro.route(trindade, senhorDeMatosinhos, "shortest"); // 11.8 km, Linha A end to end
 ```
 
 There is no `RailRouter`. A railway bundle is a bundle, a railway profile is a
@@ -523,6 +523,34 @@ Sidings are the one place the speed table does routing work rather than
 reporting: a yard that looked as quick as the main line would be chosen as a
 shortcut through a station. At 25 km/h it is not, which is what keeps sidings
 out of ordinary routes without removing track that genuinely connects things.
+
+### Where a railway route starts
+
+Snapping to the nearest rail is the wrong rule for a railway, and the engine
+does not use it.
+
+**A running line beats a siding that is nearer.** Every platform has a yard
+track or a crossover a few metres beside it — at Trindade the yard is 4.6 m
+from the station and the running line 6.7 m — so nearest-wins starts the
+journey in the depot and crosses out, which looks like a routing fault and is
+really a snapping one. Service track carries a 30 m penalty when candidates
+are ranked. It is a preference, not a ban: a point genuinely inside a yard is
+far closer to it than that, and still snaps there. `excludeServiceTracks`
+removes service track altogether.
+
+**Either track of a double-track line may be the start.** A two-way road is
+one carriageway carrying both directions at identical distance, so half a
+metre of tolerance keeps both. A railway puts its two directions on separate
+one-way tracks several metres apart, and half a metre keeps only whichever is
+marginally nearer — forcing the route to leave in that track's direction
+however far out of its way it goes. On a graph that describes its track the
+tolerance is 25 m, about the width of a station throat, so every platform
+track is offered and the search takes the one the journey wants. Offering more
+starting points cannot make a route worse: each carries the cost of reaching
+it, and the search still returns the cheapest.
+
+Both rules apply only where `edgeRailway` is present. A road graph snaps
+exactly as it always has.
 
 ### Topology: what connects to what
 
@@ -1531,9 +1559,9 @@ And over `porto-metro.efrb`, a 17.3 kB bundle:
 
 | Journey | Distance | Estimated | Cold | Warm |
 | --- | --- | --- | --- | --- |
-| Trindade → Senhor de Matosinhos (Linha A) | 11.9 km | 21m | 5 ms | 0.5 ms |
-| Trindade → Aeroporto (Linha E) | 13.2 km | 14m | 3 ms | 0.4 ms |
-| Trindade → Póvoa de Varzim (Linha B) | 29.9 km | 29m | 3 ms | 0.4 ms |
+| Trindade → Senhor de Matosinhos (Linha A) | 11.8 km | 21m | 3 ms | 0.3 ms |
+| Trindade → Aeroporto (Linha E) | 12.9 km | 14m | 2 ms | 0.4 ms |
+| Trindade → Póvoa de Varzim (Linha B) | 29.8 km | 29m | 3 ms | 0.4 ms |
 
 The distances are the check that matters, and they are checked against the
 real network rather than against each other: the Linha do Norte between those

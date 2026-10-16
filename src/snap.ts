@@ -2,6 +2,7 @@ import type { Coordinate, RoadGraph } from "./types";
 import { edgePolyline, edgeSource, edgeSpatialIndexFor, nearbyEdgeIds } from "./edge-index";
 import { nearbyNodeIds } from "./spatial-index";
 import { edgeAllowed } from "./access";
+import { RailService } from "./railway";
 
 const EARTH_RADIUS_METERS = 6_371_000;
 const METERS_PER_DEGREE_LATITUDE = 110_574;
@@ -16,6 +17,25 @@ const NODE_SNAP_TOLERANCE_METERS = 1;
 
 /** Two directed edges this much closer than the best are treated as the same road. */
 const TIE_TOLERANCE_METERS = 0.5;
+
+/**
+ * The same thing for a railway, where it has to be far wider.
+ *
+ * A two-way road is one carriageway carrying a forward and a reverse edge at
+ * exactly the same distance, so half a metre is enough to keep both. A railway
+ * is not built that way: the two directions are usually separate parallel
+ * tracks several metres apart, each one-way, and half a metre keeps only
+ * whichever happens to be marginally nearer. A route then has to leave in that
+ * track's direction whether or not its destination lies that way — Trindade to
+ * Senhor de Matosinhos came back as 16.1 km instead of 11.9 because the
+ * southbound track was 3 m closer than the northbound one.
+ *
+ * This is about the width of a station throat, so every platform track at the
+ * station is offered and the search picks the one its journey actually wants.
+ * Offering more starting points cannot make a route worse: each carries the
+ * cost of reaching it, and the search still returns the cheapest.
+ */
+const PARALLEL_TRACK_TOLERANCE_METERS = 25;
 
 /** How far from a point a road may be and still count as the road you are on. */
 export const DEFAULT_SNAP_RADIUS_METERS = 500;
@@ -106,12 +126,41 @@ function projectOntoPolyline(points: Coordinate[], query: Coordinate) {
  * lies within `maxDistanceMeters` of the coordinate — measured to the road
  * surface, not to the nearest junction.
  */
+/**
+ * How much further than it really is a track counts when choosing where to
+ * start or finish, so that a running line wins a near tie against a siding.
+ *
+ * Every platform at a station has a yard or a crossover a few metres beside
+ * it, and nearest-wins puts the route in the depot: at Trindade the yard track
+ * is 4.6 m from the station node and the running line 6.7 m, so a Metro do
+ * Porto route began in the sidings and had to cross out, which looks exactly
+ * like a routing fault and is really a snapping one.
+ *
+ * It is a preference, not a ban. A point genuinely inside a yard is far closer
+ * to that yard than this, and still snaps to it; the constraint that removes
+ * service track altogether is `excludeServiceTracks`. The penalty is used only
+ * to rank candidates — the distance reported back is the true one.
+ */
+const SERVICE_TRACK_SNAP_PENALTY_METERS = 30;
+
+/** Zero for a road graph, which describes no track and must not change. */
+function snapPenaltyFor(graph: RoadGraph, edge: number) {
+  const table = graph.edgeRailway;
+  if (!table) return 0;
+  const row = table.edgeRows[edge];
+  return row && table.service[row] !== RailService.running ? SERVICE_TRACK_SNAP_PENALTY_METERS : 0;
+}
+
 export function snapToGraph(graph: RoadGraph, coordinate: Coordinate, maxDistanceMeters = DEFAULT_SNAP_RADIUS_METERS, access: Uint8Array | undefined = graph.edgeAccess, accept?: (node: number) => boolean, everyNearbyRoad = false): GraphSnap | null {
   const candidates = graph.edgeTargets.length
     ? nearbyEdgeIds(edgeSpatialIndexFor(graph), coordinate, maxDistanceMeters)
     : new Set<number>();
 
   let best: EdgeProjection | null = null;
+  let bestRank = Infinity;
+  // The ranking distance for each candidate, which is its true distance plus
+  // whatever the track it lies on is penalised by.
+  const rankOf = new Map<number, number>();
   const projections: EdgeProjection[] = [];
   for (const edge of candidates) {
     // A road this vehicle may not use is not a road to start or finish on.
@@ -134,7 +183,9 @@ export function snapToGraph(graph: RoadGraph, coordinate: Coordinate, maxDistanc
       polyline,
     };
     projections.push(projection);
-    if (!best || projection.distanceMeters < best.distanceMeters) best = projection;
+    const rank = projection.distanceMeters + snapPenaltyFor(graph, edge);
+    rankOf.set(edge, rank);
+    if (!best || rank < bestRank) { best = projection; bestRank = rank; }
   }
 
   if (!best) {
@@ -159,9 +210,11 @@ export function snapToGraph(graph: RoadGraph, coordinate: Coordinate, maxDistanc
   // the rest of the network cannot legally reach — a pocket of one-way streets
   // behind banned turns, or an island of service roads. Offering the search
   // every road in range lets it finish on one it can actually get to.
+  const rank = (projection: EdgeProjection) => rankOf.get(projection.edge) ?? projection.distanceMeters;
+  const tolerance = graph.edgeRailway ? PARALLEL_TRACK_TOLERANCE_METERS : TIE_TOLERANCE_METERS;
   const sameRoad = everyNearbyRoad
-    ? projections.sort((left, right) => left.distanceMeters - right.distanceMeters)
-    : projections.filter((projection) => projection.distanceMeters <= best!.distanceMeters + TIE_TOLERANCE_METERS);
+    ? projections.sort((left, right) => rank(left) - rank(right))
+    : projections.filter((projection) => rank(projection) <= bestRank + tolerance).sort((left, right) => rank(left) - rank(right));
   return { kind: "edge", projections: sameRoad, point: best.point, distanceMeters: best.distanceMeters };
 }
 

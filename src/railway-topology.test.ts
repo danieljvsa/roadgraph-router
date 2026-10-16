@@ -351,6 +351,114 @@ describe("what a route vouches for", () => {
   });
 });
 
+/**
+ * Where a railway route begins.
+ *
+ * Both of these came out of a screenshot of Metro do Porto rather than a test,
+ * and both made a correct search produce a route no operator would recognise.
+ */
+describe("choosing a platform to start from", () => {
+  // A station: the running line through it, a yard track a metre nearer the
+  // station node, and a crossover joining them — the shape of every terminus
+  // and most through stations.
+  const station: [PbfNode[], PbfWay[]] = [[
+    // The running line, south to north.
+    { id: 1, lat: 41.000, lon: -8.6000 }, { id: 2, lat: 41.010, lon: -8.6000 }, { id: 3, lat: 41.020, lon: -8.6000 },
+    // A yard track beside it, slightly closer to where the caller points.
+    { id: 11, lat: 41.0098, lon: -8.60012 }, { id: 12, lat: 41.0102, lon: -8.60012 },
+    // The crossover that joins the yard back to the running line.
+    { id: 13, lat: 41.010, lon: -8.6000 },
+  ], [
+    { id: 100, refs: [1, 2], tags: RAIL },
+    { id: 101, refs: [2, 3], tags: RAIL },
+    { id: 102, refs: [11, 12], tags: { ...RAIL, service: "yard" } },
+    { id: 103, refs: [12, 2], tags: { ...RAIL, service: "crossover" } },
+  ]];
+
+  // Standing on the platform, the yard track is the nearest rail. It is not
+  // the one a train leaves from.
+  it("prefers the running line to a siding that is marginally nearer", async () => {
+    const { graph } = await compile("platform-choice", ...station, ["--profile", "train"]);
+    const result = route(graph, at(41.0100, -8.60006), at(41.020, -8.6000), "shortest");
+    // Every track the route touches — including the ones it entered and left
+    // on, which are reported in the snaps rather than in `edgeIds`.
+    const touched = [...result.edgeIds, result.originSnap.edge, result.destinationSnap.edge].filter((edge) => edge >= 0);
+    expect(touched.length).toBeGreaterThan(0);
+    expect(touched.every((edge) => railwayOf(graph, edge)?.service === 0)).toBe(true);
+  });
+
+  // A point genuinely in the yard still snaps to the yard: this is a
+  // preference between near-ties, not a refusal to see service track.
+  it("still snaps into a yard for a point that is really in one", async () => {
+    const { graph } = await compile("platform-choice", [], []);
+    const snapped = snapToGraph(graph, at(41.0100, -8.60012), 50);
+    expect(snapped).not.toBeNull();
+    const edge = snapped!.kind === "edge" ? snapped!.projections[0].edge : -1;
+    if (edge >= 0) expect(railwayOf(graph, edge)?.service).not.toBe(0);
+  });
+});
+
+describe("starting in the direction the journey needs", () => {
+  // Two one-way tracks a few metres apart, as a railway builds its two
+  // directions — not as a road carries them on one carriageway.
+  const doubleTrack: [PbfNode[], PbfWay[]] = [[
+    { id: 1, lat: 41.000, lon: -8.6000 }, { id: 2, lat: 41.010, lon: -8.6000 }, { id: 3, lat: 41.020, lon: -8.6000 },
+    { id: 11, lat: 41.000, lon: -8.60010 }, { id: 12, lat: 41.010, lon: -8.60010 }, { id: 13, lat: 41.020, lon: -8.60010 },
+  ], [
+    // Northbound, on the track about 8 m to the west. The two share no node,
+    // exactly as two running lines between crossovers do not.
+    { id: 100, refs: [11, 12, 13], tags: { ...RAIL, oneway: "yes" } },
+    // Southbound, on the track the caller happens to be standing nearer.
+    { id: 101, refs: [3, 2, 1], tags: { ...RAIL, oneway: "yes" } },
+  ]];
+
+  // Half a metre of tie tolerance keeps only the nearer of two parallel
+  // one-way tracks, which forces the route to leave in that track's direction
+  // however far out of its way that is. On Metro do Porto it turned an 11.9 km
+  // journey into 16.1 km.
+  it("may start on either track of a double-track line, not just the nearer one", async () => {
+    const { graph } = await compile("double-track", ...doubleTrack, ["--profile", "train"]);
+    // Standing on the platform between the two tracks, a little nearer the
+    // southbound one — but travelling north. Only the northbound track can
+    // carry the journey, and nothing joins the two.
+    // Mid-track, not on a node: a snap that lands on a junction is reported
+    // as that node, and the choice of parallel track with it.
+    const north = route(graph, at(41.0020, -8.60003), at(41.0180, -8.60003), "shortest");
+    expect(north.distanceMeters).toBeGreaterThan(1_500);
+    expect(north.distanceMeters).toBeLessThan(2_100);
+    // It really did leave on the northbound track rather than turning round.
+    expect(railwayOf(graph, north.originSnap.edge)).toBeDefined();
+    const first = north.geometry.coordinates[0];
+    const last = north.geometry.coordinates[north.geometry.coordinates.length - 1];
+    expect(last[1]).toBeGreaterThan(first[1]);
+
+    // And the opposite journey still uses the southbound track.
+    const south = route(graph, at(41.0180, -8.60003), at(41.0020, -8.60003), "shortest");
+    expect(south.distanceMeters).toBeLessThan(2_100);
+    expect(south.geometry.coordinates[south.geometry.coordinates.length - 1][1]).toBeLessThan(south.geometry.coordinates[0][1]);
+  });
+
+  // The wider tolerance is for graphs that describe track. A road must keep
+  // the half-metre rule, or a route would start on the wrong street.
+  it("leaves a road graph on the tight tolerance it has always used", async () => {
+    const { graph } = await compile("road-tolerance", [
+      ...line(1, 41.0, -8.60, 3), ...line(11, 41.0002, -8.60, 3),
+    ], [
+      { id: 100, refs: [1, 2, 3], tags: { highway: "primary" } },
+      { id: 101, refs: [11, 12, 13], tags: { highway: "residential" } },
+    ], ["--profile", "car"]);
+    expect(graph.edgeRailway).toBeUndefined();
+    const snapped = snapToGraph(graph, at(41.00001, -8.595), 60);
+    // Only the one road, as both directions of it: not the parallel street.
+    expect(snapped?.kind).toBe("edge");
+    if (snapped?.kind === "edge") {
+      const spread = Math.max(...snapped.projections.map((p) => p.distanceMeters))
+        - Math.min(...snapped.projections.map((p) => p.distanceMeters));
+      expect(spread).toBeLessThanOrEqual(0.5);
+    }
+  });
+});
+
 describe("snapping onto track", () => {
   it("snaps to the railway and only to the railway", async () => {
     // A road runs right beside the line. A train bundle holds no road at all,
