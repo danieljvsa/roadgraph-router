@@ -6,6 +6,39 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.4.0] - 2026-10-16
 
+### Fixed, in the release audit
+
+- **A railway signed below 5 km/h was routed at 5 km/h.** The floor that keeps
+  an *assumed* speed off zero was being applied to speeds the data states as
+  well, so a track tagged `maxspeed=3` was travelled at 5 — faster than the
+  limit, and arriving sooner than the track permits. A stated limit is now
+  used as stated, and only the profile's own ceiling may lower it. The floor
+  stays where it belongs, under an assumption.
+
+- **`--railway-include` would route over track that has been lifted.** The
+  inclusion list is typed, and a type constrains a TypeScript caller and
+  nothing at all at a command line, where the flag arrives as plain text.
+  `--railway-include abandoned,razed,construction` compiled all of them,
+  against a README that promised it could not. Inclusions are now checked at
+  run time and refused by name, with the reason: *railway class "abandoned"
+  cannot be routed over: the track has been lifted.*
+
+- **Malformed railway constraints are refused rather than read.** A
+  `{ gaugeMm: NaN }` compares false against every stated gauge, so reading it
+  would close the whole network and answer `NO_ROUTE` to what is really a
+  typo; `{ voltage: -25000 }` and a misspelled key fail the other way, by
+  applying nothing. `assertRailwayConstraints` now checks types, ranges,
+  list shapes and key names, and runs in `route()`, `routeAlternatives()` and
+  `RoadRouter.open` — the last before a byte is fetched.
+
+- **A region with no height or no width compiled to nothing.** A single line
+  of track at one latitude has a zero-height bounding box, which produced no
+  tile rows at all and failed with "Invalid routing bundle directory" — a
+  message about the output for a problem with the input. Such a region now
+  yields the one tile it should.
+
+
+
 ### Added
 
 - **Railway routing: `train` and `metro`.** Two profiles that route over

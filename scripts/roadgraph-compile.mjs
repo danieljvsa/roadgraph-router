@@ -113,7 +113,18 @@ function createTileGraph(tile, profileCount) {
   };
 }
 
-function tilesFor(bounds, km) {
+function tilesFor(input, km) {
+  // A region with no height or no width — a single straight line of track, or
+  // a one-street extract — would produce no rows at all, and the compile would
+  // fail later with a directory of zero tiles rather than with anything that
+  // explains itself. Giving a degenerate side the smallest span the coordinate
+  // scale can represent yields the one tile such a region should have.
+  const span = 1 / SCALE;
+  const bounds = {
+    minLat: input.minLat, minLon: input.minLon,
+    maxLat: input.maxLat > input.minLat ? input.maxLat : input.minLat + span,
+    maxLon: input.maxLon > input.minLon ? input.maxLon : input.minLon + span,
+  };
   const latStep = km / 110.574, tiles = [], rows = [];
   for (let minLat = bounds.minLat, row = 0; minLat < bounds.maxLat; minLat += latStep, row += 1) {
     const maxLat = Math.min(bounds.maxLat, minLat + latStep), lonStep = km / (111.32 * Math.max(.05, Math.cos(((minLat + maxLat) / 2) * Math.PI / 180))), inRow = [];

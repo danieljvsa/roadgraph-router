@@ -60,6 +60,15 @@ function compile(name: string, nodes: PbfNode[], ways: PbfWay[], args: string[] 
 }
 
 const at = (lat: number, lon: number): Coordinate => ({ lat, lng: lon });
+
+/** The same compiled fixture, loaded as a different profile in the bundle. */
+async function openAs(name: string, profileId: number) {
+  const output = join(workspace, `${name}.efrb`);
+  const bytes = readFileSync(output);
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const bundle = await openRoadGraphBundle(output, rangeFetcher(buffer).fetcher);
+  return bundle.loadTiles(bundle.tiles, profileId);
+}
 /** A straight line of nodes heading east, one per 0.01 degrees. */
 function line(firstId: number, lat: number, startLon: number, count: number): PbfNode[] {
   return Array.from({ length: count }, (_, index) => ({ id: firstId + index, lat, lon: startLon + index * 0.01 }));
@@ -363,6 +372,187 @@ describe("snapping onto track", () => {
   });
 });
 
+/* ------------------------------------------------------- the compiler --- */
+
+describe("what the compiler puts in, and leaves out", () => {
+  // One way of every class, so a single compile answers for all of them.
+  const everyClass: [PbfNode[], PbfWay[]] = [(() => {
+    const nodes: PbfNode[] = [];
+    for (let index = 0; index < 14; index += 1) nodes.push({ id: 1 + index, lat: 41.0 + index * 0.02, lon: -8.60 + index * 0.01 });
+    return nodes;
+  })(), [
+    { id: 100, refs: [1, 2], tags: RAIL },
+    { id: 101, refs: [3, 4], tags: { ...RAIL, railway: "disused" } },
+    { id: 102, refs: [5, 6], tags: { ...RAIL, railway: "abandoned" } },
+    { id: 103, refs: [7, 8], tags: { ...RAIL, railway: "construction" } },
+    { id: 104, refs: [9, 10], tags: { ...RAIL, railway: "razed" } },
+    { id: 105, refs: [11, 12], tags: { ...RAIL, railway: "narrow_gauge", gauge: "1000" } },
+    { id: 106, refs: [13, 14], tags: { railway: "platform" } },
+  ]];
+
+  it("takes railway=rail and nothing else, by default", async () => {
+    const { report } = await compile("classes-default", ...everyClass, ["--profile", "train"]);
+    expect(report.relevantOsmWays).toBe(1);
+    expect(report.networkKind).toBe("railway");
+    expect(report.railwayInclude).toEqual([]);
+  });
+
+  it("adds exactly the classes --railway-include names", async () => {
+    const { report } = await compile("classes-included", ...everyClass,
+      ["--profile", "train", "--railway-include", "disused,narrow_gauge"]);
+    // rail + disused + narrow_gauge; nothing else came with them.
+    expect(report.relevantOsmWays).toBe(3);
+    expect(report.railwayInclude).toEqual(["disused", "narrow_gauge"]);
+  });
+
+  // Track that is gone or not yet built is not opt-in at all, and asking for
+  // it is refused by name rather than quietly obeyed. Before this was checked
+  // at run time the type stopped a TypeScript caller and nothing stopped the
+  // command line, where `--railway-include` arrives as plain text.
+  it("refuses to route over track that is gone or unbuilt, however it is asked for", async () => {
+    const input = join(workspace, "refused-classes.osm.pbf");
+    writeFileSync(input, writeOsmPbf(...everyClass));
+    for (const [name, reason] of [
+      ["abandoned", /has been lifted/], ["razed", /has been lifted/],
+      ["construction", /not finished/], ["proposed", /not been built/],
+      ["platform", /not track/], ["nonsense", /not a railway class/],
+    ] as const) {
+      expect(() => execFileSync(process.execPath,
+        ["scripts/roadgraph-compile.mjs", input, "--output", join(workspace, "refused.efrb"), "--profile", "train", "--railway-include", name],
+        { stdio: "pipe", encoding: "utf8" })).toThrow(reason);
+    }
+    // One good name alongside a bad one still fails, rather than compiling
+    // half of what was asked for.
+    expect(() => execFileSync(process.execPath,
+      ["scripts/roadgraph-compile.mjs", input, "--output", join(workspace, "refused.efrb"), "--profile", "train", "--railway-include", "disused,abandoned"],
+      { stdio: "pipe", encoding: "utf8" })).toThrow(/has been lifted/);
+  });
+
+  it("describes the graph it actually produced", async () => {
+    const { graph, report } = await compile("classes-included", [], []);
+    expect(report.routingEdges).toBe(graph.edgeTargets.length);
+    expect(report.routingNodesAfterSimplification).toBe(graph.nodeLatitudes.length);
+    expect(report.layout).toBe("shared-plus-profile");
+    expect(report.distinctRailwayAttributeRows as number).toBeGreaterThan(0);
+    expect(report.profile).toBe("train");
+  });
+
+  // Every attribute the profile read has to survive two passes, the tile
+  // encoder, gzip and the range reader to be worth anything.
+  it("carries every stated attribute through compilation unchanged", async () => {
+    const { graph } = await compile("attributes", [
+      ...line(1, 41.0, -8.60, 2), ...line(11, 41.1, -8.60, 2),
+    ], [
+      { id: 100, refs: [1, 2], tags: { railway: "rail", gauge: "1000;1668", electrified: "contact_line", voltage: "25000", frequency: "50", usage: "branch", service: "siding" } },
+      { id: 101, refs: [11, 12], tags: { railway: "rail", gauge: "1435", electrified: "no" } },
+    ], ["--profile", "train"]);
+    const seen = [];
+    for (let edge = 0; edge < graph.edgeTargets.length; edge += 1) seen.push(railwayOf(graph, edge));
+    // Dual gauge survives as both of its gauges, not as the first one.
+    expect(seen).toContainEqual(expect.objectContaining({
+      gaugeMm: 1000, secondGaugeMm: 1668, voltage: 25000, electrification: 2, frequency: 4, usage: 2, service: 1,
+    }));
+    // And an explicit "not electrified" is not confused with an absent tag.
+    expect(seen).toContainEqual(expect.objectContaining({ gaugeMm: 1435, electrification: 1, voltage: 0, frequency: 0 }));
+  });
+
+  // A line of track at one latitude has a bounding box with no height. The
+  // tiling loop produced no rows for it at all, and the compile failed with
+  // "Invalid routing bundle directory" — a message about the output, for a
+  // problem with the input.
+  it("compiles a region with no height or no width", async () => {
+    const flat = await compile("flat-extent", [
+      { id: 1, lat: 41.0, lon: -8.60 }, { id: 2, lat: 41.0, lon: -8.59 }, { id: 3, lat: 41.0, lon: -8.58 },
+    ], [{ id: 100, refs: [1, 2, 3], tags: RAIL }], ["--profile", "train"]);
+    expect(flat.report.tiles).toBe(1);
+    expect(reaches(flat.graph, at(41.0, -8.60), at(41.0, -8.58))).toBe(true);
+
+    const narrow = await compile("narrow-extent", [
+      { id: 1, lat: 41.0, lon: -8.60 }, { id: 2, lat: 41.01, lon: -8.60 }, { id: 3, lat: 41.02, lon: -8.60 },
+    ], [{ id: 100, refs: [1, 2, 3], tags: RAIL }], ["--profile", "train"]);
+    expect(narrow.report.tiles).toBe(1);
+    expect(reaches(narrow.graph, at(41.0, -8.60), at(41.02, -8.60))).toBe(true);
+  });
+
+  it("refuses --railway-include on a road profile", async () => {
+    const input = join(workspace, "road-include.osm.pbf");
+    writeFileSync(input, writeOsmPbf(...everyClass));
+    expect(() => execFileSync(process.execPath,
+      ["scripts/roadgraph-compile.mjs", input, "--output", join(workspace, "road-include.efrb"), "--profile", "car", "--railway-include", "disused"],
+      { stdio: "pipe", encoding: "utf8" })).toThrow(/only applies to the train and metro profiles/);
+  });
+
+  it("names an unknown profile rather than guessing", async () => {
+    const input = join(workspace, "unknown-profile.osm.pbf");
+    writeFileSync(input, writeOsmPbf(...everyClass));
+    expect(() => execFileSync(process.execPath,
+      ["scripts/roadgraph-compile.mjs", input, "--output", join(workspace, "u.efrb"), "--profile", "tram"],
+      { stdio: "pipe", encoding: "utf8" })).toThrow(/Unknown routing profile "tram"/);
+  });
+});
+
+/* ------------------------------------------- constraints over a bundle --- */
+
+describe("constraints against a compiled network", () => {
+  // Two gauges meeting at a shared node: the only path from one end to the
+  // other crosses a gauge change. A train of either gauge must be refused,
+  // because no real train changes gauge at a junction.
+  const mixedGauge: [PbfNode[], PbfWay[]] = [[
+    ...line(1, 41.0, -8.60, 3),
+    { id: 10, lat: 41.0, lon: -8.57 }, { id: 11, lat: 41.0, lon: -8.56 },
+  ], [
+    { id: 100, refs: [1, 2, 3], tags: { railway: "rail", gauge: "1668", electrified: "contact_line", voltage: "25000", frequency: "50" } },
+    { id: 101, refs: [3, 10, 11], tags: { railway: "rail", gauge: "1000", electrified: "no" } },
+  ]];
+
+  it("stops a train where the only route crosses a gauge it cannot use", async () => {
+    const { graph } = await compile("mixed-gauge", ...mixedGauge, ["--profile", "train"]);
+    const [west, east] = [at(41.0, -8.60), at(41.0, -8.56)];
+    // Unconstrained, the route runs straight across the gauge change...
+    expect(reaches(graph, west, east)).toBe(true);
+    // ...and says so, which is the only warning an unconstrained caller gets.
+    expect(route(graph, west, east, "shortest").railway!.gauges).toEqual([1000, 1668]);
+    // Constrained, neither gauge can make the whole journey.
+    for (const gaugeMm of [1668, 1000]) {
+      expect(() => route(graph, west, east, "shortest", { finishOnANearbyRoad: false, railway: { gaugeMm } })).toThrow(RouterError);
+    }
+    // Each can still run on its own half of the network.
+    expect(route(graph, west, at(41.0, -8.58), "shortest", { railway: { gaugeMm: 1668 } }).distanceMeters).toBeGreaterThan(0);
+    expect(route(graph, east, at(41.0, -8.57), "shortest", { railway: { gaugeMm: 1000 } }).distanceMeters).toBeGreaterThan(0);
+  });
+
+  it("stops an electric train where the only route is unelectrified", async () => {
+    const { graph } = await compile("mixed-gauge", [], []);
+    const [west, east] = [at(41.0, -8.60), at(41.0, -8.56)];
+    expect(() => route(graph, west, east, "shortest", { finishOnANearbyRoad: false, railway: { requireElectrification: true } })).toThrow(RouterError);
+    const certainty = route(graph, west, at(41.0, -8.58), "shortest", { railway: { requireElectrification: true } }).railway!;
+    expect(certainty.unstated).toEqual([]);
+  });
+
+  it("lets a dual-gauge track answer for either gauge", async () => {
+    const { graph } = await compile("dual-gauge", [
+      ...line(1, 41.0, -8.60, 3),
+    ], [
+      { id: 100, refs: [1, 2, 3], tags: { railway: "rail", gauge: "1000;1668", electrified: "contact_line", voltage: "25000", frequency: "50" } },
+    ], ["--profile", "train"]);
+    const [west, east] = [at(41.0, -8.60), at(41.0, -8.58)];
+    for (const gaugeMm of [1668, 1000]) {
+      expect(route(graph, west, east, "shortest", { railway: { gaugeMm } }).distanceMeters).toBeGreaterThan(0);
+    }
+    expect(() => route(graph, west, east, "shortest", { finishOnANearbyRoad: false, railway: { gaugeMm: 1435 } })).toThrow(RouterError);
+  });
+
+  it("matches a multi-system train against either of a changeover line's systems", async () => {
+    const { graph } = await compile("changeover", [...line(1, 41.0, -8.60, 3)], [
+      { id: 100, refs: [1, 2, 3], tags: { railway: "rail", gauge: "1435", electrified: "contact_line", voltage: "1500;25000", frequency: "0;50" } },
+    ], ["--profile", "train"]);
+    const [west, east] = [at(41.0, -8.60), at(41.0, -8.58)];
+    expect(route(graph, west, east, "shortest", { railway: { voltage: 25000, frequency: "50" } }).distanceMeters).toBeGreaterThan(0);
+    expect(route(graph, west, east, "shortest", { railway: { voltage: 1500, frequency: "dc" } }).distanceMeters).toBeGreaterThan(0);
+    expect(() => route(graph, west, east, "shortest", { finishOnANearbyRoad: false, railway: { voltage: 750 } })).toThrow(RouterError);
+  });
+});
+
 describe("alternatives over track", () => {
   it("offers a second way round where the network holds one", async () => {
     const { graph } = await compile("alternatives", [
@@ -375,6 +565,74 @@ describe("alternatives over track", () => {
     const routes = routeAlternatives(graph, at(41.0, -8.60), at(41.0, -8.56), "shortest", { count: 2 });
     expect(routes.length).toBe(2);
     expect(routes[0].distanceMeters).toBeLessThanOrEqual(routes[1].distanceMeters);
+  });
+});
+
+/**
+ * The Portugal `train,metro` bundle holds 26,052 edges where the two separate
+ * bundles hold 23,273 and 2,777 — 26,050. Two more, on identical node counts.
+ *
+ * This reproduces the cause exactly, so the claim rests on a test rather than
+ * on an explanation: at two nodes in Portugal a light-rail way runs through
+ * the *end* of a conventional rail way. Compiled alone the metro's node there
+ * is interior to a single way and is simplified away; compiled alongside the
+ * railway it is a junction between two ways, so the light-rail way is split at
+ * it. It is a topology split, not a connection — which the access-mask tests
+ * below are what actually prove.
+ */
+describe("the two extra edges in a shared bundle", () => {
+  // A rail way whose END is an interior node of a light-rail way: the exact
+  // shape found at nodes 12512182982 and 12512182981 in the Portugal extract.
+  const touching: [PbfNode[], PbfWay[]] = [[
+    { id: 1, lat: 41.15, lon: -8.61 }, { id: 2, lat: 41.16, lon: -8.60 },
+    { id: 3, lat: 41.17, lon: -8.59 }, { id: 4, lat: 41.18, lon: -8.58 },
+    { id: 5, lat: 41.19, lon: -8.57 },
+  ], [
+    // The rail way ends at node 3.
+    { id: 100, refs: [1, 2, 3], tags: RAIL },
+    // The light-rail way passes straight through node 3 without stopping.
+    { id: 101, refs: [5, 3, 4], tags: { railway: "light_rail", gauge: "1435", electrified: "contact_line", voltage: "750", frequency: "0" } },
+  ]];
+
+  it("splits the metro way at the junction, and adds exactly that", async () => {
+    const alone = await compile("touch-metro", ...touching, ["--profile", "metro"]);
+    const both = await compile("touch-both", ...touching, ["--profile", "train,metro"]);
+    const rail = await compile("touch-train", ...touching, ["--profile", "train"]);
+
+    const edges = (compiled: Compiled) => compiled.report.routingEdges as number;
+    const nodes = (compiled: Compiled) => compiled.report.routingNodesAfterSimplification as number;
+
+    // Compiled alone, node 3 is interior to one metro way and is simplified
+    // out, so the metro is a single two-way edge pair.
+    expect(edges(alone)).toBe(2);
+    // Compiled together, node 3 is named by two ways, so it is kept and the
+    // metro way is split in two — one extra edge per direction.
+    expect(edges(both)).toBe(edges(rail) + edges(alone) + 2);
+    // And the node was already in the train graph as that way's endpoint, so
+    // the node counts are unchanged.
+    expect(nodes(both)).toBe(nodes(rail) + nodes(alone));
+  });
+
+  // The split is only safe because it does not join the networks. This is the
+  // assertion that matters: a train standing at that very junction still
+  // cannot continue onto the metro.
+  it("adds a junction without adding a connection", async () => {
+    const { graph } = await compile("touch-both", [], []);
+    // Along the rail way to its end at node 3 — fine.
+    expect(reaches(graph, at(41.15, -8.61), at(41.17, -8.59))).toBe(true);
+    // Through node 3 and onto the light rail beyond — refused, in both
+    // directions, although the two share that node.
+    expect(reaches(graph, at(41.15, -8.61), at(41.18, -8.58))).toBe(false);
+    expect(reaches(graph, at(41.15, -8.61), at(41.19, -8.57))).toBe(false);
+  });
+
+  it("lets the metro run through the junction it owns", async () => {
+    const metro = await compile("touch-both", [], []);
+    const asMetro = await openAs("touch-both", ProfileId.metro);
+    expect(reaches(asMetro, at(41.19, -8.57), at(41.18, -8.58))).toBe(true);
+    // ...and the metro cannot use the railway either.
+    expect(reaches(asMetro, at(41.19, -8.57), at(41.15, -8.61))).toBe(false);
+    expect(metro.profiles).toEqual([ProfileId.train, ProfileId.metro]);
   });
 });
 

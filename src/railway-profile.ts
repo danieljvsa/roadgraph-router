@@ -53,6 +53,46 @@ const RAILWAY_ACCESS_KEYS = ["access", "train"] as const;
 export type RailwayInclusion = "disused" | "narrow_gauge" | "tram" | "light_rail" | "monorail" | "funicular" | "subway" | "rail";
 
 /**
+ * Every class that may be asked for, and nothing else.
+ *
+ * The type above constrains a TypeScript caller, and constrains nothing at
+ * all at the compiler's command line, where `--railway-include` arrives as
+ * plain text. Without this the documented guarantee — that track which is
+ * gone or not yet built cannot be opted back in — held only for callers who
+ * were already going to get it right.
+ */
+export const RAILWAY_INCLUSIONS: readonly RailwayInclusion[] = [
+  "rail", "subway", "light_rail", "narrow_gauge", "tram", "monorail", "funicular", "disused",
+];
+
+/**
+ * Classes that are refused by name rather than merely absent, so that asking
+ * for one is answered with the reason instead of with silence.
+ */
+const NEVER_ROUTABLE: Record<string, string> = {
+  abandoned: "the track has been lifted",
+  razed: "the track has been lifted",
+  dismantled: "the track has been lifted",
+  demolished: "the track has been lifted",
+  proposed: "the line has not been built",
+  construction: "the line is not finished",
+  platform: "a platform is not track",
+  station: "a station is not track",
+  turntable: "a turntable is not a through route",
+  yard: "use service=yard on a routable class instead",
+};
+
+function assertInclusions(include: readonly string[]) {
+  for (const name of include) {
+    if ((RAILWAY_INCLUSIONS as readonly string[]).includes(name)) continue;
+    const because = NEVER_ROUTABLE[name];
+    throw new RangeError(because
+      ? `railway class "${name}" cannot be routed over: ${because}. Routable classes are: ${RAILWAY_INCLUSIONS.join(", ")}.`
+      : `"${name}" is not a railway class this package routes over. Routable classes are: ${RAILWAY_INCLUSIONS.join(", ")}.`);
+  }
+}
+
+/**
  * Every class this package knows how to route over, with the speed in km/h to
  * assume where the way states none. These are engineering-plausible line
  * speeds for the class of infrastructure, not service speeds: see the speed
@@ -90,7 +130,20 @@ const USAGE_SPEEDS: Partial<Record<number, number>> = {
  */
 const SERVICE_TRACK_SPEED_KPH = 25;
 
-const MINIMUM_RAILWAY_SPEED_KPH = 5;
+/**
+ * The slowest an *assumed* speed is ever taken to be. It exists so that a
+ * class with no table entry cannot produce a free edge, which a search would
+ * treat as a shortcut.
+ *
+ * It is deliberately not applied to a speed the data actually states. A track
+ * signed at 3 km/h is a track signed at 3 km/h, and raising it to 5 would let
+ * the engine travel faster than the posted limit and report a journey shorter
+ * than the infrastructure permits. The only floor on a tagged value is the one
+ * below, which exists to keep a pathological tag from overflowing the stored
+ * duration — `parseMaxSpeedKph` already rejects zero and negative values.
+ */
+const ASSUMED_SPEED_FLOOR_KPH = 5;
+const TAGGED_SPEED_FLOOR_KPH = 0.1;
 
 export type RailwayProfileOptions = {
   /** Extra `railway=` classes to route over, beyond the profile's own. */
@@ -105,6 +158,7 @@ function railwayProfile(options: {
   include?: readonly RailwayInclusion[];
 }): RoutingProfile {
   const { name, id, ceilingKph } = options;
+  assertInclusions(options.include ?? []);
   const classes = new Set<string>([...options.classes, ...(options.include ?? [])]);
   const networkKind: NetworkKind = "railway";
 
@@ -150,11 +204,22 @@ function railwayProfile(options: {
       if (!forward && !backward) return null;
 
       const attributes = railwayAttributesFor(tags);
-      const base = attributes.service !== RailService.running
+      // What to assume where the way states nothing: the service track it is,
+      // else what the line is for, else the class of track.
+      const assumed = Math.min(ceilingKph, Math.max(ASSUMED_SPEED_FLOOR_KPH, attributes.service !== RailService.running
         ? SERVICE_TRACK_SPEED_KPH
-        : USAGE_SPEEDS[attributes.usage] ?? CLASS_SPEEDS[railway] ?? MINIMUM_RAILWAY_SPEED_KPH;
+        : USAGE_SPEEDS[attributes.usage] ?? CLASS_SPEEDS[railway] ?? ASSUMED_SPEED_FLOOR_KPH));
       const posted = parseMaxSpeedKph(tags.maxspeed);
-      const clamp = (value: number | null) => Math.min(ceilingKph, Math.max(MINIMUM_RAILWAY_SPEED_KPH, value ?? (posted ?? base)));
+      /**
+       * A direction's speed: the limit signed for that direction, else the
+       * one signed for the way, else what the class assumes. A stated limit is
+       * used as stated — only the profile's own ceiling may lower it, because
+       * no train of this class exceeds that whatever a way claims.
+       */
+      const speedFor = (direction: "forward" | "backward") => {
+        const stated = parseMaxSpeedKph(tags[`maxspeed:${direction}`]) ?? posted;
+        return stated === null ? assumed : Math.min(ceilingKph, Math.max(TAGGED_SPEED_FLOOR_KPH, stated));
+      };
 
       let access: string | undefined;
       for (const key of RAILWAY_ACCESS_KEYS) {
@@ -165,8 +230,8 @@ function railwayProfile(options: {
       return {
         forward,
         backward,
-        forwardSpeedKph: clamp(parseMaxSpeedKph(tags["maxspeed:forward"])),
-        backwardSpeedKph: clamp(parseMaxSpeedKph(tags["maxspeed:backward"])),
+        forwardSpeedKph: speedFor("forward"),
+        backwardSpeedKph: speedFor("backward"),
         railway: attributes,
         ...(access ? { conditions: [{ kind: ConditionKind.access, value: access }] } : {}),
       };

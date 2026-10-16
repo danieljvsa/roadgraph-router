@@ -5,7 +5,7 @@ import { DEFAULT_MAX_STRETCH, checkAlternativeOptions, routeAlternatives, type A
 import { getRoutingProfile, getRoutingProfileById, maxSpeedMpsFor } from "./routing-profile";
 import { RouterError, type Coordinate, type RoadGraph, type RoutePreference, type RouteResult } from "./types";
 import { DEFAULT_VEHICLE_PRESET, resolveVehicle, type VehicleDimensions, type VehicleInput } from "./vehicle";
-import type { RailwayConstraints } from "./railway";
+import { assertRailwayConstraints, type RailwayConstraints } from "./railway";
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type RouteLoader = Pick<RouteGraphLoader | RoadGraphBundle, "loadForRoute"> & Partial<Pick<RoadGraphBundle, "loadExpandedForRoute">>;
@@ -112,6 +112,10 @@ export class RoadRouter {
   }
 
   static async open(source: string | RoadGraph, fetcher?: FetchLike, options: RoadRouterOptions = {}) {
+    // First, before a single byte is fetched. A standing constraint that is
+    // malformed would otherwise cost a header, a directory and a corridor of
+    // tiles before the first route noticed it.
+    assertRailwayConstraints(options.railway, "options.railway");
     if (typeof source !== "string") {
       RoadRouter.assertVehicleApplies(source.profileId ?? 0, options);
       return new RoadRouter(source, undefined, options, source.profileId);
@@ -159,6 +163,10 @@ export class RoadRouter {
    * could read them.
    */
   async route(from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest", when: DepartureOptions = {}): Promise<RouteResult> {
+    // A per-route override is checked here rather than after the corridor has
+    // been downloaded; `route()` checks it again for callers that reach it
+    // directly, which costs nothing on an object that has already passed.
+    assertRailwayConstraints(when.railway, "railway");
     if (this.graph) return route(this.graph, from, to, preference, { vehicle: this.vehicle, railway: this.options.railway, ...when });
     if (isBundle(this.loader)) return this.routeOverBundle(this.loader, from, to, preference, when);
     return this.routeOverLoader(this.loader!, from, to, preference, when);

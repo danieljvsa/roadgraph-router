@@ -188,9 +188,10 @@ describe("how fast a track is assumed to be", () => {
     expect(metro.maxSpeedKph).toBe(120);
     expect(speed(train, { railway: "rail", maxspeed: "500" })).toBe(300);
     expect(speed(metro, { railway: "subway", maxspeed: "300" })).toBe(120);
-    // A funicular tagged `maxspeed=2.52` is real; nothing is ever stored as
-    // slower than the floor, because a free edge is a shortcut.
-    expect(speed(createTrainProfile({ include: ["funicular"] }), { railway: "funicular", maxspeed: "2.52" })).toBe(5);
+    // A funicular tagged `maxspeed=2.52` is real, and 2.52 is what it gets:
+    // a floor belongs under an *assumed* speed, not over a stated one. See
+    // `railway-validation.test.ts`.
+    expect(speed(createTrainProfile({ include: ["funicular"] }), { railway: "funicular", maxspeed: "2.52" })).toBeCloseTo(2.52, 5);
   });
 
   it("gives a subway and a light rail their own default pace", () => {

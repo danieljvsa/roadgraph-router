@@ -4,7 +4,7 @@ import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
 import { edgeAllowed } from "./access";
 import { accessForVehicle } from "./limits";
-import { accessForRailway, railwayCertainty, type RailwayConstraints } from "./railway";
+import { accessForRailway, assertRailwayConstraints, railwayCertainty, type RailwayConstraints } from "./railway";
 import { accessAvoiding, type AvoidArea } from "./avoid";
 import { accessAtTime, conditionalDurations, conditionsOf, travelTimeFrom, type Circumstances, type TravelTime } from "./conditional";
 import { componentSizes, componentsFor } from "./connectivity";
@@ -512,6 +512,10 @@ function reconnect(graph: RoadGraph, from: Coordinate, to: Coordinate, preferenc
 
 export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest", options: RouteOptions = {}): RouteResult {
   assertGraph(graph);
+  // Before anything is snapped, masked or searched: a malformed constraint
+  // would otherwise be read as one no track can satisfy, and the caller would
+  // be told "no route" for what is really a typo.
+  assertRailwayConstraints(options.railway);
   // The vehicle narrows the profile's own mask, so every later step — snapping
   // included — sees one answer about which roads are usable.
   const vehicleAccess = accessForVehicle(graph, options.vehicle);

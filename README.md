@@ -334,6 +334,10 @@ value.
 | `construction` | **no** | **no** | Cannot yet carry anything. Not opt-in. |
 | anything else | **no** | **no** | Not track. |
 
+Asking for a class that is not routable is **refused by name**, not quietly
+ignored — `--railway-include abandoned` stops the compile and says the track
+has been lifted. Only the eight classes in the table above may be named.
+
 `disused` is the one genuinely arguable case, and it is **excluded by default
 and available as an explicit opt-in**. The rails are still there and the
 alignment is intact, but nothing has run over it, sometimes for decades, and
@@ -424,6 +428,16 @@ Constraints narrow the same access mask the vehicle and the departure time
 narrow, so the search and the snapping agree: a track a constraint closes is
 one no route can start on, finish on, or pass along.
 
+**A malformed constraint is refused, not read.** `{ gaugeMm: -1 }`,
+`{ voltage: Infinity }`, `{ frequency: "invalid" }`, a misspelled key — each
+raises a `RangeError` naming the field and what it should have been. This
+matters more than it looks: compared against a stated gauge, `NaN` is false
+for every track, so a constraint that was quietly read would close the whole
+network and report `NO_ROUTE` for what is really a typo. The check runs in
+`route()`, in `routeAlternatives()`, and in `RoadRouter.open` — the last of
+those before a single byte is fetched. `assertRailwayConstraints(value)` is
+exported for callers who want to validate input of their own.
+
 ### The policy for a tag that is not there
 
 **A constraint excludes a track only where the track's own tags contradict
@@ -490,6 +504,13 @@ comes from what the line is for — not from a single global guess:
 | `railway=tram` | 30 |
 | `railway=disused` (opt-in) | 25 |
 
+A limit the way states is used **as stated**, however slow: a track signed at
+3 km/h is routed at 3 km/h. Only the profile's own ceiling may lower it. The
+floor in the table is a floor under an *assumed* speed, where the way says
+nothing — an assumption of zero would be a free edge, which a search takes as
+a shortcut. `maxspeed`, `maxspeed:forward` and `maxspeed:backward` are read,
+in km/h, `mph` or `knots`.
+
 These are engineering-plausible speeds for the class of infrastructure. They
 ignore every reason a real train is slower: station dwell time, acceleration
 and braking, signalling headway, speed restrictions, pathing and crossing
@@ -530,6 +551,13 @@ relations, so a railway profile requests none and obeys none, and barrier
 nodes are not read either — a bollard is not a thing that happens to a
 railway, and reading the road barrier table for a train would let a gate
 across a footpath cut a main line.
+
+The two extra edges in a shared `train,metro` bundle are a *split*, not a
+connection, and there is a test that reproduces the exact shape: a light-rail
+way running through the end of a rail way makes that node a junction between
+two ways, where compiling the metro alone leaves it an interior point of one
+way and simplifies it out. The same test asserts that a train standing at that
+junction still cannot continue onto the metro.
 
 In the whole Portugal extract, exactly **4 nodes** are shared between two
 different classes of railway (2 `rail`+`tram`, 2 `rail`+`light_rail`), and
@@ -1526,6 +1554,11 @@ Constraints behave as they should on the real network. Portugal's main line is
 `strictUnknown` changes nothing here because every way along that corridor
 really does state its gauge and its electrification. On a less thoroughly
 surveyed network it would.
+
+Switching profile on a `train,metro` bundle costs **16.4 kB in 3 requests**,
+against 137.0 kB to open the same bundle fresh as a metro: the shared chunk is
+already downloaded and only the small per-profile columns are fetched. That is
+the whole reason the two share a bundle.
 
 ### A second network, to find the Portugal-shaped assumptions
 

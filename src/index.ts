@@ -9,11 +9,11 @@ export { componentSizes, componentsFor } from "./connectivity";
 export { accessAvoiding, countAvoided, touchesArea, type AvoidArea } from "./avoid";
 export {
   Electrification, RailFrequency, RailService, RailUsage, UNKNOWN_RAILWAY, RAILWAY_ATTRIBUTE_KEYS,
-  accessForRailway, constrainsAnything, countRailwayBlocked, packEdgeRailway, parseElectrification, parseFrequency,
+  accessForRailway, assertRailwayConstraints, constrainsAnything, countRailwayBlocked, packEdgeRailway, parseElectrification, parseFrequency,
   parseGaugeMm, parseService, parseUsage, parseVoltage, railwayAttributesFor, railwayCertainty, railwayOf, railwayRefusal,
   type RailFrequencyName, type RailUsageName, type RailwayCertainty, type RailwayConstraints,
 } from "./railway";
-export { createMetroProfile, createTrainProfile, isRailwayProfile, metroRoutingProfile, trainRoutingProfile, type RailwayInclusion, type RailwayProfileOptions } from "./railway-profile";
+export { RAILWAY_INCLUSIONS, createMetroProfile, createTrainProfile, isRailwayProfile, metroRoutingProfile, trainRoutingProfile, type RailwayInclusion, type RailwayProfileOptions } from "./railway-profile";
 export { accessForVehicle, countBlocked, fromDecimetres, fromHalfTonnes, packEdgeLimits, toDecimetres, toHalfTonnes } from "./limits";
 export {
   ConditionKind, MAX_STORED_VALUES, accessAtTime, conditionalDurations, conditionalValue, conditionHolds, conditionsOf, conditionsOnEdge,

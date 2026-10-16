@@ -295,6 +295,105 @@ function asList<T>(value: T | readonly T[] | undefined): readonly T[] | undefine
   return Array.isArray(value) ? (value as readonly T[]) : ([value] as readonly T[]);
 }
 
+/* --------------------------------------------------------- validation --- */
+
+/**
+ * The bounds a stated constraint has to fall inside.
+ *
+ * Gauges run from the 260 mm of a miniature railway to the 3,000 mm of a few
+ * historical broad-gauge lines; the stored column is sixteen bits, which is
+ * the hard ceiling. Voltages run from a 48 V funicular to the 50 kV of heavy
+ * freight. Anything outside is a mistake rather than an unusual railway, and
+ * saying so is more useful than quietly routing as though nothing had been
+ * asked.
+ */
+const MIN_GAUGE_MM = 100;
+const MIN_VOLTAGE = 1;
+
+class RailwayConstraintError extends RangeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "RailwayConstraintError";
+  }
+}
+
+function fail(where: string, field: string, saw: unknown, wanted: string): never {
+  const shown = typeof saw === "string" ? JSON.stringify(saw)
+    : Array.isArray(saw) ? `[${saw.map((value) => JSON.stringify(value)).join(", ")}]`
+    : String(saw);
+  throw new RailwayConstraintError(`${where}.${field} must be ${wanted}, not ${shown}.`);
+}
+
+/** A number constraint, which may also be given as a non-empty list of them. */
+function checkNumbers(where: string, field: string, value: unknown, low: number, high: number, whole: boolean) {
+  const list = Array.isArray(value) ? value : [value];
+  if (Array.isArray(value) && value.length === 0) {
+    fail(where, field, value, `a number or a non-empty list of numbers between ${low} and ${high}`);
+  }
+  for (const entry of list) {
+    if (typeof entry !== "number" || !Number.isFinite(entry) || entry < low || entry > high || (whole && !Number.isInteger(entry))) {
+      fail(where, field, entry, `${whole ? "a whole number" : "a number"} between ${low} and ${high}`);
+    }
+  }
+}
+
+function checkBoolean(where: string, field: string, value: unknown) {
+  if (typeof value !== "boolean") fail(where, field, value, "true or false");
+}
+
+/** A name constraint, which may also be given as a non-empty list of names. */
+function checkNames(where: string, field: string, value: unknown, allowed: readonly string[], listOnly: boolean) {
+  if (listOnly && !Array.isArray(value)) fail(where, field, value, `a list of ${allowed.join(", ")}`);
+  const list = Array.isArray(value) ? value : [value];
+  if (!list.length) fail(where, field, value, `a non-empty list of ${allowed.join(", ")}`);
+  for (const entry of list) {
+    if (typeof entry !== "string" || !allowed.includes(entry)) fail(where, field, entry, `one of ${allowed.join(", ")}`);
+  }
+}
+
+const CONSTRAINT_FIELDS = new Set([
+  "gaugeMm", "requireElectrification", "voltage", "frequency", "excludeServiceTracks", "usage", "strictUnknown",
+]);
+
+/**
+ * Checks a caller's constraints before anything expensive happens.
+ *
+ * A malformed constraint is a programming mistake, and the worst thing this
+ * could do with one is ignore it: `{ gaugeMm: NaN }` compared against a stated
+ * gauge is false for every track, so a silent reading would close the whole
+ * network and report "no route" for what is really a typo. `{ gaugeMm: -1 }`
+ * would do the opposite on a different field. Both are refused by name.
+ *
+ * Called from `route()` and `routeAlternatives()`, and from `RoadRouter.open`
+ * where a standing constraint is supplied — the last of those is what keeps a
+ * bad value from costing a tile download before anyone notices.
+ */
+export function assertRailwayConstraints(constraints: unknown, where = "railway"): asserts constraints is RailwayConstraints | undefined {
+  if (constraints === undefined || constraints === null) return;
+  if (typeof constraints !== "object" || Array.isArray(constraints)) {
+    throw new RailwayConstraintError(`${where} must be an object of railway constraints, not ${Array.isArray(constraints) ? "an array" : typeof constraints}.`);
+  }
+  const given = constraints as Record<string, unknown>;
+
+  // An unknown key is almost always a misspelling of a real one, and a
+  // misspelled constraint is one that silently does not apply.
+  for (const key of Object.keys(given)) {
+    if (given[key] === undefined) continue;
+    if (!CONSTRAINT_FIELDS.has(key)) {
+      throw new RailwayConstraintError(
+        `${where}.${key} is not a railway constraint. The constraints are: ${[...CONSTRAINT_FIELDS].join(", ")}.`);
+    }
+  }
+
+  if (given.gaugeMm !== undefined) checkNumbers(where, "gaugeMm", given.gaugeMm, MIN_GAUGE_MM, MAX_GAUGE_MM, true);
+  if (given.voltage !== undefined) checkNumbers(where, "voltage", given.voltage, MIN_VOLTAGE, MAX_VOLTAGE, false);
+  if (given.frequency !== undefined) checkNames(where, "frequency", given.frequency, Object.keys(FREQUENCY_NAMES), false);
+  if (given.usage !== undefined) checkNames(where, "usage", given.usage, Object.keys(USAGE_NAMES), true);
+  if (given.requireElectrification !== undefined) checkBoolean(where, "requireElectrification", given.requireElectrification);
+  if (given.excludeServiceTracks !== undefined) checkBoolean(where, "excludeServiceTracks", given.excludeServiceTracks);
+  if (given.strictUnknown !== undefined) checkBoolean(where, "strictUnknown", given.strictUnknown);
+}
+
 /** True when any constraint in `constraints` could actually exclude an edge. */
 export function constrainsAnything(constraints: RailwayConstraints | undefined): boolean {
   if (!constraints) return false;

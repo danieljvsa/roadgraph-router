@@ -19,6 +19,7 @@
 import { edgePolyline, edgeSource } from "./edge-index";
 import { route } from "./router";
 import type { RouteOptions } from "./router";
+import { assertRailwayConstraints } from "./railway";
 import { RouterError, type Coordinate, type RoadGraph, type RoutePreference, type RouteResult } from "./types";
 
 export type AlternativeRoutesOptions = Omit<RouteOptions, "costPenalties" | "costBound"> & {
@@ -73,6 +74,7 @@ const MOST_ROUTES = 10;
  * for a corridor first.
  */
 export function checkAlternativeOptions(options: AlternativeRoutesOptions) {
+  assertRailwayConstraints(options.railway);
   const whole = (name: string, value: number) => {
     if (!Number.isInteger(value)) throw new RangeError(`routeAlternatives: ${name} must be a whole number, not ${value}.`);
   };
