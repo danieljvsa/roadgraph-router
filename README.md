@@ -1401,8 +1401,8 @@ This routing bundle was compiled for a profile this build does not support (id 6
 
 | | 0.1.0 | 0.2.0 | 0.3.0 | 0.4.0 |
 | --- | --- | --- | --- | --- |
-| Tarball | 46.4 kB | 75.9 kB | 91.0 kB | 136.9 kB |
-| Unpacked | 182.8 kB | 289.3 kB | 342.1 kB | 478.0 kB |
+| Tarball | 46.4 kB | 75.9 kB | 91.0 kB | 137.7 kB |
+| Unpacked | 182.8 kB | 289.3 kB | 342.1 kB | 480.2 kB |
 
 Browser size, both releases bundled by the same esbuild 0.28.1 from the
 published entry point, minified and gzipped:
