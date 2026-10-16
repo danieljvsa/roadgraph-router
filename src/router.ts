@@ -674,12 +674,30 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   // A siding is dearer to cross than the line beside it, then the caller's own
   // penalties apply on top of whatever that left.
   const slowed = withPenalties(graph, preference, serviceTrackCosts(graph, preference, conditionallySlowed), options.costPenalties);
-  const costOf = (edge: number) => preference === "fastest"
-    ? (conditionallySlowed?.get(edge) ?? graph.edgeDurationsSeconds[edge] * durationScale)
-    : graph.edgeDistancesMeters[edge] * distanceScale;
+  /**
+   * What the search steers by: the graph's own cost, slowed by a conditional
+   * limit where one applies, then made dearer by whatever is penalising this
+   * pass. It is the same table `searchContext` uses, and it has to price
+   * *every* part of a journey — the edges in the middle, the partial edge it
+   * starts on, the partial edge it finishes on, and the case where those two
+   * are one edge and there is no middle.
+   *
+   * Pricing the ends with the graph's untouched cost, as this once did, made
+   * a penalty something the search could not see wherever a route began or
+   * ended on the penalised road. A route that was a single edge end to end
+   * could not be steered off it at all, so `routeAlternatives` asked for
+   * another way round and was handed the same one back.
+   *
+   * Nothing reported to a caller is priced from here. Distances and durations
+   * are summed from the graph's own arrays further down, so a penalty changes
+   * which way a route goes and never what it is said to cost.
+   */
+  const searchCostOf = (edge: number) => slowed?.get(edge) ?? (preference === "fastest"
+    ? graph.edgeDurationsSeconds[edge] * durationScale
+    : graph.edgeDistancesMeters[edge] * distanceScale);
 
-  const seeds = seedsFor(originSnap, costOf);
-  const finisherList = finishersFor(destinationSnap, costOf);
+  const seeds = seedsFor(originSnap, searchCostOf);
+  const finisherList = finishersFor(destinationSnap, searchCostOf);
   const finishers = new Map<number, Finisher[]>();
   for (const finisher of finisherList) {
     const bucket = finishers.get(finisher.node);
@@ -694,7 +712,7 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     for (const origin of originSnap.projections) {
       const destination = projectionOf(destinationSnap, origin.edge);
       if (!destination || destination.fraction < origin.fraction) continue;
-      const cost = (destination.fraction - origin.fraction) * costOf(origin.edge);
+      const cost = (destination.fraction - origin.fraction) * searchCostOf(origin.edge);
       if (!direct || cost < direct.cost) direct = { origin, destination, cost };
     }
   }
@@ -711,7 +729,9 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   if (direct && direct.cost >= costBound) direct = null;
   if (!outcome && !direct) throw new RouterError("NO_ROUTE", `No ${profileOf(graph).name} route connects the selected points.`);
 
-  const searchCost = outcome ? outcome.seed.cost + outcome.edges.reduce((sum, edge) => sum + costOf(edge), 0) + outcome.finisher.cost : Infinity;
+  // Both candidates priced the same way, which is the way the search chose
+  // between them; the seed and finisher costs already come from this table.
+  const searchCost = outcome ? outcome.seed.cost + outcome.edges.reduce((sum, edge) => sum + searchCostOf(edge), 0) + outcome.finisher.cost : Infinity;
   const partial = (projection: EdgeProjection, fraction: number) => ({
     distance: fraction * graph.edgeDistancesMeters[projection.edge] * distanceScale,
     duration: fraction * graph.edgeDurationsSeconds[projection.edge] * durationScale,

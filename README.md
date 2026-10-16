@@ -593,11 +593,28 @@ nothing in the package reads them.
 | Ireland, conventional railway | 144 of 150 | 121 m, all at one station approach |
 | Lisbon metro | 74 of 120 | 223 m — see below |
 
-Lisbon is not a routing fault. Twenty-eight per cent of its mapped subway
-track — 80 km — is tagged `service=yard`, and forbidding service track makes
-**127 of its 190 station pairs unroutable**. The network as mapped depends on
-that track for connectivity, so a route has to use it; raising the penalty
-would change the price and not the path.
+Reproduce them with `npm run demo`'s sibling scripts in `validate/`; station
+pairs come from a fixed seed, so a rerun measures the same journeys.
+
+Lisbon is not a routing fault, and two separate things make its figure low.
+
+**The yardstick is incomplete there.** 4% of Lisbon's running line — 5 km — is
+in no route relation at all, including ways tagged `name=Linha Vermelha`.
+A route along those is scored as straying when it is running on the named line
+itself. Porto, which scores 120 of 120, has 2% of its running line outside the
+relations and far less of it near the places routes pass through.
+
+**And the mapped network needs its service track.** Twenty-eight per cent of
+Lisbon's subway — 35 km — is tagged `service=yard`, against 11% in Porto, and
+forbidding service track leaves **127 of its 190 station pairs unroutable**.
+The network as mapped is connected through that track, so a route has to use
+it; raising the penalty changes the price and not the path.
+
+Neither is something an infrastructure router can fix, and neither is evidence
+of bad topology, snapping or costs — the same code scores 100%, 99% and 96% on
+the other three networks. Saying which track a *service* uses would need the
+route relations as a routing input, which this release deliberately does not
+take.
 
 > Route relations are read by nothing in this package. They were used **once**,
 > by hand, to check an answer against the line as mapped. They describe
