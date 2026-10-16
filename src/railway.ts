@@ -27,7 +27,7 @@
 
 import { accessMaskFor, edgeAllowed } from "./access";
 import type { EdgeRailway, RoadGraph } from "./types";
-import type { RailwayAttributes } from "./profile-types";
+import { ProfileId, type RailwayAttributes } from "./profile-types";
 
 /** How a track is electrified. `none` is a stated `electrified=no`, not an absent tag. */
 export const Electrification = {
@@ -353,8 +353,17 @@ export function railwayRefusal(railway: RailwayAttributes, constraints: RailwayC
  */
 export function accessForRailway(graph: RoadGraph, constraints: RailwayConstraints | undefined, base: Uint8Array | undefined = graph.edgeAccess): Uint8Array | undefined {
   const table = graph.edgeRailway;
-  if (!constrainsAnything(constraints) || !table) return base;
+  if (!constrainsAnything(constraints)) return base;
   const edges = graph.edgeTargets.length;
+  if (!table) {
+    // A railway graph with no table at all is one where every track states
+    // nothing. Under the default policy that changes nothing — silence is not
+    // a refusal — but a caller who asked for strictness asked not to be given
+    // a route over track nobody has described, and that is the whole graph.
+    const railway = graph.profileId === ProfileId.train || graph.profileId === ProfileId.metro;
+    if (!railway || !railwayRefusal(UNKNOWN_RAILWAY, constraints!)) return base;
+    return accessMaskFor(edges, () => false);
+  }
   // Rows repeat across thousands of edges, so each distinct row is judged once.
   const rowCount = table.gaugeMm.length;
   const refused = new Uint8Array(rowCount);
@@ -376,7 +385,13 @@ export function accessForRailway(graph: RoadGraph, constraints: RailwayConstrain
  * constraint without any evidence that it really does.
  */
 export type RailwayCertainty = {
-  /** Metres of the route whose track stated every attribute that was constrained. */
+  /**
+   * Metres of the route whose track stated every attribute that was
+   * constrained. The two edges a route enters and leaves on are counted at
+   * their full length rather than at the part actually travelled, so the
+   * totals can slightly exceed the route's own distance: this measures which
+   * tracks a route used, not how far it went along each.
+   */
   statedMeters: number;
   /** Metres whose track left at least one constrained attribute unstated. */
   unstatedMeters: number;

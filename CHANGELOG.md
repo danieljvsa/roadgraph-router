@@ -53,11 +53,18 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   excludes a track only where the track's own tags contradict it. OSM silence
   is an absent survey, not a statement of incompatibility, and excluding every
   unstated track would reduce most networks to nothing. That permissiveness is
-  never reported as compatibility — `railwayCertainty()` says how many metres
-  of a route ran on track that stated every constrained attribute and how many
-  did not, which attributes were missing, how far it ran over service track,
-  and every distinct gauge it crossed; and `strictUnknown: true` reverses the
-  default for a caller who would rather have no route than an unverified one.
+  never reported as compatibility. Every railway route carries the answer on
+  the result itself, as `result.railway`: how many metres ran on track that
+  stated every constrained attribute and how many did not, which attributes
+  were missing, how far it ran over service track, and every distinct gauge it
+  crossed. A road route has no such field and a railway route always has one,
+  including one over track that states nothing, which reports itself as
+  entirely unstated — so the field's absence means one thing only.
+
+  `strictUnknown: true` reverses the default for a caller who would rather
+  have no route than an unverified one, and holds for a whole graph as well as
+  for one track: a railway bundle whose tracks describe nothing is closed
+  entirely rather than quietly accepted.
 
 - **An inclusion policy for track that is arguably track.** `disused` is
   excluded by default and available as an explicit opt-in: the rails are
@@ -142,8 +149,8 @@ describes how trains are normally run, not what the track permits.
 
 ### Cost
 
-Railways add about **3.4 kB gzipped** to a browser bundle that will never use
-them — 27.5 kB to 30.9 kB for the whole public surface. It is not
+Railways add about **3.5 kB gzipped** to a browser bundle that will never use
+them — 27.5 kB to 31.0 kB for the whole public surface. It is not
 tree-shakeable: `routingProfiles` names every profile and the constraint
 module is reached from `route()`. Hiding it behind a dynamic import would make
 profile lookup asynchronous, which is a worse trade. Runtime dependencies are

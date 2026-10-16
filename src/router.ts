@@ -4,7 +4,7 @@ import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
 import { edgeAllowed } from "./access";
 import { accessForVehicle } from "./limits";
-import { accessForRailway, type RailwayConstraints } from "./railway";
+import { accessForRailway, railwayCertainty, type RailwayConstraints } from "./railway";
 import { accessAvoiding, type AvoidArea } from "./avoid";
 import { accessAtTime, conditionalDurations, conditionsOf, travelTimeFrom, type Circumstances, type TravelTime } from "./conditional";
 import { componentSizes, componentsFor } from "./connectivity";
@@ -12,6 +12,7 @@ import { searchBoundsFor, straightLineAtMost } from "./search-bounds";
 import type { VehicleDimensions } from "./vehicle";
 import { buildTurnRestrictionIndex, buildTurnSequenceIndex, guardedJunctionsFor, type TurnRestrictionIndex, type TurnSequenceIndex } from "./turn-restrictions";
 import { profileOf } from "./routing-profile";
+import { isRailwayProfile } from "./railway-profile";
 import { FALLBACK_SNAP_RADIUS_METERS, coordinateFor, geometryAfter, geometryBefore, geometryBetween, haversineMeters, snapToGraph, type EdgeProjection, type GraphSnap } from "./snap";
 
 /** Entering the graph: traverse the tail of `edge` to reach `node`. `edge` is -1 at a junction. */
@@ -711,13 +712,27 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     }
   }
 
+  const origin = snapSummary(originSnap, travelledAtOrigin);
+  const destination = snapSummary(destinationSnap, travelledAtDestination);
   return {
     nodeIds,
     edgeIds,
     distanceMeters,
     durationSeconds,
-    originSnap: snapSummary(originSnap, travelledAtOrigin),
-    destinationSnap: snapSummary(destinationSnap, travelledAtDestination),
+    originSnap: origin,
+    destinationSnap: destination,
     geometry: { type: "LineString", coordinates },
+    // A railway route reports what the track vouched for, counting the edges
+    // it entered and left on: those are not hops between two nodes, so they
+    // are reported in the snaps rather than in `edgeIds`, and a route that
+    // began on a siding should say so.
+    //
+    // Every railway route carries it, including one whose track states
+    // nothing at all — that route reports itself as entirely unstated, which
+    // is the answer. Leaving the field off there would make its absence mean
+    // two different things: "this is a road" and "nobody surveyed this".
+    ...(graph.edgeRailway || isRailwayProfile(profileOf(graph)) ? {
+      railway: railwayCertainty(graph, [...edgeIds, origin.edge, destination.edge].filter((edge) => edge >= 0), options.railway ?? {}),
+    } : {}),
   };
 }

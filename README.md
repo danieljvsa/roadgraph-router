@@ -430,15 +430,31 @@ unstated track would reduce most networks to nothing. But a route over
 unstated track is not evidence of anything either, and this library never
 reports it as though it were:
 
-- `railwayCertainty(graph, edgeIds, constraints)` reports how many metres of a
-  route ran on track that stated every constrained attribute, how many ran on
-  track that did not, which attributes were missing, how far the route ran
-  over service track, and every distinct gauge it crossed — including a gauge
-  *change* mid-route, which no constraint was asked to catch.
+- **Every railway route carries the answer on the result itself**, as
+  `result.railway`. It reports how many metres ran on track that stated every
+  constrained attribute, how many ran on track that did not, which attributes
+  were missing, how far the route ran over service track, and every distinct
+  gauge it crossed — including a gauge *change* mid-route, which no constraint
+  was asked to catch.
+
+  ```ts
+  const result = await router.route(porto, lisboa, "shortest");
+  result.railway;
+  // { statedMeters: 336_792, unstatedMeters: 0, unstated: [],
+  //   serviceTrackMeters: 9_349, gauges: [1668] }
+  ```
+
+  A road route has no `railway` field at all, and a *railway* route always has
+  one — including a route over track that states nothing, which reports itself
+  as entirely unstated. The absence of the field means one thing only: this
+  was not a route over track. (`railwayCertainty(graph, edgeIds, constraints)`
+  is the same calculation, for the low-level `route(graph, …)` API.)
 - `strictUnknown: true` reverses the default and excludes unstated track. It
   will refuse routes over track nobody has surveyed, which on many networks is
   a great deal of it. It is the right setting when a route that might not be
-  runnable is worse than no route at all.
+  runnable is worse than no route at all. It holds for a whole graph as well
+  as for one track: a railway bundle whose tracks describe nothing is closed
+  entirely rather than quietly accepted.
 
 One exception, because OSM defines it that way: an absent `service` tag means
 a running line, not an unsurveyed one.
@@ -1223,13 +1239,13 @@ This routing bundle was compiled for a profile this build does not support (id 6
 
 | | 0.1.0 | 0.2.0 | 0.3.0 | 0.4.0 |
 | --- | --- | --- | --- | --- |
-| Tarball | 46.4 kB | 75.9 kB | 91.0 kB | 127.1 kB |
-| Unpacked | 182.8 kB | 289.3 kB | 342.1 kB | 449.3 kB |
-| Bundled for a browser, gzipped | 13.6 kB | 21.1 kB | 24.8 kB | **30.9 kB** |
+| Tarball | 46.4 kB | 75.9 kB | 91.0 kB | 128.7 kB |
+| Unpacked | 182.8 kB | 289.3 kB | 342.1 kB | 453.7 kB |
+| Bundled for a browser, gzipped | 13.6 kB | 21.1 kB | 24.8 kB | **31.0 kB** |
 
-Railways cost a road-only application about **3.4 kB gzipped** that it will
+Railways cost a road-only application about **3.5 kB gzipped** that it will
 not use, measured as the whole public surface bundled with esbuild: 27.5 kB
-before, 30.9 kB after. It is not zero and it is not tree-shakeable, because
+before, 31.0 kB after. It is not zero and it is not tree-shakeable, because
 `routingProfiles` is a registry that names every profile, and the constraint
 module is reached from `route()` itself. Hiding it behind a dynamic import
 would make profile lookup asynchronous, which is a worse trade than 3.4 kB.

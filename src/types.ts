@@ -1,3 +1,5 @@
+import type { RailwayCertainty } from "./railway";
+
 export type Coordinate = { lat: number; lng: number };
 
 /**
@@ -132,6 +134,14 @@ export interface RouteResult {
    */
   originSnap: RouteSnap;
   destinationSnap: RouteSnap;
+  /**
+   * How much of this route the compiled track actually vouches for, present
+   * only on a graph that describes its track. A railway route is only as
+   * trustworthy as the survey behind it, and this is the number that says so:
+   * a route entirely over unstated gauge satisfies a gauge constraint without
+   * any evidence that it really does. See `./railway`.
+   */
+  railway?: RailwayCertainty;
 }
 
 export type RouterErrorCode = "ORIGIN_NOT_ON_GRAPH" | "DESTINATION_NOT_ON_GRAPH" | "NO_ROUTE" | "ROUTE_OUTSIDE_COVERAGE" | "ROUTE_ACROSS_TILES";

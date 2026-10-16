@@ -284,6 +284,64 @@ describe("a route stitched from several tiles", () => {
   });
 });
 
+// A railway route is only as trustworthy as the survey behind it. The number
+// that says so has to reach whoever is holding the result, not just whoever
+// is holding the graph.
+describe("what a route vouches for", () => {
+  it("reports the track a route ran over, on the result itself", async () => {
+    const { graph } = await compile("siding", [], []);
+    const result = route(graph, at(41.0, -8.60), at(41.0008, -8.59), "shortest");
+    expect(result.railway).toBeDefined();
+    expect(result.railway!.gauges).toEqual([1668]);
+    expect(result.railway!.unstated).toEqual([]);
+    expect(result.railway!.statedMeters).toBeGreaterThan(0);
+    // It ran onto the siding to get there, and says so.
+    expect(result.railway!.serviceTrackMeters).toBeGreaterThan(0);
+  });
+
+  it("names the attribute a route could not answer for", async () => {
+    // A line stating nothing but its class: every constraint is unanswered.
+    const { graph } = await compile("silent", [
+      ...line(1, 41.0, -8.60, 3), { id: 10, lat: 41.02, lon: -8.58 },
+    ], [
+      { id: 100, refs: [1, 2, 3], tags: { railway: "rail" } },
+      { id: 101, refs: [3, 10], tags: { railway: "rail" } },
+    ]);
+    const result = route(graph, at(41.0, -8.60), at(41.02, -8.58), "shortest", { railway: { gaugeMm: 1668, requireElectrification: true } });
+    // The route exists, because silence is not a refusal...
+    expect(result.distanceMeters).toBeGreaterThan(0);
+    // ...and it is never reported as though the track had answered.
+    expect(result.railway!.statedMeters).toBe(0);
+    expect(result.railway!.unstatedMeters).toBeGreaterThan(0);
+    // Nothing whatever was stated, so the report says exactly that rather
+    // than listing the attributes one by one.
+    expect(result.railway!.unstated).toEqual(["railway attributes"]);
+    expect(result.railway!.gauges).toEqual([]);
+
+    // And `strictUnknown` refuses it outright.
+    expect(() => route(graph, at(41.0, -8.60), at(41.02, -8.58), "shortest", { finishOnANearbyRoad: false, railway: { gaugeMm: 1668, strictUnknown: true } })).toThrow(RouterError);
+  });
+
+  it("says nothing about a road route, which has no track to describe", async () => {
+    const { graph } = await compile("junction", [], []);
+    expect(route(graph, at(41.0, -8.60), at(41.02, -8.58), "shortest").railway).toBeDefined();
+    // The same topology read as a road graph makes no claim either way: the
+    // field is for routes over track, and a car route is not one.
+    const asRoad = { ...graph, edgeRailway: undefined, profileId: ProfileId.car, maxSpeedKph: 150 };
+    expect(route(asRoad, at(41.0, -8.60), at(41.02, -8.58), "shortest").railway).toBeUndefined();
+  });
+
+  // A railway graph that describes nothing still answers, because the absence
+  // of the field has to mean one thing only: "this is not a railway route".
+  it("reports a wholly undescribed railway as wholly unstated", async () => {
+    const { graph } = await compile("silent", [], []);
+    expect(graph.edgeRailway).toBeUndefined();
+    const result = route(graph, at(41.0, -8.60), at(41.02, -8.58), "shortest");
+    expect(result.railway).toEqual({ statedMeters: 0, unstatedMeters: expect.any(Number), unstated: ["railway attributes"], serviceTrackMeters: 0, gauges: [] });
+    expect(result.railway!.unstatedMeters).toBeGreaterThan(0);
+  });
+});
+
 describe("snapping onto track", () => {
   it("snaps to the railway and only to the railway", async () => {
     // A road runs right beside the line. A train bundle holds no road at all,

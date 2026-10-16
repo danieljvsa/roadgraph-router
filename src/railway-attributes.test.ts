@@ -265,9 +265,24 @@ describe("turning constraints into an access mask", () => {
     expect([...base]).toEqual([0b011]);
   });
 
-  it("does nothing to a graph that holds no track description", () => {
+  it("does nothing to a road graph, whatever it is asked", () => {
     const graph = buildGraph({ nodes: { A: [41, -8.6], B: [41, -8.59] }, roads: ["A-B"] });
     expect(accessForRailway(graph, { gaugeMm: 1668 })).toBeUndefined();
+    expect(accessForRailway(graph, { gaugeMm: 1668, strictUnknown: true })).toBeUndefined();
+  });
+
+  // A railway graph with no table is one where every track states nothing.
+  // Silence is not a refusal by default — but a caller who asked for
+  // strictness asked not to be given a route over undescribed track, and here
+  // that is all of it.
+  it("closes an undescribed railway graph only when asked to be strict", () => {
+    const graph = { ...buildGraph({ nodes: { A: [41, -8.6], B: [41, -8.59] }, roads: ["A-B"] }), profileId: ProfileId.train };
+    expect(accessForRailway(graph, { gaugeMm: 1668 })).toBeUndefined();
+    const strict = accessForRailway(graph, { gaugeMm: 1668, strictUnknown: true })!;
+    expect(strict).toBeDefined();
+    for (let edge = 0; edge < graph.edgeTargets.length; edge += 1) expect(edgeAllowed(strict, edge)).toBe(false);
+    // Strictness about something the graph was never asked still allows it.
+    expect(accessForRailway(graph, { excludeServiceTracks: true, strictUnknown: true })).toBeUndefined();
   });
 });
 
