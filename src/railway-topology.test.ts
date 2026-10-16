@@ -459,6 +459,60 @@ describe("starting in the direction the journey needs", () => {
   });
 });
 
+/**
+ * A siding is often the shortest way between two parallel running lines, so a
+ * shortest-distance search will cut through the depot to change track unless
+ * something stops it. Leaving Trindade it took 83 m of yard to cross from one
+ * line to another, which no operator does.
+ */
+describe("what a siding costs to cross", () => {
+  // A running line, and a shorter path between the same two points that goes
+  // through a yard. On distance alone the yard wins.
+  const shortcut: [PbfNode[], PbfWay[]] = [[
+    { id: 1, lat: 41.000, lon: -8.6000 }, { id: 2, lat: 41.004, lon: -8.6060 }, { id: 3, lat: 41.008, lon: -8.6000 },
+    { id: 4, lat: 41.004, lon: -8.6002 },
+  ], [
+    // The running line, bowing west through node 2.
+    { id: 100, refs: [1, 2], tags: RAIL },
+    { id: 101, refs: [2, 3], tags: RAIL },
+    // A yard track cutting the corner, straight through node 4.
+    { id: 102, refs: [1, 4], tags: { ...RAIL, service: "yard" } },
+    { id: 103, refs: [4, 3], tags: { ...RAIL, service: "yard" } },
+  ]];
+
+  it("keeps a shortest route on the running line rather than through the yard", async () => {
+    const { graph } = await compile("yard-shortcut", ...shortcut, ["--profile", "train"]);
+    const ends = [at(41.000, -8.6000), at(41.008, -8.6000)] as const;
+    for (const preference of ["shortest", "fastest"] as const) {
+      const result = route(graph, ends[0], ends[1], preference);
+      const used = [...result.edgeIds, result.originSnap.edge, result.destinationSnap.edge].filter((edge) => edge >= 0);
+      expect(used.every((edge) => railwayOf(graph, edge)?.service === 0)).toBe(true);
+    }
+  });
+
+  // Dearer, not forbidden: where the yard is the only way, it is still used.
+  it("still crosses a siding when it is the only way through", async () => {
+    const { graph } = await compile("yard-only", [
+      { id: 1, lat: 41.000, lon: -8.6000 }, { id: 2, lat: 41.004, lon: -8.6000 }, { id: 3, lat: 41.008, lon: -8.6000 },
+    ], [
+      { id: 100, refs: [1, 2], tags: RAIL },
+      { id: 101, refs: [2, 3], tags: { ...RAIL, service: "siding" } },
+    ], ["--profile", "train"]);
+    const result = route(graph, at(41.000, -8.6000), at(41.008, -8.6000), "shortest");
+    expect(result.distanceMeters).toBeGreaterThan(500);
+    expect(result.railway!.serviceTrackMeters).toBeGreaterThan(0);
+  });
+
+  // The penalty steers the search and never reaches the answer.
+  it("reports the graph's own distance, not the penalised one", async () => {
+    const { graph } = await compile("yard-only", [], []);
+    const result = route(graph, at(41.000, -8.6000), at(41.008, -8.6000), "shortest");
+    // Two segments of about 444 m each; nothing is multiplied in the answer.
+    expect(result.distanceMeters).toBeGreaterThan(800);
+    expect(result.distanceMeters).toBeLessThan(950);
+  });
+});
+
 describe("snapping onto track", () => {
   it("snaps to the railway and only to the railway", async () => {
     // A road runs right beside the line. A train bundle holds no road at all,

@@ -30,12 +30,16 @@ const TIE_TOLERANCE_METERS = 0.5;
  * Senhor de Matosinhos came back as 16.1 km instead of 11.9 because the
  * southbound track was 3 m closer than the northbound one.
  *
- * This is about the width of a station throat, so every platform track at the
- * station is offered and the search picks the one its journey actually wants.
- * Offering more starting points cannot make a route worse: each carries the
- * cost of reaching it, and the search still returns the cheapest.
+ * Twelve metres covers the two tracks of a double-track line and stops there.
+ * It is deliberately not wide enough to reach across a station to another
+ * line's platform: at Trindade a 25 m tolerance put the route on the Linha D
+ * track, 27 m away, and it then crossed back through the depot.
+ *
+ * Offering more starting points cannot make a route worse — each carries the
+ * cost of reaching it, and the search still returns the cheapest — but
+ * offering the wrong platform makes it answer a different question.
  */
-const PARALLEL_TRACK_TOLERANCE_METERS = 25;
+const PARALLEL_TRACK_TOLERANCE_METERS = 12;
 
 /** How far from a point a road may be and still count as the road you are on. */
 export const DEFAULT_SNAP_RADIUS_METERS = 500;

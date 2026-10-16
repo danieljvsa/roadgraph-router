@@ -549,8 +549,31 @@ track is offered and the search takes the one the journey wants. Offering more
 starting points cannot make a route worse: each carries the cost of reaching
 it, and the search still returns the cheapest.
 
-Both rules apply only where `edgeRailway` is present. A road graph snaps
-exactly as it always has.
+**A siding costs more to cross than the line beside it.** A yard or a
+crossover is usually the shortest way between two parallel running lines, so a
+shortest-distance search takes it: leaving Trindade, 83 m of depot was cheaper
+than staying on the running line, and the route cut through the sidings to
+change track. Service track is made four times dearer for a `shortest` search,
+which steers it and never reaches the answer — the distance reported back is
+the graph's own, exactly as `costPenalties` are documented to behave. A
+`fastest` search needs no such thing, because a siding is already modelled at
+25 km/h. It is dearer, not forbidden: where a siding is the only way through,
+it is still used, and `excludeServiceTracks` is what forbids it.
+
+Measured against the Linha A alignment as OpenStreetMap maps it — the ways of
+its `type=route` relation — a Trindade to Senhor de Matosinhos route now
+deviates by a mean of **0.0 m** and a worst of **3.0 m**, with no point more
+than 10 m off the line. Before these three rules it ran through the yard and
+along a Linha D platform, deviating by up to 31 m.
+
+All three rules apply only where `edgeRailway` is present. A road graph snaps
+and costs exactly as it always has, which 30 road routes across three profiles
+confirm.
+
+> Route relations are read by nothing in this package. They were used **once**,
+> by hand, to check an answer against the line as mapped. They describe
+> services — which train runs where — and inferring infrastructure rules from
+> them is the service modelling this release does not do.
 
 ### Topology: what connects to what
 
@@ -1559,8 +1582,8 @@ And over `porto-metro.efrb`, a 17.3 kB bundle:
 
 | Journey | Distance | Estimated | Cold | Warm |
 | --- | --- | --- | --- | --- |
-| Trindade → Senhor de Matosinhos (Linha A) | 11.8 km | 21m | 3 ms | 0.3 ms |
-| Trindade → Aeroporto (Linha E) | 12.9 km | 14m | 2 ms | 0.4 ms |
+| Trindade → Senhor de Matosinhos (Linha A) | 11.8 km | 21m | 3 ms | 0.4 ms |
+| Trindade → Aeroporto (Linha E) | 12.9 km | 14m | 4 ms | 0.5 ms |
 | Trindade → Póvoa de Varzim (Linha B) | 29.8 km | 29m | 3 ms | 0.4 ms |
 
 The distances are the check that matters, and they are checked against the

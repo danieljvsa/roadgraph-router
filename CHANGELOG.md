@@ -29,6 +29,20 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Both rules apply only where railway attributes are present; a road graph
   snaps exactly as it did, which 30 road routes across three profiles confirm.
 
+- **A shortest route cut through the depot.** A siding is often the shortest
+  path between two parallel running lines, and nothing made it dearer: leaving
+  Trindade the route took 83 m of yard to change track, and ran 9.35 km of
+  sidings between Porto and Lisboa. Service track is now four times dearer for
+  a `shortest` search — a `fastest` one already prefers the running line,
+  because a siding is modelled at 25 km/h. The multiplier steers the search
+  and never reaches the answer. Dearer, not forbidden: where a siding is the
+  only way through it is still used.
+
+  Measured against the Linha A alignment as OSM maps it, Trindade to Senhor de
+  Matosinhos now deviates by a mean of 0.0 m and a worst of 3.0 m, with no
+  point more than 10 m off. Before, it ran through the yard and down a Linha D
+  platform, up to 31 m off.
+
 ### Fixed, in the release audit
 
 - **A railway signed below 5 km/h was routed at 5 km/h.** The floor that keeps

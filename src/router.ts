@@ -4,7 +4,7 @@ import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
 import { edgeAllowed } from "./access";
 import { accessForVehicle } from "./limits";
-import { accessForRailway, assertRailwayConstraints, railwayCertainty, type RailwayConstraints } from "./railway";
+import { RailService, accessForRailway, assertRailwayConstraints, railwayCertainty, type RailwayConstraints } from "./railway";
 import { accessAvoiding, type AvoidArea } from "./avoid";
 import { accessAtTime, conditionalDurations, conditionsOf, travelTimeFrom, type Circumstances, type TravelTime } from "./conditional";
 import { componentSizes, componentsFor } from "./connectivity";
@@ -438,6 +438,43 @@ export type RouteOptions = {
  * The per-edge costs a search should use: the conditional slowdowns, with any
  * penalty folded in on top. Absent both, the search reads the graph directly.
  */
+/**
+ * What a siding costs a search that is minimising distance.
+ *
+ * A yard or a crossover is usually the shortest way between two parallel
+ * tracks, so a shortest-distance search takes it: leaving Trindade, 83 m of
+ * depot was cheaper than staying on the running line, and the route cut
+ * through the sidings to change track. No operator does that, and the tags
+ * that would say which service owns which track are route relations — service
+ * data this package does not read and will not infer.
+ *
+ * What the infrastructure does say is that the track is a siding, and that is
+ * enough: it is made dearer to cross than the running line beside it. The
+ * multiplier steers the search and never reaches the answer — the distance
+ * reported back is the graph's own, exactly as a caller's `costPenalties` are
+ * documented to behave.
+ *
+ * Only for `shortest`. A `fastest` search already prefers the running line,
+ * because a siding is modelled at 25 km/h and the line beside it is not, and
+ * charging twice would be double counting.
+ */
+const SERVICE_TRACK_DISTANCE_MULTIPLIER = 4;
+
+function serviceTrackCosts(graph: RoadGraph, preference: RoutePreference, slowed: Map<number, number> | undefined) {
+  const table = graph.edgeRailway;
+  if (!table || preference !== "shortest") return slowed;
+  const distanceScale = graph.edgeDistanceScale ?? 1;
+  let costs: Map<number, number> | undefined;
+  for (let edge = 0; edge < graph.edgeTargets.length; edge += 1) {
+    const row = table.edgeRows[edge];
+    if (!row || table.service[row] === RailService.running) continue;
+    costs ??= new Map(slowed);
+    const base = costs.get(edge) ?? graph.edgeDistancesMeters[edge] * distanceScale;
+    costs.set(edge, base * SERVICE_TRACK_DISTANCE_MULTIPLIER);
+  }
+  return costs ?? slowed;
+}
+
 function withPenalties(
   graph: RoadGraph,
   preference: RoutePreference,
@@ -613,7 +650,9 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   const conditionallySlowed = preference === "fastest" && when ? conditionalDurations(graph, conditionsOf(graph), when, options.vehicle, options.circumstances) : undefined;
   // A penalty makes an edge dearer to the search without making it dearer in
   // the answer: the distance and duration reported below are the real ones.
-  const slowed = withPenalties(graph, preference, conditionallySlowed, options.costPenalties);
+  // A siding is dearer to cross than the line beside it, then the caller's own
+  // penalties apply on top of whatever that left.
+  const slowed = withPenalties(graph, preference, serviceTrackCosts(graph, preference, conditionallySlowed), options.costPenalties);
   const costOf = (edge: number) => preference === "fastest"
     ? (conditionallySlowed?.get(edge) ?? graph.edgeDurationsSeconds[edge] * durationScale)
     : graph.edgeDistancesMeters[edge] * distanceScale;
