@@ -105,10 +105,14 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   explanation rather than obeyed, so railway geometry never lands in a road
   bundle and no road-routing user downloads track. Two *railway* profiles may
   share a bundle, because they genuinely share topology:
-  `--profile train,metro` holds 26,052 edges on Portugal, which is exactly the
-  23,273 of the train bundle plus the 2,777 of the metro one — nothing merged,
-  nothing duplicated. The two networks stay separate inside it, because an
-  edge belongs to one of them and the other profile's access mask closes it.
+  `--profile train,metro` holds 26,052 edges on Portugal against the 23,273
+  and 2,777 of the two separate bundles, and the same 12,413 nodes. The two
+  extra edges are the two places in Portugal where a light-rail way runs
+  through the end of a rail way: a junction once both are compiled, and a node
+  simplified away when the metro is compiled alone. Nothing was merged and
+  nothing duplicated. The two networks stay separate inside the bundle,
+  because an edge belongs to one of them and the other profile's access mask
+  closes it.
 
 - **A profile now says which network it travels over.** `RoutingProfile` gains
   `networkKind: "road" | "railway"`, and the shared profile vocabulary moved

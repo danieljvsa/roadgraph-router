@@ -303,9 +303,15 @@ This stores the track once and adds a small per-profile chunk, exactly as
 `--profile car,truck` does for roads. It does **not** join the two networks:
 an edge belongs to one of them and is closed to the other by the profile's
 access mask, so a train cannot run onto a metro line that happens to touch it.
-On the Portugal extract the combined bundle holds 26,052 edges, which is
-exactly the 23,273 of the train bundle plus the 2,777 of the metro bundle —
-nothing was merged, and nothing was duplicated.
+On the Portugal extract the combined bundle holds 26,052 edges against the
+23,273 and 2,777 of the two separate ones — 26,050. The two extra edges are
+not duplication. At exactly two nodes in Portugal a light-rail way runs
+through the *end* of a conventional rail way: compiled on its own, the metro's
+node there is interior to a single way and is simplified away, and compiled
+alongside the railway it is a junction between two ways, so the light-rail way
+is split at it. The node counts match exactly either way (12,413). Nothing was
+merged, and the access masks still keep a train off the light rail; the shared
+topology is simply, and correctly, a little more detailed.
 
 ### Which track is included
 
@@ -1472,9 +1478,13 @@ built is tiny. It is quoted as a range because it varies by a factor of two
 between runs of the same compile: at this size the figure is dominated by when
 the garbage collector happens to run during the PBF scan, not by the graph.
 
-`train,metro` holds 26,052 edges, which is exactly 23,273 + 2,777. Nothing
-was merged and nothing duplicated: the two networks share the shared chunk and
-the geometry table, and each profile's access mask closes the other's track.
+`train,metro` holds 26,052 edges against 23,273 + 2,777 = 26,050 compiled
+separately, and the same 12,413 nodes. The two extra edges are the two places
+in Portugal where a light-rail way crosses the end of a rail way: a junction
+in the combined topology, and a node simplified away when the metro is
+compiled alone. Nothing was merged and nothing duplicated — the two networks
+share the shared chunk and the geometry table, and each profile's access mask
+closes the other's track.
 
 ### Railway routing
 

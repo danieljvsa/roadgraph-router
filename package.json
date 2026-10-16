@@ -48,7 +48,8 @@
     "./worker": {
       "types": "./dist/worker.d.ts",
       "import": "./dist/worker.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "bin": {
     "roadgraph-compile": "scripts/roadgraph-compile.mjs"
