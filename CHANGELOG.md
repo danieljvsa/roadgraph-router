@@ -53,7 +53,7 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ```ts
   const router = await RoadRouter.open("portugal-rail.efrb", undefined, { profile: "train" });
   const result = await router.route(portoCampanha, lisboaSantaApolonia, "shortest");
-  // 336.5 km along the Linha do Norte
+  // 336.0 km along the Linha do Norte
   ```
 
   There is no `RailRouter`, and no road behaviour changed. `train` is
@@ -78,7 +78,7 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ```
 
   Portugal's main line is 1,668 mm Iberian gauge, so Porto to Lisboa returns
-  336.5 km under `{ gaugeMm: 1668 }` and `NO_ROUTE` under `{ gaugeMm: 1435 }`.
+  336.0 km under `{ gaugeMm: 1668 }` and `NO_ROUTE` under `{ gaugeMm: 1435 }`.
   Constraints narrow the same access mask the vehicle and the departure time
   narrow, so the search and the snapping agree about which track is usable.
 
@@ -218,10 +218,10 @@ Portugal, `portugal-latest.osm.pbf` at 425 MB, on one machine:
 | Peak compile memory | 0.3–0.6 GB | 0.3–0.5 GB | 0.5 GB | 1.47 GB |
 | Routing edges | 23,273 | 2,777 | 26,052 | 2,759,810 |
 
-Porto Campanhã to Lisboa Santa Apolónia is 336.5 km over 22 range requests
-and 265 kB, 65 ms cold and 2.1 ms warm. Metro do Porto's Linha A is 11.1 km
+Porto Campanhã to Lisboa Santa Apolónia is 336.0 km over 22 range requests
+and 265 kB, 89 ms cold and 4.2 ms warm. Metro do Porto's Linha A is 11.9 km
 out of a 17.3 kB bundle. The distances check against the real network — the
-Linha do Norte between those stations is about 336 km, Linha A about 11 — and
+Linha do Norte between those stations is about 336 km, Linha A about 12 — and
 the *durations* do not, by design: they are line-speed estimates and are
 optimistic against every real timetable.
 

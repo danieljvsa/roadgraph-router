@@ -368,12 +368,12 @@ const result = await router.route(
   { lat: 38.7139, lng: -9.1225 },  // Lisboa Santa Apolónia
   "shortest",
 );
-// 336.5 km along the Linha do Norte
+// 336.0 km along the Linha do Norte
 ```
 
 ```ts
 const metro = await RoadRouter.open("porto-metro.efrb", undefined, { profile: "metro" });
-const trip = await metro.route(trindade, matosinhos, "shortest"); // 11.1 km
+const trip = await metro.route(trindade, senhorDeMatosinhos, "shortest"); // 11.9 km, Linha A end to end
 ```
 
 There is no `RailRouter`. A railway bundle is a bundle, a railway profile is a
@@ -481,7 +481,7 @@ a running line, not an unsurveyed one.
 
 A stated fact always outranks strictness. On the Porto–Lisboa corridor,
 `{ gaugeMm: 1668, requireElectrification: true, strictUnknown: true }` returns
-the same 336.5 km route as without `strictUnknown`, because every way along
+the same 336.0 km route as without `strictUnknown`, because every way along
 the Linha do Norte really does state its gauge and its electrification.
 
 ### Speed on a railway
@@ -1521,19 +1521,19 @@ fresh router per route so the cold figure is genuinely cold:
 
 | Journey | Distance | Estimated | Cold | Warm | Range |
 | --- | --- | --- | --- | --- | --- |
-| Porto Campanhã → Lisboa Santa Apolónia | 336.5 km | 2h 28m | 65 ms | 2.1 ms | 22 reqs, 265 kB |
-| Lisboa Santa Apolónia → Faro | 300.8 km | 2h 30m | 19 ms | 2.3 ms | 14 reqs, 169 kB |
-| Porto Campanhã → Valença (Linha do Minho) | 129.7 km | 1h 27m | 8 ms | 0.7 ms | 10 reqs, 112 kB |
-| Porto Campanhã → Guimarães | 55.1 km | 46m | 38 ms | 1.2 ms | 10 reqs, 112 kB |
-| Porto São Bento → Braga | 56.0 km | 37m | 14 ms | 1.0 ms | 10 reqs, 112 kB |
+| Porto Campanhã → Lisboa Santa Apolónia | 336.0 km | 2h 27m | 89 ms | 4.2 ms | 22 reqs, 265 kB |
+| Lisboa Santa Apolónia → Faro | 300.3 km | 2h 29m | 40 ms | 2.3 ms | 14 reqs, 169 kB |
+| Porto Campanhã → Valença (Linha do Minho) | 129.2 km | 1h 26m | 21 ms | 0.6 ms | 10 reqs, 112 kB |
+| Porto Campanhã → Guimarães | 55.1 km | 46m | 11 ms | 0.9 ms | 10 reqs, 112 kB |
+| Porto São Bento → Braga | 55.9 km | 38m | 18 ms | 0.5 ms | 10 reqs, 112 kB |
 
 And over `porto-metro.efrb`, a 17.3 kB bundle:
 
 | Journey | Distance | Estimated | Cold | Warm |
 | --- | --- | --- | --- | --- |
-| Trindade → Matosinhos (Linha A) | 11.1 km | 19m | 14 ms | 0.6 ms |
-| Trindade → Aeroporto (Linha E) | 13.2 km | 14m | 5 ms | 1.1 ms |
-| Trindade → Póvoa de Varzim (Linha B) | 30.0 km | 30m | 3 ms | 0.8 ms |
+| Trindade → Senhor de Matosinhos (Linha A) | 11.9 km | 21m | 5 ms | 0.5 ms |
+| Trindade → Aeroporto (Linha E) | 13.2 km | 14m | 3 ms | 0.4 ms |
+| Trindade → Póvoa de Varzim (Linha B) | 29.9 km | 29m | 3 ms | 0.4 ms |
 
 The distances are the check that matters, and they are checked against the
 real network rather than against each other: the Linha do Norte between those
@@ -1546,9 +1546,9 @@ Constraints behave as they should on the real network. Portugal's main line is
 
 | Constraint | Porto → Lisboa |
 | --- | --- |
-| none | 336.5 km |
-| `{ gaugeMm: 1668, requireElectrification: true }` | 336.5 km |
-| `{ gaugeMm: 1668, requireElectrification: true, strictUnknown: true }` | 336.5 km |
+| none | 336.0 km |
+| `{ gaugeMm: 1668, requireElectrification: true }` | 336.0 km |
+| `{ gaugeMm: 1668, requireElectrification: true, strictUnknown: true }` | 336.0 km |
 | `{ gaugeMm: 1435 }` | **`NO_ROUTE`** |
 
 `strictUnknown` changes nothing here because every way along that corridor
