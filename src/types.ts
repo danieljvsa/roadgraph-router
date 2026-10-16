@@ -61,6 +61,8 @@ export interface RoadGraph {
    * for a profile whose routes depend on the vehicle's size. See `./limits`.
    */
   edgeLimits?: EdgeLimits;
+  /** Conditional restrictions for the edges that carry one; absent when none do. */
+  edgeConditions?: EdgeConditions;
   /**
    * One bit per turn restriction, saying whether this vehicle obeys it. The
    * pairs come first, then the sequences. Absent means all of them apply.
@@ -100,6 +102,14 @@ export interface RouteSnap {
   point: Coordinate;
   /** How far the requested coordinate was from that road. */
   distanceMeters: number;
+  /**
+   * How far the route actually travels along that road, for an end that
+   * begins or finishes part-way along one. Zero where the end sits on a
+   * junction, and zero at the destination of a route that never leaves a
+   * single road, whose whole length is reported at the origin instead so
+   * that adding the two up gives the route and not twice the route.
+   */
+  travelledMeters?: number;
 }
 
 export interface RouteResult {
@@ -147,6 +157,27 @@ export interface EdgeLimits {
 }
 
 /**
+ * Conditional restrictions for the few edges carrying one: the raw
+ * `value @ condition` text, kept as written and parsed when a bundle opens.
+ *
+ * A side table for the same reason the limits are one — a country has a few
+ * thousand of these among millions of edges. The text is deduplicated into
+ * `values`, because the same working-hours ban is repeated along every segment
+ * of the street it applies to. One edge may have several rows: a lorry ban and
+ * a night speed limit are both conditional and both apply.
+ */
+export interface EdgeConditions {
+  /** Sorted by edge, then by kind; an edge may appear more than once. */
+  edges: Uint32Array;
+  /** What the value means: 0 is access, 1 is a speed limit in km/h. */
+  kinds: Uint8Array;
+  /** Index into `values`. */
+  rules: Uint16Array;
+  /** The deduplicated conditional values, as tagged. */
+  values: string[];
+}
+
+/**
  * A tile's vehicle-independent half: everything a v7 `shared` chunk holds.
  * It is not routable on its own — a profile supplies the durations.
  */
@@ -162,6 +193,8 @@ export interface ProfileChunk {
   edgeAccess?: Uint8Array;
   /** Signed limits for the few edges that state any; absent for vehicles whose size does not matter. */
   edgeLimits?: EdgeLimits;
+  /** Conditional restrictions for the edges that carry one; absent when none do. */
+  edgeConditions?: EdgeConditions;
   /**
    * One bit per turn restriction the shared chunk holds, saying whether this
    * vehicle obeys it. `except=hgv` lifts a restriction for lorries and not for

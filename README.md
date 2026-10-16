@@ -5,7 +5,7 @@ routing bundle, then route over it with A* — in Node.js or in the browser, wit
 no routing service involved.
 
 A 425 MB Portugal extract compiles to a 38 MB bundle. A city route downloads
-4.3 MB of it and takes about 270 ms end to end. The browser build is 28 kB
+4.3 MB of it and takes about 270 ms end to end. The browser build is 24.5 kB
 gzipped and pulls in no Node built-ins.
 
 ## What a route here does and does not mean
@@ -15,17 +15,23 @@ say are forbidden** to the chosen vehicle. That is weaker than a statement
 that the route is legal, or that the vehicle will physically fit, and the gap
 matters most for a lorry.
 
-Three kinds of rule are read and obeyed: tags on the way, such as access,
-direction and signed limits; turn restriction relations; and barriers on
-nodes. Everything below is **not read at all**, and a road governed only by
-one of them is treated as open:
+Four kinds of rule are read and obeyed: tags on the way, such as access,
+direction and signed limits; turn restriction relations; barriers on nodes;
+and, when you supply a departure time, conditional restrictions on the way.
+Everything below is **not read**, and a road governed only by one of them is
+treated as open:
 
-- **Time-dependent access.** `access:conditional`, `restriction:conditional`,
-  `hgv:conditional` and every other time-of-day or day-of-week rule. A street
-  closed to lorries overnight, a bus lane that is shared outside peak hours,
-  a market square pedestrianised on Sundays — all appear permanently open.
+- **Conditional restrictions, unless you pass `departAt`.** Without a
+  departure time a street closed to lorries overnight or a square
+  pedestrianised on Sundays appears permanently open. See
+  [Routing at a time of day](#routing-at-a-time-of-day) for what is read when
+  you do pass one, and what is still not.
+- **Conditional turn restrictions.** `restriction:conditional` on a turn
+  restriction relation is not read, so a no-left-turn that applies only in the
+  morning peak is enforced at every hour of the day.
 - **Seasonal and weather rules.** Winter closures, snow-chain requirements,
-  flood gates.
+  flood gates. A conditional value resting on weather, such as
+  `80 @ (wet)`, is counted but never acted on.
 - **Temporary closures.** Roadworks, events, landslides. Nothing in a compiled
   bundle changes after the compile, so a bundle is as current as the extract
   it was built from and no more.
@@ -39,14 +45,14 @@ one of them is treated as open:
   limit is treated as passable by any vehicle.
 
 For a lorry this means a route may pass under a bridge too low for it, over a
-structure too weak for it, or along a street it is banned from at the hour you
-travel. **Do not use this engine as the sole basis for dispatching a heavy
-vehicle.** Anything safety-critical needs a surveyed freight dataset and a
-routing engine that reads conditional restrictions.
+structure too weak for it, or along a street banned to it by a rule nobody
+tagged on the way. **Do not use this engine as the sole basis for dispatching
+a heavy vehicle.** Anything safety-critical needs a surveyed freight dataset.
 
 The compiler reports what it understood. `turnRestrictionsRead` against
-`turnRestrictionsSkipped`, and `barriersRead`, in `<output>.json` tell you how
-much of a region's restriction data was used.
+`turnRestrictionsSkipped`, `barriersRead` and
+`edgesWithConditionalRestrictions`, in `<output>.json`, tell you how much of a
+region's restriction data was used.
 
 ## Install
 
@@ -230,6 +236,242 @@ from the bounding box. A truck does not change shape when it crosses a border.
 > [What a route here does and does not mean](#what-a-route-here-does-and-does-not-mean)
 > before relying on one of these routes for a heavy vehicle.
 
+## Routing at a time of day
+
+Some roads are only closed at certain hours. A street may be shut to lorries
+overnight, a square pedestrianised on Sundays, a bridge limited by weight in
+one season. OpenStreetMap writes these as `*:conditional` tags, and this
+library reads them when — and only when — you say when the journey starts.
+
+```js
+const router = await RoadRouter.open("portugal.efrb");
+
+const route = await router.route(origin, destination, "fastest", {
+  departAt: new Date("2026-10-15T08:00:00"),
+});
+
+const alternatives = await router.routeAlternatives(origin, destination, "fastest", {
+  count: 3,
+  maxStretch: 1.4,
+  maxSharing: 0.75,
+});
+```
+
+Both work the same way in Node and in a browser: the only difference is that
+a browser needs `fetch` and `DecompressionStream`, which it has.
+
+`departAt` is in the **local time of the roads being travelled**. This library
+does not convert time zones and does not consult a clock: a `Date` is read for
+its weekday, hour, minute and month as your runtime reports them, so a caller
+routing in a region other than its own must do the conversion first. You can
+pass the parts directly instead of a `Date`:
+
+```js
+// Monday, 08:00, in March.
+await router.route(from, to, "fastest", {
+  departAt: { weekday: 0, minutes: 8 * 60, month: 3 },
+});
+```
+
+A restriction is written in the local time of the road it is on. Where the
+roads and the code are in different places, name the zone:
+
+```js
+await router.route(from, to, "fastest", {
+  departAt: new Date("2026-10-15T08:00:00Z"),
+  timeZone: "Europe/Lisbon",
+});
+```
+
+Public holidays are a calendar this library does not carry, so a rule written
+`no @ (PH)` applies only if you say the day is one:
+
+```js
+await router.route(from, to, "fastest", { departAt, publicHoliday: true });
+```
+
+### What is read
+
+Every bundle carries them, whether it holds one vehicle or several: a
+one-vehicle bundle keeps them in its single chunk, and a multi-vehicle bundle
+in the per-vehicle half of each tile, since the same road can be shut to a
+lorry and open to a car.
+
+A `value @ condition` list is read from the way's access tags — `access`,
+`vehicle`, `motor_vehicle` and the profile's own key, such as `hgv` — and from
+`maxspeed`. Where several rules match the same moment, the **last** one wins,
+which is what OpenStreetMap specifies and why the tagging convention is
+general first and specific last.
+
+Conditions resting on time of day, weekday, month and the vehicle's own
+dimensions are answered. `no @ (Mo-Fr 07:00-19:00)`,
+`no @ (22:00-06:00)`, `no @ (Nov-Feb)` and `no @ (weight>7.5)` all work, as do
+several windows in one rule and conditions combined with `AND`.
+
+An access rule evaluating to `no`, `private`, `destination` or a permit-style
+value closes the road. `destination` counts as closed because this library has
+no notion of a journey's purpose, and treating "only if you live here" as open
+would route strangers down a residents' street.
+
+A conditional `maxspeed` slows the edges it applies to, and the route reports
+the slower duration rather than the one it was planned against. A conditional
+limit can only **slow** a road, never speed it up: the search's bound is built
+from the profile's ceiling, and an edge quicker than the graph says would
+break the guarantee that the route found is the best one.
+
+### What is not
+
+- **Nothing happens without `departAt`.** Leaving it out ignores conditional
+  restrictions entirely, which is how this library behaved before it could
+  read them.
+- **Only closures are applied.** A road the plain tags already forbid stays
+  forbidden even where a conditional value would open it, because the compiled
+  mask has already dropped it. This errs towards refusing a road that is in
+  fact usable, which is the direction this library errs in everywhere else.
+- **One moment, not an arrival time per edge.** This is the limitation to
+  understand before relying on any of it. Every road on the route is judged by
+  the moment the journey *starts*, not by when it would be reached. Leave
+  Lisbon at 07:00 on a six-hour drive and the roads near Porto are judged at
+  07:00, though you would arrive at one in the afternoon. A restriction that
+  lifts at 10:00 therefore still closes a road you would reach at noon, and
+  one that begins at 10:00 is missed entirely.
+
+  Doing better means a time-dependent shortest path, where each edge is
+  evaluated at the arrival time the search has accumulated. That changes the
+  cost function, the A* bound and the corridor logic together, and it is a
+  piece of work in its own right rather than something to bolt on. It is not
+  in this release, and **this engine should not be described as doing
+  time-dependent routing**: it applies a departure time, which is a weaker
+  thing. The gap matters most on long journeys and least on urban ones, where
+  the whole route is driven inside the hour it began.
+- **Conditions only you can answer wait for you to answer them.** Whether it
+  is raining, who is driving and what the journey is for are not things a
+  compiled graph knows. Tell it, and the rules resting on them apply:
+
+  ```js
+  await router.route(from, to, "fastest", {
+    departAt,
+    circumstances: { conditions: ["wet"], purposes: ["delivery"] },
+  });
+  ```
+
+  Unanswered, such a rule never holds, so a road shut `@ (wet)` stays open
+  until someone says it is wet. A stay duration is still not read at all. A rule resting on one — `80 @ (wet)` — is parsed, counted and then
+  ignored, leaving the road open. `unreadableConditions` reports how many of a
+  tag's rules fell into this.
+- **Turn restriction relations are not conditional.** See the list in
+  [What a route here does and does not mean](#what-a-route-here-does-and-does-not-mean).
+
+### Everything a route can be told
+
+| Option | Meaning |
+| --- | --- |
+| `departAt` | When the journey starts, as a `Date` or as `{ weekday, minutes, month, dayOfMonth }`. Without it, conditional restrictions are ignored. |
+| `timeZone` | The IANA zone the roads are in, such as `"Europe/Lisbon"`. Without it a `Date` is read as this machine reads it. |
+| `publicHoliday` | Whether that day is one where the roads are. |
+| `circumstances` | What the map cannot know: `{ conditions, userGroups, purposes }`. |
+| `avoid` | Circles of road that are shut, as `{ lat, lng, radiusMeters }`. |
+| `vehicle` | The lorry being routed, where the graph states physical limits. |
+| `finishOnANearbyRoad` | `false` to be refused outright when the point cannot be reached. |
+
+```js
+const route = await router.route(origin, destination, "fastest", {
+  departAt: new Date("2026-10-15T08:00:00Z"),
+  timeZone: "Europe/Lisbon",
+  circumstances: { conditions: ["wet"] },
+  avoid: [{ lat: 38.7223, lng: -9.1393, radiusMeters: 150 }],
+});
+```
+
+## More than one way there
+
+`routeAlternatives` returns several routes, best first, for offering a choice
+rather than a single answer.
+
+```js
+const routes = await router.routeAlternatives(from, to, "fastest", { count: 3 });
+// routes[0] is exactly what route() would have returned.
+```
+
+The method is the straightforward one: find the best route, make the roads it
+used dearer to the search than they really are, and search again. A road that
+is the only sensible way through survives the penalty and is used again; one
+that was merely convenient gives way to its neighbour. **The penalty never
+reaches the answer** — every route is reported at the graph's own cost, so an
+alternative's distance and duration are what it would really take.
+
+Candidates are filtered rather than trusted. One that is much worse than the
+best, or that is mostly the same road, is not an alternative anybody wants:
+
+Each is checked rather than trusted: a `count` that is not a whole number
+between 1 and 10, a `maxStretch` below 1, a `maxSharing` outside nought to
+one, or a `penaltyFactor` below 1 raises a `RangeError` rather than searching
+forever or returning something arbitrary.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `count` | 3 | How many routes to return at most, the best one included. |
+| `maxStretch` | 1.4 | How much worse than the best an alternative may be. |
+| `maxSharing` | 0.75 | How much of the routes already offered it may reuse, by distance. |
+| `penaltyFactor` | 2 | How much dearer a road already used is made to look. |
+| `searchWiderCorridor` | `true` | Whether to fetch the wider corridor an alternative might lie in. `false` keeps the download to what one route needed. |
+
+Routes come back in the order they would be driven: the best first, then the
+rest by what they really cost. The penalties steer the search and never reach
+the figures, so an alternative's distance and duration are its own.
+
+Two routes count as the same road where they travel the same tarmac, measured
+by distance travelled rather than by edges in common. A road driven in the
+opposite direction is the same road. Two roads that merely join the same pair
+of junctions are not: a slip road beside the road it leaves, or a lane round
+the far side of a square, is a genuine second way there, and the compiled
+graph holds a great many of them — 12,015 such pairs in the Porto to Lisbon
+corridor alone. A junction two routes pass through costs no distance and so
+does not make them similar. The roads a route only part-drives at its two
+ends count for exactly what it drives of them, which
+`RouteSnap.travelledMeters` reports.
+
+**Fewer routes than you asked for is the normal answer.** A road network
+usually has one obvious way through, and returning a second route that is
+three-quarters the same road, or an hour longer, would be worse than
+returning one. `routeAlternatives` always returns at least the best route, and
+raises whatever `route` would raise when there is none.
+
+Alternatives cost roughly one search each. Measured on the Portugal bundle,
+Porto to Lisbon returned three routes — 312.0 km, 319.0 km and 350.5 km — in
+3.4 s against 2.5 s for the single route, downloading 3.0 MB more than the
+29.2 MB the first route needed. A short urban route in Lisbon returned two in
+79 ms with nothing further to download.
+
+Over a bundle this deliberately downloads a wider corridor than one route
+needs: an alternative may be worse than the best by as much as `maxStretch`,
+and the tiles holding it lie outside the corridor that proved the best route.
+
+Everything a single route obeys, these obey: access, turn restrictions,
+barriers, a lorry's dimensions, and conditional restrictions when you pass a
+departure time.
+
+## Roads you know are shut
+
+A bundle is as current as the extract it was compiled from. Roadworks, an
+incident, a street closed for a market: none of them is in it, and none of
+them can be. What a caller reading a feed of such things can do is say so:
+
+```js
+const route = await router.route(from, to, "fastest", {
+  avoid: [{ lat: 38.7223, lng: -9.1393, radiusMeters: 150 }],
+});
+```
+
+Anything a circle touches is closed to the search and to snapping, so a route
+neither drives through a closure nor starts in the middle of one. It outranks
+whatever the map says about the road being open, it applies to every
+alternative, and it lasts only for that call — the graph is left as it was.
+
+An area rather than a road, because a feed gives a place and a radius, not an
+edge number. Only the roads near each circle are looked at, so closing a
+junction costs the same whether the graph holds a town or a country.
+
 ## Turn restrictions
 
 The compiler reads OSM `type=restriction` relations and the routing graph
@@ -278,6 +520,39 @@ never pays for it.
 It bites hardest on walking and cycling, where small fragments are common: in
 Monaco the pedestrian network is 97.6% one piece, and the remaining 2.4% is
 enough to lose a route between two points a kilometre apart.
+
+### When the nearest road cannot be reached
+
+The road nearest a point is not always one the rest of the network can get to.
+A pocket of one-way streets behind banned turns can be driven out of but never
+into; an island of service roads around a terminal joins nothing at all. Asked
+for a point on one of those, this library used to report no route.
+
+It now finishes on a road a little further off, trying the nearest few in turn
+and taking the first that works. `destinationSnap.distanceMeters` says how far
+short of the point it finished, and `originSnap.distanceMeters` the same for
+the start:
+
+```js
+const route = await router.route(from, to);
+if (route.destinationSnap.distanceMeters > 100) {
+  // Finished on the nearest road it could reach, not at the point asked for.
+}
+```
+
+This only happens after a route has already failed, so a reachable road
+nearest the point is still always the one used. To be told plainly that a
+point cannot be reached, turn it off:
+
+```js
+await router.route(from, to, "fastest", { finishOnANearbyRoad: false });
+```
+
+Evora's walled centre is the case this was found on: `no_left_turn` and
+`no_right_turn` relations on Rua de Serpa Pinto seal the only entry to a
+street, so OpenStreetMap says no car may legally enter it. Routing Lisbon to a
+point in that street now finishes 23 m away on the nearest road a car can
+reach, rather than reporting no route across 133 km of motorway.
 
 ## Snapping to the road, not to the junction
 
@@ -380,7 +655,8 @@ EFR2 chunks inside EFRB.
 ## Using it in a browser
 
 The routing engine has no Node built-ins in it. Bundled for the browser it is
-about 18 kB gzipped, and it needs only `fetch` and `DecompressionStream`:
+19.7 kB gzipped on its own, or 24.5 kB for everything this package exports,
+and it needs only `fetch` and `DecompressionStream`:
 
 ```ts
 import { RoadRouter } from "roadgraph-router";
@@ -512,6 +788,105 @@ Downloads are roughly 35% smaller for short routes and 47% smaller for long
 ones, and graph load is *faster* than before despite the varint decoding,
 because there is less to decompress.
 
+### What conditional restrictions cost, and what they catch
+
+Portugal compiled for car, truck and motorcycle, before and after the
+restrictions were read:
+
+Both compiled back to back on the same machine, so the two columns are
+comparable:
+
+| | 0.2.0 compiler | 0.3.0 compiler | |
+| --- | --- | --- | --- |
+| Final EFRB | 40.17 MB | **40.18 MB** | +14.8 kB, or +0.04% |
+| Compile time | 8 min 01 s | 8 min 05 s | +1% |
+| Peak RSS | 1.35 GB | 1.52 GB | +0.17 GB, holding the tag text |
+| Routing edges | 2,760,171 | 2,760,171 | identical graph |
+| Edges with a conditional restriction | 0 | **3,328** | |
+
+Compiled for a car alone, where the whole graph is one chunk, the same extract
+grows by 4,187 bytes — 38,037,856 to 38,042,043 — for 1,087 restrictions.
+
+A region whose roads carry no conditional restriction compiles to the same
+file as before, byte for byte, in either layout: Monaco for a car is 26,177
+bytes from either compiler.
+
+Asking for a departure time costs nothing measurable. Routing Porto to Lisbon
+by car, three runs each: 2,294 ms cold and 208 ms repeated without one,
+2,252 ms and 206 ms with one — a difference smaller than the spread between
+runs.
+
+The **Ponte 25 de Abril**, the bridge carrying the A2 into Lisbon, is tagged
+`hgv:conditional = no @ (05:00-02:00)`: lorries may use it for three hours a
+night. Routing Almada to Lisbon across it:
+
+| Vehicle | Departure | Distance | Duration | Crossing |
+| --- | --- | --- | --- | --- |
+| Car | any hour | 12.2 km | 12 min | Ponte 25 de Abril |
+| Truck | none given | 13.0 km | 14 min | Ponte 25 de Abril |
+| Truck | 10:00 | **63.4 km** | **51 min** | Ponte Vasco da Gama |
+| Truck | 03:00 | 13.0 km | 14 min | Ponte 25 de Abril |
+
+The lorry without a departure time takes a bridge it is banned from for
+twenty-one hours of the day. That is the gap this reads, and the 51-minute
+detour is what obeying the sign actually costs.
+
+Of Portugal's conditional values, the ones this library cannot answer are
+left alone rather than guessed at. 555 trunk and primary roads carry
+`maxspeed:conditional` values such as `90 @ sun`, which is not a condition
+OpenStreetMap defines; they keep their posted limit.
+
+### Against the earlier versions
+
+0.1.0, 0.2.0 and this release reading the same file — the car bundle 0.1.0
+published, 38.03 MB — so the comparison is of the engines rather than of
+formats that changed alongside them. Cold is a fresh reader; repeated is the
+same route asked for twice.
+
+| Journey | 0.1.0 | 0.2.0 | 0.3.0 |
+| --- | --- | --- | --- |
+| Opening the bundle | 1 ms | 1 ms | 1 ms |
+| Lisbon, across town | 245 / 14 ms | 289 / 8 ms | 290 / 9 ms |
+| Bragança, rural | 269 / 140 ms | 251 / 4 ms | 281 / 3 ms |
+| Porto to Lisbon | 2,715 / 2,104 ms | 1,991 / 281 ms | 1,976 / 284 ms |
+| Porto to Faro | 3,653 / 3,258 ms | 2,253 / 427 ms | 2,244 / 416 ms |
+| Braga to Évora | no route | no route | 6,176 / 3,166 ms |
+
+Every version that can read a bundle finds the same roads: 312.02 km from
+Porto to Lisbon and 553.20 km from Porto to Faro, on all three.
+
+0.2.0 is where the long routes improved, and the gain is almost entirely in
+asking twice: the corridor it has already stitched is kept, so a repeated
+Porto–Faro route went from 3.3 s to 0.4 s. **0.3.0 routes at the same speed as
+0.2.0** — the differences above are smaller than the spread between runs of
+the same binary.
+
+Braga to Évora is the exception, and it is not a slowdown: both earlier
+versions spent their time failing. 0.2.0 widened its corridor to the whole
+country over 7.9 s before reporting no route; 0.3.0 finishes on the nearest
+road it can reach in 2.3 s. A point genuinely off the network still fails
+about as fast as it always did, 810 ms against 866 ms.
+
+### What each version can read
+
+| | 0.1.0 bundle | 0.2.0 bundle | 0.3.0 bundle |
+| --- | --- | --- | --- |
+| 0.1.0 | yes | no | no |
+| 0.2.0 | yes | yes | no |
+| 0.3.0 | yes | yes | yes |
+
+A 0.2.0 reader opens a 0.3.0 bundle and then fails on the first tile whose
+roads carry a conditional restriction — the chunk is longer than it expects.
+A bundle without any reads as before.
+
+### What the package costs
+
+| | 0.1.0 | 0.2.0 | 0.3.0 |
+| --- | --- | --- | --- |
+| Tarball | 46.4 kB | 75.9 kB | 91.0 kB |
+| Unpacked | 182.8 kB | 289.3 kB | 342.1 kB |
+| Bundled for a browser, gzipped | 13.6 kB | 21.1 kB | 24.8 kB |
+
 ### Nothing routes differently
 
 `tools/compare-bundles.mjs` routes the same random pairs through two bundles
@@ -599,31 +974,40 @@ What the bundled profiles read, and what they deliberately do not.
 | Lorry limits | `maxheight`, `maxwidth`, `maxlength`, `maxweight`, each with `:forward`, `:backward` and `:hgv` forms, plus `maxheight:physical` and `maxwidth:physical`; metric and feet-and-inches |
 | Barriers | `barrier` on a node, with `locked` and the access ladder; a bollard stops a car, a stile stops everything but walking, a gate is open unless it says otherwise |
 | Turn restrictions | `no_left_turn`, `no_right_turn`, `no_straight_on`, `no_u_turn`, `no_entry`, `no_exit`, `only_left_turn`, `only_right_turn`, `only_straight_on`, `only_u_turn` |
+| Alternative routes | `routeAlternatives` returns several routes, best first, filtered by how much worse and how much the same they are |
+| Conditional restrictions | `*:conditional` on the access ladder and on `maxspeed`, applied when a route supplies `departAt`; time of day, weekday, month, public holiday and vehicle dimensions; last matching rule wins |
 | Restriction scope | `via` node and `via` way; `restriction:<mode>`, `restriction:motor_vehicle` and `restriction:vehicle` override the generic key; `except` listing one of this vehicle's modes drops the relation for that vehicle alone |
 
 **Not supported**
 
 | Area | Behaviour |
 | --- | --- |
-| A one-way trap | Two points joined on the map but not reachable in the direction asked for — a one-way loop with no way back — still report no route. Snapping again cannot mend that, because both ends are already in the same piece of the network. |
+| A one-way trap | Two points joined on the map but not reachable in the direction asked for still cannot be joined. The route finishes on the nearest road it can reach instead, which `destinationSnap.distanceMeters` reports; `finishOnANearbyRoad: false` asks to be refused outright. |
 | Surface, gradient and steps beyond a flat penalty | A cycling speed comes from the way class alone. `surface`, `smoothness` and elevation are not read, so a cobbled climb costs the same as smooth level tarmac. |
-| Alternative routes | Not in 0.2.0. `routeAlternatives` is planned for 0.3.0. |
 | Untagged limits | A road stating no `maxheight` or `maxweight` is treated as open to any lorry. Absence of a tag is not a measurement. |
 | Axle load, trailer and hazmat rules | `maxaxleload`, `hazmat` and trailer-specific access are not read. |
-| Conditional restrictions | `restriction:conditional`, `access:conditional`, `hgv:conditional` and every time-of-day, day-of-week or seasonal rule are ignored, so a time-limited restriction is treated as absent. See [What a route here does and does not mean](#what-a-route-here-does-and-does-not-mean). |
+| Conditional restrictions at the time a road is reached | Every road is judged by the moment the journey starts, not by when it would be reached. See [Routing at a time of day](#routing-at-a-time-of-day). This is not time-dependent routing. |
+| Conditional restrictions without `departAt` | Read only when a route supplies a departure time; without one a time-limited restriction is treated as absent, as before. See [Routing at a time of day](#routing-at-a-time-of-day). |
+| Conditional turn restrictions | `restriction:conditional` on a relation is not read, so a morning-peak no-left-turn is enforced at every hour. It is rare enough to be worth measuring rather than guessing at: 1 relation in 26,599 across Portugal. The compile report counts them as `conditionalTurnRestrictionsIgnored`. |
+| Conditions resting on weather, user group or purpose | Read, but only a caller knows the answer. `circumstances: { conditions: ["wet"] }` makes `80 @ (wet)` apply; unanswered, the road stays open. A stay duration is still not read at all. |
+| More than 65,536 distinct conditional values in one tile | The compile stops rather than dropping the surplus, which would turn a restricted road into an open one. Compile in smaller tiles with `--tile-size-km`. |
+| Temporary closures in the bundle | Roadworks, events and incidents happen after a bundle is compiled, so none of them is in it. A caller reading a feed of them can pass `avoid` areas per route instead; see [Roads you know are shut](#roads-you-know-are-shut). |
+| Reopening a road | Only closures are applied. `access=no` with `access:conditional=yes @ (...)` stays closed at every hour. |
+| Time zones | `departAt` is taken as the local time of the roads travelled; no conversion is done and no clock is consulted. |
 | Temporary closures | Roadworks, events and incidents are not modelled. A bundle is as current as the extract it was compiled from. |
 | Zone-level rules | Lorry bans, low-emission zones, permit areas and tolls that apply to an area rather than to a way are not read. |
 | `via` ways longer than four edges | Skipped rather than approximated, and counted as `turnRestrictionsSkipped` in the compile report. |
 | Restrictions spanning a tile boundary | Dropped for tiles that do not hold every edge of the run, rather than enforced in a shortened form. |
 | Turn costs and traffic signals | Not modelled; a turn costs nothing beyond the roads it joins. |
 | Live traffic, elevation, ferries as a distinct mode | Not modelled. Ferry ways are excluded with everything that is not a road. |
-| `motor_vehicle:conditional`, toll avoidance | Not read. |
+| Toll avoidance | Not read. |
 | A barrier this table has not met | Treated as passable. Inventing a closure severs a road that is probably open, and the tag may simply be unfamiliar; an `access` tag on the node still decides. |
 | EFRT v1 | Carries topology only: encoding to it drops geometry and turn restrictions. Use EFR2 for anything that needs them. |
 
 The compiler reports what it skipped. `turnRestrictionsRead` against
-`turnRestrictionsSkipped` in `<output>.json` tells you how much of a region's
-restriction data was understood.
+`turnRestrictionsSkipped`, and `edgesWithConditionalRestrictions`, in
+`<output>.json` tell you how much of a region's restriction data was
+understood.
 
 ## Upgrading from 0.1.0
 

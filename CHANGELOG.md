@@ -4,7 +4,214 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-10-15
+
+### Added
+
+- **Conditional restrictions, when a route says when it starts.**
+  `router.route(from, to, "fastest", { departAt })` closes the roads shut at
+  that moment to both the search and the snapping, and slows the ones a
+  conditional speed limit slows. The reported duration is the slowed one, not
+  the one the route was planned against.
+
+  `*:conditional` is read from the access ladder — `access`, `vehicle`,
+  `motor_vehicle` and the profile's own key — and from `maxspeed`. Conditions
+  resting on time of day, weekday, month, public holiday and the vehicle's own
+  dimensions are answered, including windows that run past midnight, seasons
+  that span the new year and several windows in one rule. Where more than one
+  rule matches, the last wins, which is what OpenStreetMap specifies.
+
+  Measured on Portugal, where the Ponte 25 de Abril carries
+  `hgv:conditional = no @ (05:00-02:00)`: routing Almada to Lisbon, a lorry
+  with no departure time takes the bridge in 13.0 km, at 03:00 takes it in
+  13.0 km, and at 10:00 detours 63.4 km over the Ponte Vasco da Gama. A car
+  crosses in 12.2 km at every hour. 3,328 of Portugal's 2,760,171 edges carry
+  a conditional restriction, costing 14.8 kB — the bundle grew from 40.17 MB
+  to 40.18 MB — and about 10 ms on a repeat long-distance route.
+
+- **Alternative routes.** `routeAlternatives(from, to, preference, { count })`
+  returns several routes, best first. It finds the best one, makes the roads
+  it used dearer to the search than they really are, and searches again; the
+  penalty steers the search and never reaches the answer, so every route is
+  reported at the graph's own cost. Candidates far worse than the best, or
+  mostly along the same road, are rejected rather than offered, so fewer
+  routes than asked for is the normal answer on a network with one obvious
+  way through.
+
+  Porto to Lisbon returned three routes — 312.0 km, 319.0 km and 350.5 km —
+  in 3.4 s against 2.5 s for the single route, downloading 3.0 MB beyond the
+  29.2 MB the first route needed. A short urban route returned two in 79 ms
+  with nothing further to download.
+
+- **A departure may name the time zone the roads are in.** `timeZone:
+  "Europe/Lisbon"` reads the date there rather than wherever the code runs,
+  which is what a restriction written in local time means. Built on `Intl`;
+  nothing is bundled for it.
+
+- **Weather, who is driving and what for can be answered.**
+  `circumstances: { conditions: ["wet"], userGroups: ["resident"],
+  purposes: ["delivery"] }` makes the rules resting on them apply.
+  Unanswered they never hold, so the behaviour of anyone not passing them is
+  unchanged. `unreadableConditions` now counts only what the parser genuinely
+  cannot read, which is what its name always claimed.
+
+- **Roads the caller knows are shut can be avoided.** `avoid: [{ lat, lng,
+  radiusMeters }]` closes everything a circle touches, to the search and to
+  snapping alike, for that call only. Roadworks and incidents happen after a
+  bundle is compiled and cannot be in it; this is how a caller reading a feed
+  of them says so.
+
+- **`searchWiderCorridor: false`** keeps an alternatives search to the tiles
+  one route needed, trading reach for about three megabytes on a long
+  journey.
+
+- **The compile report counts `conditionalTurnRestrictionsIgnored`.** A turn
+  banned only at certain hours is still banned at every hour; the number now
+  says how much of a region that costs. Across Portugal it is 1 relation in
+  26,599.
+
+### Fixed
+
+- **A road is identified by its shape in order, not by a sum of its points.**
+  Adding coordinates up does not care which point came first, so a road
+  bending north then east and one bending east then north read as the same
+  road and one of them would be dropped as a duplicate alternative.
+
+- **A closure standing on the date line shuts the roads under it.** The
+  projection it was tested against subtracted longitudes at face value, so a
+  road a few metres away measured half a world off.
+
+- **A rule table too wide for its index stops the compile.** It used to drop
+  the surplus rows, which turned a restricted road into an unrestricted one
+  with nothing said. A tile holds up to 65,536 distinct conditional values;
+  past that the compile fails and names `--tile-size-km` as the way through.
+
+- **Two roads joining the same pair of junctions are two roads.** Telling
+  alternatives apart by their endpoints alone treated a slip road and the road
+  beside it as one, hiding a genuine second way there. The Porto to Lisbon
+  corridor holds 12,015 such pairs, none the same length as its twin, so the
+  length now separates them while staying equal for the two directions of one
+  road.
+
+- **Each end of a route counts what it actually drives.** The distance driven
+  on the part-roads a route begins and ends on was split evenly between the
+  two, which misreports overlap whenever one end joins its road near the far
+  junction. `RouteSnap.travelledMeters` now carries the real figure.
+
+- **A month selector is read with the window it governs.**
+  `no @ (Oct 22:00-06:00)` stopped at midnight on the thirty-first instead of
+  running to six on the first of November. `TravelTime` may now carry
+  `dayOfMonth`; without one the answer is unchanged, which is right on thirty
+  days in thirty-one.
+
+- **Alternative options are refused before anything is downloaded**, rather
+  than after a remote bundle has been asked for tiles.
+
+- **A window named with a day is read as one window.** `no @ (Fr 22:00-06:00)`
+  was matched by asking "is it Friday?" and "is it between 22:00 and 06:00?"
+  separately, which answered both ends of it backwards: it applied at two on
+  Friday morning, before it began, and not at two on Saturday morning, while
+  it was still in force. A span running past midnight now belongs to the day
+  it starts on, which also fixes Sunday into Monday.
+
+- **`24:30` is no longer a time.** It parsed as half past midnight, quietly
+  moving a window onto the following day. Only `24:00` is the end of a day.
+
+- **A conditional speed limit keeps its units.** `30 mph @ (…)` was read with
+  `parseFloat` and became 30 km/h — two-thirds of the real limit, applied to
+  the road as fact. It now uses the same parser as a plain `maxspeed`.
+
+- **A rule table too wide for its index drops its surplus.** Past 65,535
+  distinct values the extra rows were kept and left pointing at rule zero,
+  applying one road's restriction to another.
+
+- **Alternatives search the corridor that was downloaded for them.** The
+  widening that fetches the tiles an alternative could lie in replaced the
+  stitched graph, but the search was handed the graph from before it, so the
+  tiles were downloaded and discarded. Asking for a single route no longer
+  widens the corridor at all.
+
+- **Alternatives come back in the order they would be driven**, by their real
+  cost, rather than in the order the penalties happened to find them; and two
+  routes are told apart by the road they travel rather than by which direction
+  of it, so coming back along a road already offered is no longer a different
+  way there.
+
+- **A bundle compiled for one vehicle now carries its conditional
+  restrictions.** They were stored in the per-vehicle chunk, which only exists
+  when a bundle holds several vehicles or one whose routes depend on its size.
+  A `--profile car` compile wrote the single-chunk layout instead, where
+  nothing held them, so every road read as permanently open however carefully
+  a route named its departure time. The restrictions now ride in that layout
+  too, in a header byte no chunk written before them ever used.
+
+  Found while comparing bundle sizes between releases: a car-only Portugal
+  compiled byte for byte the same under 0.2.0 and 0.3.0, which it should not
+  have, since 129 of its ways carry `access:conditional` and 85
+  `motor_vehicle:conditional`. Compiled for motorcycle alone, Monaco now
+  stores the Avenue Pasteur ban it used to drop, and a route across it travels
+  183 m at midday and 3,081 m at 23:00 — the same answers the multi-vehicle
+  bundle gives.
+
+- **Points on a road the network cannot reach no longer report no route.** The
+  road nearest a point is sometimes one nothing may legally enter: a pocket of
+  one-way streets behind banned turns, or an island of service roads. A route
+  to such a point failed outright, however much of the network lay between.
+
+  It now finishes on a road a little further off, trying the nearest few in
+  turn and taking the first that works, and `destinationSnap.distanceMeters`
+  reports how far short it stopped. `finishOnANearbyRoad: false` restores the
+  old behaviour of being told plainly that the point cannot be reached.
+
+  Found on Évora, where `no_left_turn` and `no_right_turn` relations on Rua de
+  Serpa Pinto seal the only entry to a street: Lisbon to a point there now
+  routes 133.2 km, finishing 23 m away, and Braga to Évora routes 460.2 km
+  where both previously failed. Lisbon airport, whose terminal roads are an
+  island 527 m from the nearest road a car can reach, routes too.
+
+### Added
+
+- `edgesWithConditionalRestrictions` in the compile report, beside
+  `edgesWithPhysicalLimits`, so a region's conditional data can be counted
+  rather than assumed.
+
+### Known limitations
+
+- **Nothing changes without `departAt`.** Omitting it ignores conditional
+  restrictions entirely, which is how the library behaved before.
+- **Only closures are applied.** A road the plain tags already forbid stays
+  forbidden where a conditional value would open it, which errs towards
+  refusing a usable road rather than permitting a forbidden one.
+- **One moment for the whole route**, rather than an arrival time per edge. A
+  long route is judged by when it set out.
+- **`restriction:conditional` on a turn restriction relation is still not
+  read.** A morning-peak no-left-turn is enforced at every hour.
+- **Conditions this library cannot answer are counted, not guessed.** Weather,
+  user groups, the purpose of access and a stay duration are parsed, reported
+  by `unreadableConditions`, and then left to one side with the road open.
+- **`departAt` is the local time of the roads travelled.** No time-zone
+  conversion is done and no clock is consulted.
+
+Measured against the earlier releases on one machine: routing is as fast as
+0.2.0 — Porto to Lisbon 2,252 ms cold and 206 ms repeated, against 2,252 and
+208 — and the compiler is 1% slower back to back, 8 min 05 s against
+8 min 01 s, for 0.17 GB more memory. The browser build grew from 21.1 kB
+gzipped to 24.8 kB, and the published tarball from 75.9 kB to 91.0 kB.
+
+Braga to Évora is the one journey that changed materially, and it changed
+from failing to working: 0.2.0 spent 7.9 s widening its corridor before
+reporting no route, where this release finishes in 2.3 s.
+
+### Compatibility
+
+A bundle whose roads carry no conditional restriction is byte for byte the
+file 0.2.0 wrote, in both layouts: the new sections live in header bytes that
+every version so far left as zero. Monaco for a car is 26,177 bytes from
+either compiler. Every bundle published so far still opens and routes
+identically.
+
+A bundle that does carry conditional restrictions cannot be opened by 0.2.0
+or earlier, which report a truncated chunk.
 
 ## [0.2.0] - 2026-10-15
 
@@ -114,11 +321,19 @@ ship too, in a bundle of their own. Alternative routes moved to 0.3.0.
 
 ### Known limitations
 
+- **Conditional restrictions are not read in this release.**
+  `access:conditional`, `restriction:conditional` and `hgv:conditional` are
+  ignored, so a street closed to lorries overnight or a square pedestrianised
+  on Sundays appears permanently open. It is the limitation most likely to
+  make a route wrong rather than merely longer, particularly for a lorry, so
+  it was scheduled ahead of alternative routes and is addressed under
+  Unreleased above.
 - An active-travel bundle at country scale cannot be compiled with small
   tiles: Portugal for walking and cycling at 40 km tiles exceeds the
   compiler's 3 GB ceiling and is refused. The default 120 km works, at the
   cost of a larger first download for a short urban route.
-- Alternative routes are not in this release; they are planned for 0.3.0.
+- Alternative routes are not in this release; they are planned for 0.3.0,
+  after conditional restrictions.
 
 ### Compatibility
 

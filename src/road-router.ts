@@ -1,6 +1,7 @@
 import { createRouteGraphLoader, type RouteGraphLoader } from "./manifest";
 import { openRoadGraphBundle, type BundleTile, type RoadGraphBundle } from "./bundle";
-import { route } from "./router";
+import { route, type RouteOptions } from "./router";
+import { DEFAULT_MAX_STRETCH, checkAlternativeOptions, routeAlternatives, type AlternativeRoutesOptions } from "./alternatives";
 import { getRoutingProfile, getRoutingProfileById, maxSpeedMpsFor } from "./routing-profile";
 import { RouterError, type Coordinate, type RoadGraph, type RoutePreference, type RouteResult } from "./types";
 import { DEFAULT_VEHICLE_PRESET, resolveVehicle, type VehicleDimensions, type VehicleInput } from "./vehicle";
@@ -63,6 +64,9 @@ function haversineMeters(a: Coordinate, b: Coordinate) {
  * High-level route entry point. `open()` accepts an EFRB bundle, an EFRT
  * manifest, or an already-decoded graph.
  */
+/** When a journey starts, for the conditional restrictions that depend on it. */
+export type DepartureOptions = Pick<RouteOptions, "departAt" | "publicHoliday" | "timeZone" | "circumstances" | "avoid">;
+
 export class RoadRouter {
   private constructor(private readonly graph?: RoadGraph, private readonly loader?: RouteLoader, private readonly options: RoadRouterOptions = {}, private readonly profileId?: number, private readonly bundleVehicle?: string) {
     const profile = getRoutingProfileById(profileId ?? 0);
@@ -142,10 +146,15 @@ export class RoadRouter {
     return new RoadRouter(undefined, this.loader, this.options, wanted.id, this.bundleVehicle);
   }
 
-  async route(from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest"): Promise<RouteResult> {
-    if (this.graph) return route(this.graph, from, to, preference, { vehicle: this.vehicle });
-    if (isBundle(this.loader)) return this.routeOverBundle(this.loader, from, to, preference);
-    return this.routeOverLoader(this.loader!, from, to, preference);
+  /**
+   * `when` says when the journey starts, so conditional restrictions apply.
+   * Leaving it out ignores them, which is how this library behaved before it
+   * could read them.
+   */
+  async route(from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest", when: DepartureOptions = {}): Promise<RouteResult> {
+    if (this.graph) return route(this.graph, from, to, preference, { vehicle: this.vehicle, ...when });
+    if (isBundle(this.loader)) return this.routeOverBundle(this.loader, from, to, preference, when);
+    return this.routeOverLoader(this.loader!, from, to, preference, when);
   }
 
   /**
@@ -157,7 +166,50 @@ export class RoadRouter {
    * graph contains. Because the test measures ground distance rather than
    * counting neighbours, the answer does not depend on the tile size.
    */
-  private async routeOverBundle(bundle: RoadGraphBundle, from: Coordinate, to: Coordinate, preference: RoutePreference) {
+  /**
+   * Several ways there, best first, with up to `count - 1` alternatives after
+   * it. Fewer than asked for means the network held nothing else worth
+   * offering, which is the usual answer where there is one obvious way.
+   *
+   * Over a bundle this downloads a wider corridor than a single route needs:
+   * an alternative may be worse than the best by as much as `maxStretch`, and
+   * the tiles holding it lie outside the corridor that proved the best route.
+   */
+  async routeAlternatives(from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest", options: AlternativeRoutesOptions = {}): Promise<RouteResult[]> {
+    // Checked here, before a single byte is fetched. The search checks them
+    // too, but by the time it runs a remote bundle has already been asked for
+    // tiles that an impossible `count` was never going to use.
+    checkAlternativeOptions(options);
+    const withVehicle = { vehicle: this.vehicle, ...options };
+    if (this.graph) return routeAlternatives(this.graph, from, to, preference, withVehicle);
+    if (isBundle(this.loader)) {
+      const { best, graphNow, widen, reachFor } = await this.bestOverBundle(this.loader, from, to, preference, options);
+      // Asked for one route, this is that route: widening the corridor would
+      // download tiles only an alternative could use.
+      if (options.count !== undefined && options.count <= 1) return [best];
+      if (options.searchWiderCorridor === false) return routeAlternatives(graphNow(), from, to, preference, withVehicle);
+      // Widening replaces the stitched graph, so the search has to be given
+      // the one that exists now. Reading it before the widening would search
+      // the narrower corridor and throw away the tiles just downloaded,
+      // losing exactly the alternatives they were fetched for.
+      await widen(reachFor(best) * (options.maxStretch ?? DEFAULT_MAX_STRETCH));
+      return routeAlternatives(graphNow(), from, to, preference, withVehicle);
+    }
+    const loader = this.loader!;
+    return routeAlternatives(await loader.loadForRoute(from, to), from, to, preference, withVehicle);
+  }
+
+  private async routeOverBundle(bundle: RoadGraphBundle, from: Coordinate, to: Coordinate, preference: RoutePreference, when: DepartureOptions = {}) {
+    return (await this.bestOverBundle(bundle, from, to, preference, when)).best;
+  }
+
+  /**
+   * The same corridor walk, stopping with the graph it settled on as well as
+   * the route. Alternatives need the graph, and need to be able to widen it
+   * once more: a second route may be worse than the best by more than the
+   * corridor was ever sized to hold.
+   */
+  private async bestOverBundle(bundle: RoadGraphBundle, from: Coordinate, to: Coordinate, preference: RoutePreference, when: DepartureOptions = {}) {
     const straightLine = haversineMeters(from, to);
     const ceiling = straightLine * (this.options.maxDetourFactor ?? Infinity);
     // How far a given duration can reach depends on the vehicle. Sizing a
@@ -190,7 +242,7 @@ export class RoadRouter {
     for (const factor of [1, ...SEARCH_WIDENING_FACTORS]) {
       if (factor !== 1 && !(await widen(factor === Infinity ? Infinity : budget * factor))) break;
       try {
-        best = route(graph!, from, to, preference, { vehicle: this.vehicle });
+        best = route(graph!, from, to, preference, { vehicle: this.vehicle, ...when });
         break;
       } catch (error) {
         failure = error;
@@ -202,27 +254,27 @@ export class RoadRouter {
     // Phase 2: confirm it against every tile that could still beat it. The
     // bound makes each pass cheap, since anything no better is abandoned early.
     for (let pass = 0; pass < MAX_CONFIRMATION_PASSES; pass += 1) {
-      if (!(await widen(reachFor(best)))) return best;
+      if (!(await widen(reachFor(best)))) return { best, graphNow: () => graph!, widen, reachFor };
       try {
-        best = route(graph!, from, to, preference, { costBound: preference === "fastest" ? best.durationSeconds : best.distanceMeters, vehicle: this.vehicle });
+        best = route(graph!, from, to, preference, { costBound: preference === "fastest" ? best.durationSeconds : best.distanceMeters, vehicle: this.vehicle, ...when });
       } catch (error) {
         if ((error as { code?: string }).code !== "NO_ROUTE") throw error;
-        return best; // Nothing in the added tiles beats what we already have.
+        return { best, graphNow: () => graph!, widen, reachFor }; // Nothing added beats what we have.
       }
     }
-    return best;
+    return { best, graphNow: () => graph!, widen, reachFor };
   }
 
-  private async routeOverLoader(loader: RouteLoader, from: Coordinate, to: Coordinate, preference: RoutePreference) {
+  private async routeOverLoader(loader: RouteLoader, from: Coordinate, to: Coordinate, preference: RoutePreference, when: DepartureOptions = {}) {
     const graph = await loader.loadForRoute(from, to);
     try {
-      return route(graph, from, to, preference, { vehicle: this.vehicle });
+      return route(graph, from, to, preference, { vehicle: this.vehicle, ...when });
     } catch (error) {
       if (!(error instanceof Error) || (error as { code?: string }).code !== "NO_ROUTE" || !loader.loadExpandedForRoute) throw error;
       // A straight geographic corridor may omit a tile holding a bridge, a
       // one-way detour, or a road around a physical obstacle. Retry once with
       // the immediate ring of neighbouring tiles before reporting no route.
-      return route(await loader.loadExpandedForRoute(from, to), from, to, preference, { vehicle: this.vehicle });
+      return route(await loader.loadExpandedForRoute(from, to), from, to, preference, { vehicle: this.vehicle, ...when });
     }
   }
 }
