@@ -825,8 +825,11 @@ break the guarantee that the route found is the best one.
 | `publicHoliday` | Whether that day is one where the roads are. |
 | `circumstances` | What the map cannot know: `{ conditions, userGroups, purposes }`. |
 | `avoid` | Circles of road that are shut, as `{ lat, lng, radiusMeters }`. |
-| `vehicle` | The lorry being routed, where the graph states physical limits. |
 | `finishOnANearbyRoad` | `false` to be refused outright when the point cannot be reached. |
+
+The lorry being routed is not among them. It is settled when the router is
+opened, and changed with `asVehicle`, because a bundle reads different
+per-vehicle chunks for each one rather than searching the same graph twice.
 
 ```js
 const route = await router.route(origin, destination, "fastest", {

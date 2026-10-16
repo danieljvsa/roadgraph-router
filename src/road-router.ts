@@ -72,7 +72,17 @@ function haversineMeters(a: Coordinate, b: Coordinate) {
  * manifest, or an already-decoded graph.
  */
 /** When a journey starts, for the conditional restrictions that depend on it. */
-export type DepartureOptions = Pick<RouteOptions, "departAt" | "publicHoliday" | "timeZone" | "circumstances" | "avoid" | "railway">;
+/**
+ * What a single route may be told, as against what the router was opened
+ * with. The vehicle is deliberately not here: it is resolved once when the
+ * router is opened, and changed with `asVehicle`, because switching it swaps
+ * the per-vehicle chunks a bundle reads rather than altering one search.
+ *
+ * `finishOnANearbyRoad` is, though. `routeAlternatives` has always taken it,
+ * being an `Omit` of the same options, and a caller who can ask one method to
+ * refuse an unreachable point outright should be able to ask the other.
+ */
+export type DepartureOptions = Pick<RouteOptions, "departAt" | "publicHoliday" | "timeZone" | "circumstances" | "avoid" | "railway" | "finishOnANearbyRoad">;
 
 export class RoadRouter {
   private constructor(private readonly graph?: RoadGraph, private readonly loader?: RouteLoader, private readonly options: RoadRouterOptions = {}, private readonly profileId?: number, private readonly bundleVehicle?: string) {

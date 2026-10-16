@@ -95,6 +95,17 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   message about the output for a problem with the input. Such a region now
   yields the one tile it should.
 
+- **`finishOnANearbyRoad` was documented on `route()` but refused by it.** The
+  README lists it among the things a single route may be told, and
+  `routeAlternatives` has always accepted it, being an `Omit` of the same
+  options. `RoadRouter.route` took a narrower `DepartureOptions` that left it
+  out, so it reached the search only by being spread past its own type: it
+  worked in JavaScript and failed to compile in TypeScript. `DepartureOptions`
+  now includes it. The vehicle, which the same table listed, has been taken
+  out of it instead — that one is settled when the router is opened and
+  changed with `asVehicle`, because a bundle reads different per-vehicle
+  chunks for each rather than searching the same graph twice.
+
 
 
 ### Added

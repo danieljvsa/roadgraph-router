@@ -8,7 +8,7 @@
  * case where those two are the same edge and there is no middle at all.
  */
 
-import { ProfileId, packEdgeRailway, route, routeAlternatives } from "./index";
+import { ProfileId, RoadRouter, compactGraph, decodeGraph, encodeCompactGraph, packEdgeRailway, route, routeAlternatives } from "./index";
 import type { EdgeRailway, RailwayAttributes, RoadGraph } from "./index";
 import { buildGraph, pathOf, type GraphSpec } from "./test-support";
 
@@ -125,5 +125,31 @@ describe("alternative routes over a direct edge", () => {
   it("respects maxStretch, which the long way here exceeds", () => {
     const routes = routeAlternatives(graph, at("A"), at("B"), "shortest", { count: 2, maxStretch: 1.1 });
     expect(routes.length).toBe(1);
+  });
+});
+
+/**
+ * The README documents `finishOnANearbyRoad` as something a single route may
+ * be told, and `routeAlternatives` has always accepted it. It reached the
+ * search through `RoadRouter.route` only by being spread past its own type,
+ * so a TypeScript caller following the documentation was refused at compile
+ * time for an option that worked.
+ */
+describe("a router passes a per-route option to the search", () => {
+  const graph = decodeGraph(encodeCompactGraph(compactGraph(buildGraph({
+    nodes: { A: [0, 0], B: [0, 0.001], C: [0, 0.002], P: [0.0004, 0.001] },
+    roads: ["A>B", "B>C", "B>P", "P>C"],
+    bans: [["A>B", "B>P"]],
+  }))));
+  const router = RoadRouter.fromGraph(graph);
+  const start = { lat: 0, lng: 0 };
+  const inThePocket = { lat: 0.0004, lng: 0.00102 };
+
+  it("finishes on a road it can reach by default", async () => {
+    expect((await router.route(start, inThePocket)).destinationSnap.distanceMeters).toBeGreaterThan(20);
+  });
+
+  it("refuses outright when told to", async () => {
+    await expect(router.route(start, inThePocket, "fastest", { finishOnANearbyRoad: false })).rejects.toThrow(/No car route/);
   });
 });
