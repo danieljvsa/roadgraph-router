@@ -244,12 +244,13 @@ describes how trains are normally run, not what the track permits.
 
 ### Cost
 
-Railways add about **4.7 kB gzipped** to a browser bundle that will never use
-them — 27.5 kB to 32.2 kB for the whole public surface. It is not
-tree-shakeable: `routingProfiles` names every profile and the constraint
-module is reached from `route()`. Hiding it behind a dynamic import would make
-profile lookup asynchronous, which is a worse trade. Runtime dependencies are
-unchanged, and `npm audit --omit=dev` reports no vulnerabilities.
+Railways add **5.7 kB gzipped** to a browser application that imports only the
+road API — 20.2 kB on 0.3.0 against 25.9 kB on 0.4.0, both bundled by the same
+esbuild from each release's published entry point. The whole public surface
+goes from 25.2 kB to 31.5 kB. It is not tree-shakeable: `routingProfiles`
+names every profile and `route()` reaches the constraint and certainty modules
+directly. The published bundle needs no Node built-ins, runtime dependencies
+are unchanged, and `npm audit --omit=dev` reports no vulnerabilities.
 
 ### Compatibility
 

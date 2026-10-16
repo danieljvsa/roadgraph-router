@@ -1342,16 +1342,44 @@ about as fast as it always did, 810 ms against 866 ms.
 
 ### What each version can read
 
-| | 0.1.0 bundle | 0.2.0 bundle | 0.3.0 bundle | 0.4.0 road bundle | 0.4.0 railway bundle |
-| --- | --- | --- | --- | --- | --- |
-| 0.1.0 | yes | no | no | no | no |
-| 0.2.0 | yes | yes | no | no | no |
-| 0.3.0 | yes | yes | yes | **yes** | no |
-| 0.4.0 | yes | yes | yes | yes | yes |
+Measured by compiling the same extract with each release's own compiler, from
+that release's own source, and opening every result with every reader. A
+single-profile bundle holds one chunk per tile; a multi-profile bundle splits
+each tile into a shared chunk and one chunk per vehicle.
 
-A 0.2.0 reader opens a 0.3.0 bundle and then fails on the first tile whose
-roads carry a conditional restriction — the chunk is longer than it expects.
-A bundle without any reads as before.
+| bundle ↓ · reader → | 0.1.0 | 0.2.0 | 0.3.0 | 0.4.0 |
+| --- | --- | --- | --- | --- |
+| 0.1.0, one profile | yes | yes | yes | **yes** |
+| 0.2.0, one profile | yes | yes | yes | **yes** |
+| 0.2.0, multi-profile | no | yes | **no** | **no** |
+| 0.3.0, one profile | yes | yes | yes | **yes** |
+| 0.3.0, multi-profile | no | no | yes | **yes** |
+| 0.4.0, road | yes¹ | yes¹ | yes | yes |
+| 0.4.0, railway | no | no | no | yes |
+
+¹ a one-profile road bundle only; a multi-profile one needs 0.3.0 or newer.
+
+Every bundle a reader accepts above returns the **same route** as the version
+that wrote it — identical distance, duration and path.
+
+**The one gap: a multi-profile bundle written by 0.2.0 cannot be read by
+0.3.0 or 0.4.0.** 0.3.0 moved the node coordinates in a *shared* chunk out of
+a fixed block and into a sixth varint section, and reused the same chunk
+version number for both layouts, so a newer reader measures an older shared
+chunk wrongly and reports it as truncated. The break is 0.3.0's and 0.4.0
+inherits it; single-profile bundles of every version are unaffected, because
+that layout was deliberately left alone.
+
+Its reach is small. Only `0.0.0-stage` and `0.1.0` were ever published to npm,
+and 0.1.0 predates multi-profile bundles entirely — so a bundle that hits this
+can only have been compiled from an unreleased checkout of `main`. Recompiling
+is the remedy. It is recorded here rather than worked around, because a
+compatibility claim that has not been measured against the version that wrote
+the file is not a compatibility claim.
+
+A 0.2.0 reader opens a 0.3.0 *single-profile* bundle and then fails on the
+first tile whose roads carry a conditional restriction — the chunk is longer
+than it expects. A bundle without any reads as before.
 
 **0.4.0 changes nothing about a road bundle.** A road bundle compiled by
 0.4.0 is byte for byte the file 0.3.0 wrote, and a 0.3.0 reader opens it: the
@@ -1370,17 +1398,33 @@ This routing bundle was compiled for a profile this build does not support (id 6
 
 | | 0.1.0 | 0.2.0 | 0.3.0 | 0.4.0 |
 | --- | --- | --- | --- | --- |
-| Tarball | 46.4 kB | 75.9 kB | 91.0 kB | 136.3 kB |
-| Unpacked | 182.8 kB | 289.3 kB | 342.1 kB | 476.4 kB |
-| Bundled for a browser, gzipped | 13.6 kB | 21.1 kB | 24.8 kB | **32.2 kB** |
+| Tarball | 46.4 kB | 75.9 kB | 91.0 kB | 136.9 kB |
+| Unpacked | 182.8 kB | 289.3 kB | 342.1 kB | 478.0 kB |
 
-Railways cost a road-only application about **4.7 kB gzipped** that it will
-not use, measured as the whole public surface bundled with esbuild: 27.5 kB
-before, 31.0 kB after. It is not zero and it is not tree-shakeable, because
-`routingProfiles` is a registry that names every profile, and the constraint
-module is reached from `route()` itself. Hiding it behind a dynamic import
-would make profile lookup asynchronous, which is a worse trade than 3.4 kB.
-Runtime dependencies are unchanged: still the one, and only for the compiler.
+Browser size, both releases bundled by the same esbuild 0.28.1 from the
+published entry point, minified and gzipped:
+
+| | 0.3.0 | 0.4.0 | railways cost |
+| --- | --- | --- | --- |
+| The whole public surface | 25.2 kB | 31.5 kB | +6.3 kB |
+| A road-only application¹ | 20.2 kB | **25.9 kB** | **+5.7 kB** |
+
+¹ importing `RoadRouter`, `route`, `snapToGraph`, `openRoadGraphBundle`,
+`mergeRoadGraphs` and `withSpatialIndex`, and nothing else.
+
+**A road application pays for railways whether it uses them or not**, and 5.7
+kB is the honest figure — not the gap between the two columns of a single
+release, which is what an earlier version of this table reported. Tree-shaking
+does not drop the railway code because `routingProfiles` is a registry naming
+every profile and `route()` reaches the constraint and certainty modules
+directly. A second entry point would avoid it; on a 20 kB baseline that has
+not seemed worth splitting the API over, and the measurement is here so the
+trade can be judged rather than assumed.
+
+The published bundle pulls in **no Node built-ins at all**, taken from
+esbuild's module graph for the installed tarball rather than from the source
+tree. Runtime dependencies are unchanged: still the one, and only for the
+compiler.
 
 ### Nothing routes differently
 
