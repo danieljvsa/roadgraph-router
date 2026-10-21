@@ -3,6 +3,7 @@ import { withSpatialIndex } from "./spatial-index";
 import { packTurnRestrictions, packTurnSequences } from "./turn-restrictions";
 import { accessMaskFor, edgeAllowed } from "./access";
 import { packEdgeLimits, fromDecimetres, fromHalfTonnes } from "./limits";
+import { packEdgeRailway, railwayOf } from "./railway";
 import { packEdgeConditions } from "./conditional";
 
 const COORDINATE_SCALE = 10_000_000;
@@ -198,10 +199,11 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
     }
   }
 
-  // 5. Rebase every tile's restrictions, access and limits onto the merged
-  //    edge numbering. All three are written against edge numbers that the
-  //    merge has just changed, and a corridor that lost them would route a
-  //    lorry under a bridge it does not fit through.
+  // 5. Rebase every tile's restrictions, access, limits and track description
+  //    onto the merged edge numbering. All of them are written against edge
+  //    numbers that the merge has just changed, and a corridor that lost them
+  //    would route a lorry under a bridge it does not fit through, or a train
+  //    onto track of a gauge it cannot run on.
   const bannedPairs: [number, number][] = [];
   const bannedSequences: number[][] = [];
   const hasAccess = graphs.some((graph) => graph.edgeAccess);
@@ -209,6 +211,7 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
   const limitRows = new Map<number, { heightMeters?: number; widthMeters?: number; lengthMeters?: number; weightTonnes?: number }>();
   const conditionRows: { edge: number; kind: number; value: string }[] = [];
   const seenConditions = new Set<string>();
+  const railwayRows = new Map<number, ReturnType<typeof railwayOf>>();
   for (let index = 0; index < graphs.length; index += 1) {
     const graph = graphs[index];
     const edgeMap = edgeMaps[index];
@@ -256,6 +259,17 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
       }
     }
 
+    // Tiles overlap, so a track arrives once per tile that saw it, saying the
+    // same thing each time; the first copy is kept.
+    if (graph.edgeRailway) {
+      for (let edge = 0; edge < graph.edgeTargets.length; edge += 1) {
+        if (!graph.edgeRailway.edgeRows[edge]) continue;
+        const merged = rebase(edge);
+        if (merged < 0 || railwayRows.has(merged)) continue;
+        railwayRows.set(merged, railwayOf(graph, edge));
+      }
+    }
+
     const { turnRestrictionFromEdges: fromEdges, turnRestrictionToEdges: toEdges } = graph;
     if (fromEdges && toEdges) {
       for (let pair = 0; pair < fromEdges.length; pair += 1) {
@@ -282,6 +296,7 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
   }
   const mergedLimits = packEdgeLimits([...limitRows].map(([edge, limits]) => ({ edge, limits })));
   const mergedConditions = packEdgeConditions(conditionRows);
+  const mergedRailway = packEdgeRailway([...railwayRows].flatMap(([edge, railway]) => railway ? [{ edge, railway }] : []), edgeCount);
 
   return withSpatialIndex({
     nodeLatitudes: mergedLatitudes.slice(0, nodeCount),
@@ -296,6 +311,7 @@ export function mergeRoadGraphs(graphs: RoadGraph[]): RoadGraph {
     ...(mergedAccess ? { edgeAccess: mergedAccess } : {}),
     ...(mergedLimits ? { edgeLimits: mergedLimits } : {}),
     ...(mergedConditions ? { edgeConditions: mergedConditions } : {}),
+    ...(mergedRailway ? { edgeRailway: mergedRailway } : {}),
     ...(pointCount ? { edgeShapeOffsets, edgeShapeLatitudes, edgeShapeLongitudes } : {}),
     ...(bannedPairs.length ? packTurnRestrictions(bannedPairs) : {}),
     ...(bannedSequences.length ? packTurnSequences(bannedSequences) : {}),

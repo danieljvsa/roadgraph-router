@@ -4,6 +4,7 @@ import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
 import { edgeAllowed } from "./access";
 import { accessForVehicle } from "./limits";
+import { RailService, accessForRailway, assertRailwayConstraints, railwayCertainty, type RailwayConstraints } from "./railway";
 import { accessAvoiding, type AvoidArea } from "./avoid";
 import { accessAtTime, conditionalDurations, conditionsOf, travelTimeFrom, type Circumstances, type TravelTime } from "./conditional";
 import { componentSizes, componentsFor } from "./connectivity";
@@ -11,6 +12,7 @@ import { searchBoundsFor, straightLineAtMost } from "./search-bounds";
 import type { VehicleDimensions } from "./vehicle";
 import { buildTurnRestrictionIndex, buildTurnSequenceIndex, guardedJunctionsFor, type TurnRestrictionIndex, type TurnSequenceIndex } from "./turn-restrictions";
 import { profileOf } from "./routing-profile";
+import { isRailwayProfile } from "./railway-profile";
 import { FALLBACK_SNAP_RADIUS_METERS, coordinateFor, geometryAfter, geometryBefore, geometryBetween, haversineMeters, snapToGraph, type EdgeProjection, type GraphSnap } from "./snap";
 
 /** Entering the graph: traverse the tail of `edge` to reach `node`. `edge` is -1 at a junction. */
@@ -348,10 +350,23 @@ function projectionOf(snap: GraphSnap, edge: number) {
   return snap.kind === "edge" ? snap.projections.find((projection) => projection.edge === edge) : undefined;
 }
 
-function snapSummary(snap: GraphSnap, travelledMeters = 0): RouteSnap {
-  return snap.kind === "node"
-    ? { node: snap.node, edge: -1, point: snap.point, distanceMeters: snap.distanceMeters, travelledMeters: 0 }
-    : { node: -1, edge: snap.projections[0].edge, point: snap.point, distanceMeters: snap.distanceMeters, travelledMeters };
+/**
+ * Where a route really joined or left the network.
+ *
+ * `used` is the projection the search actually took. Without it this reported
+ * the nearest one instead, which was the same road whenever the only
+ * candidates were the two directions of one carriageway — and is not, now
+ * that a railway snap offers the other platform tracks at a station. A route
+ * that left from the far platform said it left from the near one, and
+ * `routeAlternatives` compared the wrong roads when deciding whether two
+ * routes were the same.
+ */
+function snapSummary(snap: GraphSnap, travelledMeters = 0, used?: EdgeProjection): RouteSnap {
+  if (snap.kind === "node") {
+    return { node: snap.node, edge: -1, point: snap.point, distanceMeters: snap.distanceMeters, travelledMeters: 0 };
+  }
+  const projection = used ?? snap.projections[0];
+  return { node: -1, edge: projection.edge, point: projection.point, distanceMeters: projection.distanceMeters, travelledMeters };
 }
 
 /**
@@ -367,6 +382,14 @@ export type RouteOptions = {
    * is too large or too heavy for are closed to the search and to snapping.
    */
   vehicle?: VehicleDimensions;
+  /**
+   * What the train being routed can run on, where the graph describes its
+   * track. Track whose tags contradict a constraint is closed to the search
+   * and to snapping; track that says nothing stays open, because silence in
+   * OSM is an absent survey rather than a statement of incompatibility. See
+   * `./railway` for the full policy and for `strictUnknown`, which reverses it.
+   */
+  railway?: RailwayConstraints;
   /**
    * When the journey starts, in the local time of the roads being travelled.
    *
@@ -428,6 +451,51 @@ export type RouteOptions = {
  * The per-edge costs a search should use: the conditional slowdowns, with any
  * penalty folded in on top. Absent both, the search reads the graph directly.
  */
+/**
+ * What a siding costs a search that is minimising distance.
+ *
+ * A yard or a crossover is usually the shortest way between two parallel
+ * tracks, so a shortest-distance search takes it: leaving Trindade, 83 m of
+ * depot was cheaper than staying on the running line, and the route cut
+ * through the sidings to change track. No operator does that, and the tags
+ * that would say which service owns which track are route relations — service
+ * data this package does not read and will not infer.
+ *
+ * What the infrastructure does say is that the track is a siding, and that is
+ * enough: it is made dearer to cross than the running line beside it. The
+ * multiplier steers the search and never reaches the answer — the distance
+ * reported back is the graph's own, exactly as a caller's `costPenalties` are
+ * documented to behave.
+ *
+ * A `fastest` search is already part of the way there, because a siding is
+ * modelled at 25 km/h and the line beside it is not, so it carries the smaller
+ * share. Neither is a ban: where a siding is the only way through, it is still
+ * used, and `excludeServiceTracks` is what forbids it.
+ */
+const SERVICE_TRACK_DISTANCE_MULTIPLIER = 4;
+const SERVICE_TRACK_DURATION_MULTIPLIER = 2;
+
+function serviceTrackCosts(graph: RoadGraph, preference: RoutePreference, slowed: Map<number, number> | undefined) {
+  const table = graph.edgeRailway;
+  if (!table) return slowed;
+  const distanceScale = graph.edgeDistanceScale ?? 1;
+  const durationScale = graph.edgeDurationScale ?? 1;
+  // A siding is already modelled at 25 km/h, so a `fastest` search is part of
+  // the way there on its own and needs the smaller share of the penalty.
+  const multiplier = preference === "shortest" ? SERVICE_TRACK_DISTANCE_MULTIPLIER : SERVICE_TRACK_DURATION_MULTIPLIER;
+  let costs: Map<number, number> | undefined;
+  for (let edge = 0; edge < graph.edgeTargets.length; edge += 1) {
+    const row = table.edgeRows[edge];
+    if (!row || table.service[row] === RailService.running) continue;
+    costs ??= new Map(slowed);
+    const base = costs.get(edge) ?? (preference === "fastest"
+      ? graph.edgeDurationsSeconds[edge] * durationScale
+      : graph.edgeDistancesMeters[edge] * distanceScale);
+    costs.set(edge, base * multiplier);
+  }
+  return costs ?? slowed;
+}
+
 function withPenalties(
   graph: RoadGraph,
   preference: RoutePreference,
@@ -502,12 +570,19 @@ function reconnect(graph: RoadGraph, from: Coordinate, to: Coordinate, preferenc
 
 export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest", options: RouteOptions = {}): RouteResult {
   assertGraph(graph);
+  // Before anything is snapped, masked or searched: a malformed constraint
+  // would otherwise be read as one no track can satisfy, and the caller would
+  // be told "no route" for what is really a typo.
+  assertRailwayConstraints(options.railway);
   // The vehicle narrows the profile's own mask, so every later step — snapping
   // included — sees one answer about which roads are usable.
   const vehicleAccess = accessForVehicle(graph, options.vehicle);
+  // What the train can run on narrows it the same way, and composes with the
+  // step before it: each one takes the mask the last one produced.
+  const trackAccess = accessForRailway(graph, options.railway, vehicleAccess);
   // The departure time narrows the mask further, so snapping and search agree
   // about which roads are usable at the moment the journey starts.
-  const timed = accessAtTime(graph, conditionsOf(graph), departureTime(options), options.vehicle, vehicleAccess, options.circumstances);
+  const timed = accessAtTime(graph, conditionsOf(graph), departureTime(options), options.vehicle, trackAccess, options.circumstances);
   // What the caller knows is shut comes last: it outranks anything the map
   // has to say about the road being open.
   const access = accessAvoiding(graph, options.avoid, timed);
@@ -596,13 +671,33 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   const conditionallySlowed = preference === "fastest" && when ? conditionalDurations(graph, conditionsOf(graph), when, options.vehicle, options.circumstances) : undefined;
   // A penalty makes an edge dearer to the search without making it dearer in
   // the answer: the distance and duration reported below are the real ones.
-  const slowed = withPenalties(graph, preference, conditionallySlowed, options.costPenalties);
-  const costOf = (edge: number) => preference === "fastest"
-    ? (conditionallySlowed?.get(edge) ?? graph.edgeDurationsSeconds[edge] * durationScale)
-    : graph.edgeDistancesMeters[edge] * distanceScale;
+  // A siding is dearer to cross than the line beside it, then the caller's own
+  // penalties apply on top of whatever that left.
+  const slowed = withPenalties(graph, preference, serviceTrackCosts(graph, preference, conditionallySlowed), options.costPenalties);
+  /**
+   * What the search steers by: the graph's own cost, slowed by a conditional
+   * limit where one applies, then made dearer by whatever is penalising this
+   * pass. It is the same table `searchContext` uses, and it has to price
+   * *every* part of a journey — the edges in the middle, the partial edge it
+   * starts on, the partial edge it finishes on, and the case where those two
+   * are one edge and there is no middle.
+   *
+   * Pricing the ends with the graph's untouched cost, as this once did, made
+   * a penalty something the search could not see wherever a route began or
+   * ended on the penalised road. A route that was a single edge end to end
+   * could not be steered off it at all, so `routeAlternatives` asked for
+   * another way round and was handed the same one back.
+   *
+   * Nothing reported to a caller is priced from here. Distances and durations
+   * are summed from the graph's own arrays further down, so a penalty changes
+   * which way a route goes and never what it is said to cost.
+   */
+  const searchCostOf = (edge: number) => slowed?.get(edge) ?? (preference === "fastest"
+    ? graph.edgeDurationsSeconds[edge] * durationScale
+    : graph.edgeDistancesMeters[edge] * distanceScale);
 
-  const seeds = seedsFor(originSnap, costOf);
-  const finisherList = finishersFor(destinationSnap, costOf);
+  const seeds = seedsFor(originSnap, searchCostOf);
+  const finisherList = finishersFor(destinationSnap, searchCostOf);
   const finishers = new Map<number, Finisher[]>();
   for (const finisher of finisherList) {
     const bucket = finishers.get(finisher.node);
@@ -617,7 +712,7 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     for (const origin of originSnap.projections) {
       const destination = projectionOf(destinationSnap, origin.edge);
       if (!destination || destination.fraction < origin.fraction) continue;
-      const cost = (destination.fraction - origin.fraction) * costOf(origin.edge);
+      const cost = (destination.fraction - origin.fraction) * searchCostOf(origin.edge);
       if (!direct || cost < direct.cost) direct = { origin, destination, cost };
     }
   }
@@ -634,7 +729,9 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   if (direct && direct.cost >= costBound) direct = null;
   if (!outcome && !direct) throw new RouterError("NO_ROUTE", `No ${profileOf(graph).name} route connects the selected points.`);
 
-  const searchCost = outcome ? outcome.seed.cost + outcome.edges.reduce((sum, edge) => sum + costOf(edge), 0) + outcome.finisher.cost : Infinity;
+  // Both candidates priced the same way, which is the way the search chose
+  // between them; the seed and finisher costs already come from this table.
+  const searchCost = outcome ? outcome.seed.cost + outcome.edges.reduce((sum, edge) => sum + searchCostOf(edge), 0) + outcome.finisher.cost : Infinity;
   const partial = (projection: EdgeProjection, fraction: number) => ({
     distance: fraction * graph.edgeDistancesMeters[projection.edge] * distanceScale,
     duration: fraction * graph.edgeDurationsSeconds[projection.edge] * durationScale,
@@ -650,7 +747,14 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   let travelledAtOrigin = 0;
   let travelledAtDestination = 0;
 
+  // The projections the route really began and ended on, which is what the
+  // result reports and what the geometry starts from.
+  let enteredOn: EdgeProjection | undefined;
+  let leftOn: EdgeProjection | undefined;
+
   if (direct && direct.cost <= searchCost) {
+    enteredOn = direct.origin;
+    leftOn = direct.destination;
     for (const point of geometryBetween(direct.origin, direct.destination)) push(point);
     const span = partial(direct.origin, direct.destination.fraction - direct.origin.fraction);
     distanceMeters = span.distance;
@@ -662,7 +766,10 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     const { edges, finisher, seed } = outcome!;
     edgeIds = edges;
     const entry = seed.edge >= 0 ? projectionOf(originSnap, seed.edge) : undefined;
-    push(originSnap.point);
+    enteredOn = entry;
+    // The geometry starts where the route starts, which is the point on the
+    // track it entered rather than on whichever track happened to be nearest.
+    push(entry?.point ?? originSnap.point);
     if (entry) {
       for (const point of geometryAfter(entry).slice(1)) push(point);
       const span = partial(entry, 1 - entry.fraction);
@@ -690,6 +797,7 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
       push(coordinateFor(graph, graph.edgeTargets[edge]));
     }
     const exit = finisher.edge >= 0 ? projectionOf(destinationSnap, finisher.edge) : undefined;
+    leftOn = exit;
     if (exit) {
       for (const point of geometryBefore(exit)) push(point);
       const span = partial(exit, exit.fraction);
@@ -699,13 +807,27 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     }
   }
 
+  const origin = snapSummary(originSnap, travelledAtOrigin, enteredOn);
+  const destination = snapSummary(destinationSnap, travelledAtDestination, leftOn);
   return {
     nodeIds,
     edgeIds,
     distanceMeters,
     durationSeconds,
-    originSnap: snapSummary(originSnap, travelledAtOrigin),
-    destinationSnap: snapSummary(destinationSnap, travelledAtDestination),
+    originSnap: origin,
+    destinationSnap: destination,
     geometry: { type: "LineString", coordinates },
+    // A railway route reports what the track vouched for, counting the edges
+    // it entered and left on: those are not hops between two nodes, so they
+    // are reported in the snaps rather than in `edgeIds`, and a route that
+    // began on a siding should say so.
+    //
+    // Every railway route carries it, including one whose track states
+    // nothing at all — that route reports itself as entirely unstated, which
+    // is the answer. Leaving the field off there would make its absence mean
+    // two different things: "this is a road" and "nobody surveyed this".
+    ...(graph.edgeRailway || isRailwayProfile(profileOf(graph)) ? {
+      railway: railwayCertainty(graph, [...edgeIds, origin.edge, destination.edge].filter((edge) => edge >= 0), options.railway ?? {}),
+    } : {}),
   };
 }

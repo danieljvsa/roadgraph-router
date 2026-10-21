@@ -76,10 +76,21 @@ describe("a node that is not a barrier, or not one we know", () => {
 
 describe("every profile", () => {
   it("answers about barriers and asks for the tags to do it", () => {
-    for (const profile of Object.values(routingProfiles)) {
+    for (const profile of Object.values(routingProfiles).filter((entry) => entry.networkKind === "road")) {
       expect(typeof profile.evaluateBarrier).toBe("function");
       expect(profile.nodeTagKeys).toContain("barrier");
       expect(profile.nodeTagKeys).toContain("locked");
+    }
+  });
+
+  // A bollard is not a thing that happens to a railway. Reading the barrier
+  // table for a train would let a gate across a footpath cut a main line, so
+  // a railway profile asks for no node tags and answers about no barriers —
+  // which also means a rail-only compile never reads node tags at all.
+  it("leaves barriers to the road, because a railway has none", () => {
+    for (const profile of Object.values(routingProfiles).filter((entry) => entry.networkKind === "railway")) {
+      expect(profile.evaluateBarrier).toBeUndefined();
+      expect(profile.nodeTagKeys ?? []).toEqual([]);
     }
   });
 

@@ -5,6 +5,7 @@ import { DEFAULT_MAX_STRETCH, checkAlternativeOptions, routeAlternatives, type A
 import { getRoutingProfile, getRoutingProfileById, maxSpeedMpsFor } from "./routing-profile";
 import { RouterError, type Coordinate, type RoadGraph, type RoutePreference, type RouteResult } from "./types";
 import { DEFAULT_VEHICLE_PRESET, resolveVehicle, type VehicleDimensions, type VehicleInput } from "./vehicle";
+import { assertRailwayConstraints, type RailwayConstraints } from "./railway";
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type RouteLoader = Pick<RouteGraphLoader | RoadGraphBundle, "loadForRoute"> & Partial<Pick<RoadGraphBundle, "loadExpandedForRoute">>;
@@ -39,6 +40,12 @@ export type RoadRouterOptions = {
    * real lorry may be able to drive.
    */
   vehicle?: VehicleInput | null;
+  /**
+   * What the train being routed can run on, for a railway bundle. Set here it
+   * applies to every route; a single `route()` call can override it, which is
+   * how one router answers for more than one class of train.
+   */
+  railway?: RailwayConstraints;
 };
 const MINIMUM_BUDGET_METERS = 5_000;
 
@@ -65,7 +72,17 @@ function haversineMeters(a: Coordinate, b: Coordinate) {
  * manifest, or an already-decoded graph.
  */
 /** When a journey starts, for the conditional restrictions that depend on it. */
-export type DepartureOptions = Pick<RouteOptions, "departAt" | "publicHoliday" | "timeZone" | "circumstances" | "avoid">;
+/**
+ * What a single route may be told, as against what the router was opened
+ * with. The vehicle is deliberately not here: it is resolved once when the
+ * router is opened, and changed with `asVehicle`, because switching it swaps
+ * the per-vehicle chunks a bundle reads rather than altering one search.
+ *
+ * `finishOnANearbyRoad` is, though. `routeAlternatives` has always taken it,
+ * being an `Omit` of the same options, and a caller who can ask one method to
+ * refuse an unreachable point outright should be able to ask the other.
+ */
+export type DepartureOptions = Pick<RouteOptions, "departAt" | "publicHoliday" | "timeZone" | "circumstances" | "avoid" | "railway" | "finishOnANearbyRoad">;
 
 export class RoadRouter {
   private constructor(private readonly graph?: RoadGraph, private readonly loader?: RouteLoader, private readonly options: RoadRouterOptions = {}, private readonly profileId?: number, private readonly bundleVehicle?: string) {
@@ -105,6 +122,10 @@ export class RoadRouter {
   }
 
   static async open(source: string | RoadGraph, fetcher?: FetchLike, options: RoadRouterOptions = {}) {
+    // First, before a single byte is fetched. A standing constraint that is
+    // malformed would otherwise cost a header, a directory and a corridor of
+    // tiles before the first route noticed it.
+    assertRailwayConstraints(options.railway, "options.railway");
     if (typeof source !== "string") {
       RoadRouter.assertVehicleApplies(source.profileId ?? 0, options);
       return new RoadRouter(source, undefined, options, source.profileId);
@@ -152,7 +173,11 @@ export class RoadRouter {
    * could read them.
    */
   async route(from: Coordinate, to: Coordinate, preference: RoutePreference = "fastest", when: DepartureOptions = {}): Promise<RouteResult> {
-    if (this.graph) return route(this.graph, from, to, preference, { vehicle: this.vehicle, ...when });
+    // A per-route override is checked here rather than after the corridor has
+    // been downloaded; `route()` checks it again for callers that reach it
+    // directly, which costs nothing on an object that has already passed.
+    assertRailwayConstraints(when.railway, "railway");
+    if (this.graph) return route(this.graph, from, to, preference, { vehicle: this.vehicle, railway: this.options.railway, ...when });
     if (isBundle(this.loader)) return this.routeOverBundle(this.loader, from, to, preference, when);
     return this.routeOverLoader(this.loader!, from, to, preference, when);
   }
@@ -180,7 +205,7 @@ export class RoadRouter {
     // too, but by the time it runs a remote bundle has already been asked for
     // tiles that an impossible `count` was never going to use.
     checkAlternativeOptions(options);
-    const withVehicle = { vehicle: this.vehicle, ...options };
+    const withVehicle = { vehicle: this.vehicle, railway: this.options.railway, ...options };
     if (this.graph) return routeAlternatives(this.graph, from, to, preference, withVehicle);
     if (isBundle(this.loader)) {
       const { best, graphNow, widen, reachFor } = await this.bestOverBundle(this.loader, from, to, preference, options);
@@ -242,7 +267,7 @@ export class RoadRouter {
     for (const factor of [1, ...SEARCH_WIDENING_FACTORS]) {
       if (factor !== 1 && !(await widen(factor === Infinity ? Infinity : budget * factor))) break;
       try {
-        best = route(graph!, from, to, preference, { vehicle: this.vehicle, ...when });
+        best = route(graph!, from, to, preference, { vehicle: this.vehicle, railway: this.options.railway, ...when });
         break;
       } catch (error) {
         failure = error;
@@ -256,7 +281,7 @@ export class RoadRouter {
     for (let pass = 0; pass < MAX_CONFIRMATION_PASSES; pass += 1) {
       if (!(await widen(reachFor(best)))) return { best, graphNow: () => graph!, widen, reachFor };
       try {
-        best = route(graph!, from, to, preference, { costBound: preference === "fastest" ? best.durationSeconds : best.distanceMeters, vehicle: this.vehicle, ...when });
+        best = route(graph!, from, to, preference, { costBound: preference === "fastest" ? best.durationSeconds : best.distanceMeters, vehicle: this.vehicle, railway: this.options.railway, ...when });
       } catch (error) {
         if ((error as { code?: string }).code !== "NO_ROUTE") throw error;
         return { best, graphNow: () => graph!, widen, reachFor }; // Nothing added beats what we have.
@@ -268,13 +293,13 @@ export class RoadRouter {
   private async routeOverLoader(loader: RouteLoader, from: Coordinate, to: Coordinate, preference: RoutePreference, when: DepartureOptions = {}) {
     const graph = await loader.loadForRoute(from, to);
     try {
-      return route(graph, from, to, preference, { vehicle: this.vehicle, ...when });
+      return route(graph, from, to, preference, { vehicle: this.vehicle, railway: this.options.railway, ...when });
     } catch (error) {
       if (!(error instanceof Error) || (error as { code?: string }).code !== "NO_ROUTE" || !loader.loadExpandedForRoute) throw error;
       // A straight geographic corridor may omit a tile holding a bridge, a
       // one-way detour, or a road around a physical obstacle. Retry once with
       // the immediate ring of neighbouring tiles before reporting no route.
-      return route(await loader.loadExpandedForRoute(from, to), from, to, preference, { vehicle: this.vehicle, ...when });
+      return route(await loader.loadExpandedForRoute(from, to), from, to, preference, { vehicle: this.vehicle, railway: this.options.railway, ...when });
     }
   }
 }

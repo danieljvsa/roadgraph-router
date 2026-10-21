@@ -4,6 +4,297 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-16
+
+### Fixed, after review of real Metro do Porto routes
+
+- **A railway route began in the depot.** Snapping took the nearest rail, and
+  every platform has a yard track or a crossover a few metres beside it: at
+  Trindade the yard is 4.6 m from the station node and the running line 6.7 m.
+  Routes started in the sidings and crossed out, which looks like a routing
+  fault and is really a snapping one. Service track now carries a 30 m penalty
+  when candidates are ranked — a preference, not a ban, so a point genuinely
+  inside a yard still snaps there.
+
+- **A route could be forced to leave in the wrong direction.** Two directed
+  edges within half a metre of the best were treated as the same road, which
+  is right for a carriageway carrying both directions at identical distance
+  and wrong for a railway, where the two directions are separate one-way
+  tracks several metres apart. Only the nearer was offered, so the journey had
+  to go that way: Trindade to Senhor de Matosinhos came back as 16.1 km
+  instead of 11.8. A graph that describes its track now uses a 25 m tolerance,
+  about the width of a station throat, so every platform track is offered and
+  the search takes the one the journey needs.
+
+  Both rules apply only where railway attributes are present; a road graph
+  snaps exactly as it did, which 30 road routes across three profiles confirm.
+
+- **A shortest route cut through the depot.** A siding is often the shortest
+  path between two parallel running lines, and nothing made it dearer: leaving
+  Trindade the route took 83 m of yard to change track, and ran 9.35 km of
+  sidings between Porto and Lisboa. Service track is now four times dearer for
+  a `shortest` search — a `fastest` one already prefers the running line,
+  because a siding is modelled at 25 km/h. The multiplier steers the search
+  and never reaches the answer. Dearer, not forbidden: where a siding is the
+  only way through it is still used.
+
+  Measured against the Linha A alignment as OSM maps it, Trindade to Senhor de
+  Matosinhos now deviates by a mean of 0.0 m and a worst of 3.0 m, with no
+  point more than 10 m off. Before, it ran through the yard and down a Linha D
+  platform, up to 31 m off.
+
+- **A station snap threw away every platform but one.** A snap that lands on a
+  junction is reported as that node, which suits a road and not a station: the
+  station node sits on one platform track and the others are separate ways
+  beside it. Thirty-six of Metro do Porto's forty-nine stations collapsed this
+  way, so a route could only leave in that one track's direction — Aliados to
+  Faria Guimarães, two stops apart on one line, was 7.4 km one way and 1.0 km
+  the other. Track keeps its projections now.
+
+- **A route reported the wrong end.** `originSnap.edge` named the nearest
+  candidate rather than the one the search actually entered on, and the
+  geometry started there too. The two were the same road whenever the only
+  candidates were the two directions of one carriageway, and stopped being
+  the same once a railway snap offered the other platforms — so a route that
+  left from the far platform said it left from the near one, and
+  `routeAlternatives` compared the wrong roads when judging whether two routes
+  were alike, discarding genuine alternatives.
+
+  Swept over real networks: Metro do Porto now follows the track its services
+  run over on **120 of 120** routes, Portugal's conventional railway on 149 of
+  150 and Ireland's on 144 of 150.
+
+### Fixed, in the release audit
+
+- **A railway signed below 5 km/h was routed at 5 km/h.** The floor that keeps
+  an *assumed* speed off zero was being applied to speeds the data states as
+  well, so a track tagged `maxspeed=3` was travelled at 5 — faster than the
+  limit, and arriving sooner than the track permits. A stated limit is now
+  used as stated, and only the profile's own ceiling may lower it. The floor
+  stays where it belongs, under an assumption.
+
+- **`--railway-include` would route over track that has been lifted.** The
+  inclusion list is typed, and a type constrains a TypeScript caller and
+  nothing at all at a command line, where the flag arrives as plain text.
+  `--railway-include abandoned,razed,construction` compiled all of them,
+  against a README that promised it could not. Inclusions are now checked at
+  run time and refused by name, with the reason: *railway class "abandoned"
+  cannot be routed over: the track has been lifted.*
+
+- **Malformed railway constraints are refused rather than read.** A
+  `{ gaugeMm: NaN }` compares false against every stated gauge, so reading it
+  would close the whole network and answer `NO_ROUTE` to what is really a
+  typo; `{ voltage: -25000 }` and a misspelled key fail the other way, by
+  applying nothing. `assertRailwayConstraints` now checks types, ranges,
+  list shapes and key names, and runs in `route()`, `routeAlternatives()` and
+  `RoadRouter.open` — the last before a byte is fetched.
+
+- **A region with no height or no width compiled to nothing.** A single line
+  of track at one latitude has a zero-height bounding box, which produced no
+  tile rows at all and failed with "Invalid routing bundle directory" — a
+  message about the output for a problem with the input. Such a region now
+  yields the one tile it should.
+
+- **`finishOnANearbyRoad` was documented on `route()` but refused by it.** The
+  README lists it among the things a single route may be told, and
+  `routeAlternatives` has always accepted it, being an `Omit` of the same
+  options. `RoadRouter.route` took a narrower `DepartureOptions` that left it
+  out, so it reached the search only by being spread past its own type: it
+  worked in JavaScript and failed to compile in TypeScript. `DepartureOptions`
+  now includes it. The vehicle, which the same table listed, has been taken
+  out of it instead — that one is settled when the router is opened and
+  changed with `asVehicle`, because a bundle reads different per-vehicle
+  chunks for each rather than searching the same graph twice.
+
+
+
+### Added
+
+- **Railway routing: `train` and `metro`.** Two profiles that route over
+  mapped railway infrastructure instead of roads, using the same compiler, the
+  same A\*, the same bundle format and the same `RoadRouter`.
+
+  ```bash
+  roadgraph-compile portugal.osm.pbf --output portugal-rail.efrb --profile train
+  roadgraph-compile porto.osm.pbf    --output porto-metro.efrb  --profile metro
+  ```
+
+  ```ts
+  const router = await RoadRouter.open("portugal-rail.efrb", undefined, { profile: "train" });
+  const result = await router.route(portoCampanha, lisboaSantaApolonia, "shortest");
+  // 336.0 km along the Linha do Norte
+  ```
+
+  There is no `RailRouter`, and no road behaviour changed. `train` is
+  `railway=rail`; `metro` is `railway=subway` and `railway=light_rail`
+  together, because Lisbon's system is tagged the first way and Porto's the
+  second, and a profile holding one of them would miss a network.
+
+  **A railway route here is a path through mapped physical infrastructure. It
+  does not establish that passenger services exist, that the track is
+  currently operational, or that a real train is authorised or physically
+  capable of using the calculated path.** There is no GTFS, no timetable, no
+  passenger journey, no arrival time and no signalling model.
+
+- **What the track is, carried into the bundle and applied at routing time.**
+  `gauge`, `electrified`, `voltage`, `frequency`, `usage` and `service` are
+  read off each way and stored, and a route says what the train can run on:
+
+  ```ts
+  const result = await router.route(origin, destination, "shortest", {
+    railway: { gaugeMm: 1668, requireElectrification: true },
+  });
+  ```
+
+  Portugal's main line is 1,668 mm Iberian gauge, so Porto to Lisboa returns
+  336.0 km under `{ gaugeMm: 1668 }` and `NO_ROUTE` under `{ gaugeMm: 1435 }`.
+  Constraints narrow the same access mask the vehicle and the departure time
+  narrow, so the search and the snapping agree about which track is usable.
+
+  **The policy for a missing tag is stated and enforced:** a constraint
+  excludes a track only where the track's own tags contradict it. OSM silence
+  is an absent survey, not a statement of incompatibility, and excluding every
+  unstated track would reduce most networks to nothing. That permissiveness is
+  never reported as compatibility. Every railway route carries the answer on
+  the result itself, as `result.railway`: how many metres ran on track that
+  stated every constrained attribute and how many did not, which attributes
+  were missing, how far it ran over service track, and every distinct gauge it
+  crossed. A road route has no such field and a railway route always has one,
+  including one over track that states nothing, which reports itself as
+  entirely unstated — so the field's absence means one thing only.
+
+  `strictUnknown: true` reverses the default for a caller who would rather
+  have no route than an unverified one, and holds for a whole graph as well as
+  for one track: a railway bundle whose tracks describe nothing is closed
+  entirely rather than quietly accepted.
+
+- **An inclusion policy for track that is arguably track.** `disused` is
+  excluded by default and available as an explicit opt-in: the rails are
+  there, but nothing has run over them and OSM does not say whether anything
+  could. `narrow_gauge`, `tram`, `monorail` and `funicular` are opt-in for the
+  same reason — they are real infrastructure that a given vehicle cannot
+  necessarily use.
+
+  ```bash
+  roadgraph-compile portugal.osm.pbf --output rail.efrb --profile train \
+    --railway-include disused,narrow_gauge
+  ```
+
+  `abandoned`, `razed`, `dismantled`, `demolished`, `proposed` and
+  `construction` are excluded and are **not** opt-in. Inclusion is an
+  allowlist of `railway=` values rather than a denylist, because the key
+  carries dozens of values that are not track at all — `platform`, `station`,
+  `turntable`, `ventilation_shaft` — and a denylist would route trains along
+  station platforms the first time OSM invented a new value.
+
+- **A railway section in the v7 profile chunk.** Shaped the other way round
+  from the sparse limit and condition tables beside it, because nearly every
+  railway edge states something and a whole line states the same thing: a
+  dictionary of the distinct combinations plus one 16-bit row index per edge.
+  All of Portugal's `railway=rail` network collapses onto **20 distinct rows**
+  across 25,569 edges, and its metro onto 11. The section costs 2.08 bytes per
+  edge raw and **0.31 bytes per edge gzipped** — 7.9 kB for every railway edge
+  in Portugal.
+
+  Gauge, voltage and frequency each keep a *second* stated value, because a
+  dual-gauge or changeover track really does state two and a train matching
+  either can run over it — `gauge=1000;1668` on Portuguese track,
+  `frequency=0;16.7` on 176 Swiss ways.
+
+### Changed
+
+- **A bundle holds one network.** `--profile car,train` is refused with an
+  explanation rather than obeyed, so railway geometry never lands in a road
+  bundle and no road-routing user downloads track. Two *railway* profiles may
+  share a bundle, because they genuinely share topology:
+  `--profile train,metro` holds 26,052 edges on Portugal against the 23,273
+  and 2,777 of the two separate bundles, and the same 12,413 nodes. The two
+  extra edges are the two places in Portugal where a light-rail way runs
+  through the end of a rail way: a junction once both are compiled, and a node
+  simplified away when the metro is compiled alone. Nothing was merged and
+  nothing duplicated. The two networks stay separate inside the bundle,
+  because an edge belongs to one of them and the other profile's access mask
+  closes it.
+
+- **A profile now says which network it travels over.** `RoutingProfile` gains
+  `networkKind: "road" | "railway"`, and the shared profile vocabulary moved
+  to `./profile-types`, re-exported unchanged from `./routing-profile`.
+
+### Fixed
+
+- **A stitched corridor kept its track description.** `mergeRoadGraphs`
+  rebases access, limits, conditions and turn restrictions onto the merged
+  edge numbering, and railway attributes were not among them — so on any route
+  long enough to span more than one tile, every railway constraint was
+  silently vacuous. Found by routing Porto to Lisboa with a standard-gauge
+  constraint and getting the Iberian-gauge main line back. Now rebased with
+  the rest, and pinned by a test that compiles a multi-tile railway extract
+  and asserts the constraint still bites.
+
+### Railway topology
+
+Connectivity comes from one thing: two ways sharing an OSM node. That is the
+compiler's existing rule and it is the right one, so no railway-specific
+topology code was added — but it is now covered by tests that run the real
+compiler over real PBF files rather than over a reimplementation of it. Two
+tracks crossing on the map without a shared node are not joined; a bridge and
+the line beneath it are not joined; parallel tracks stay separate until a
+mapped crossover joins them; a dead-end spur is routable to its end and not
+beyond; disconnected networks report `NO_ROUTE`. No switch or junction is ever
+invented.
+
+In the whole Portugal extract exactly **4 nodes** are shared between two
+different classes of railway, and **0** are places where `railway=rail`
+changes gauge. The networks really are separate in the data.
+
+`oneway=yes` and `oneway=-1` are the only things that restrict a track to one
+direction — 906 of the 1,139 Metro do Porto `light_rail` ways carry one, so
+assuming bidirectional running would route trains the wrong way down most of
+that network. `railway:preferred_direction` is deliberately not read: it
+describes how trains are normally run, not what the track permits.
+
+### Cost
+
+Railways add **5.7 kB gzipped** to a browser application that imports only the
+road API — 20.2 kB on 0.3.0 against 25.9 kB on 0.4.0, both bundled by the same
+esbuild from each release's published entry point. The whole public surface
+goes from 25.2 kB to 31.5 kB. It is not tree-shakeable: `routingProfiles`
+names every profile and `route()` reaches the constraint and certainty modules
+directly. The published bundle needs no Node built-ins, runtime dependencies
+are unchanged, and `npm audit --omit=dev` reports no vulnerabilities.
+
+### Compatibility
+
+**A road bundle compiled by 0.4.0 is byte for byte the file 0.3.0 wrote**, and
+a 0.3.0 reader opens it. The railway section lives in four header bytes of the
+profile chunk that no chunk had ever written, and a road chunk leaves them
+zero. This is pinned by a test holding the hashes 0.3.0 produced for all five
+chunk layouts — packed v6, legacy v5, shared v7, a car profile chunk and a
+truck profile chunk — not a snapshot of the current code.
+
+A 0.3.0 reader handed a *railway* bundle refuses it by name rather than
+routing with the wrong rules: `This routing bundle was compiled for a profile
+this build does not support (id 6).` Profile ids 6 and 7 are new and no
+existing id moved.
+
+### Measured
+
+Portugal, `portugal-latest.osm.pbf` at 425 MB, on one machine:
+
+| | `train` | `metro` | `train,metro` | `car`, for scale |
+| --- | --- | --- | --- | --- |
+| Bundle | 293.9 kB | 39.7 kB | 373.4 kB | 38.04 MB |
+| Compile time | 1m 18s | 1m 07s | 1m 14s | 8m 02s |
+| Peak compile memory | 0.3–0.6 GB | 0.3–0.5 GB | 0.5 GB | 1.47 GB |
+| Routing edges | 23,273 | 2,777 | 26,052 | 2,759,810 |
+
+Porto Campanhã to Lisboa Santa Apolónia is 336.0 km over 22 range requests
+and 265 kB, 89 ms cold and 4.2 ms warm. Metro do Porto's Linha A is 11.8 km
+out of a 17.3 kB bundle. The distances check against the real network — the
+Linha do Norte between those stations is about 336 km, Linha A about 12 — and
+the *durations* do not, by design: they are line-speed estimates and are
+optimistic against every real timetable.
+
 ## [0.3.0] - 2026-10-15
 
 ### Added

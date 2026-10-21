@@ -1,4 +1,4 @@
-import type { EdgeConditions, EdgeLimits, ProfileChunk, RoadGraph, SharedRoadGraph } from "./types";
+import type { EdgeConditions, EdgeLimits, EdgeRailway, ProfileChunk, RoadGraph, SharedRoadGraph } from "./types";
 import { allowsEverything } from "./access";
 import { VarintReader, VarintWriter } from "./varint";
 import { getRoutingProfileById } from "./routing-profile";
@@ -280,6 +280,56 @@ function assertEdgeConditions(conditions: EdgeConditions, edges: number) {
     if (conditions.rules[index] >= conditions.values.length) throw new Error("Edge condition names a value that is not in the table.");
   }
   if (conditions.values.some((value) => value.includes("\0"))) throw new Error("A conditional value cannot contain a null byte.");
+}
+
+/**
+ * The railway table is a dictionary of distinct rows plus one index per edge,
+ * which is the opposite shape to the sparse side tables above and is the right
+ * one here: nearly every railway edge states something, and a whole line
+ * states the same thing. Nine columns, four of them sixteen bits wide: gauge,
+ * voltage and frequency each keep a second stated value, because a dual-gauge
+ * or multi-system track really does state two and a train matching either can
+ * run over it.
+ */
+const RAILWAY_ROW_BYTES = 13;
+
+function assertEdgeRailway(railway: EdgeRailway, edges: number) {
+  const rows = railway.gaugeMm.length;
+  if (railway.secondGaugeMm.length !== rows || railway.voltage.length !== rows || railway.secondVoltage.length !== rows
+    || railway.electrification.length !== rows || railway.frequency.length !== rows || railway.secondFrequency.length !== rows
+    || railway.usage.length !== rows || railway.service.length !== rows) {
+    throw new Error("Railway attribute columns must all be the same length.");
+  }
+  if (railway.edgeRows.length !== edges) throw new Error("Railway attributes must name a row for every edge.");
+  for (let edge = 0; edge < edges; edge += 1) {
+    if (railway.edgeRows[edge] >= rows) throw new Error("Railway attributes name a row that is not in the table.");
+  }
+}
+
+function writeEdgeRailway(buffer: ArrayBuffer, at: number, railway: EdgeRailway, edges: number, rows: number) {
+  new Uint16Array(buffer, at, edges).set(railway.edgeRows);
+  let offset = at + edges * 2;
+  for (const column of [railway.gaugeMm, railway.secondGaugeMm, railway.voltage, railway.secondVoltage]) {
+    new Uint16Array(buffer, offset, rows).set(column);
+    offset += rows * 2;
+  }
+  for (const column of [railway.electrification, railway.frequency, railway.secondFrequency, railway.usage, railway.service]) {
+    new Uint8Array(buffer, offset, rows).set(column);
+    offset += rows;
+  }
+}
+
+function readEdgeRailway(buffer: ArrayBuffer, at: number, edges: number, rows: number): EdgeRailway {
+  const edgeRows = new Uint16Array(buffer.slice(at, at + edges * 2));
+  for (let edge = 0; edge < edges; edge += 1) {
+    if (edgeRows[edge] >= rows) throw new Error("Invalid routing profile chunk: railway attributes name a row that is not in the table.");
+  }
+  let offset = at + edges * 2;
+  const wide = () => { const column = new Uint16Array(buffer.slice(offset, offset + rows * 2)); offset += rows * 2; return column; };
+  const narrow = () => { const column = new Uint8Array(buffer.slice(offset, offset + rows)); offset += rows; return column; };
+  const gaugeMm = wide(), secondGaugeMm = wide(), voltage = wide(), secondVoltage = wide();
+  const electrification = narrow(), frequency = narrow(), secondFrequency = narrow();
+  return { edgeRows, gaugeMm, secondGaugeMm, voltage, secondVoltage, electrification, frequency, secondFrequency, usage: narrow(), service: narrow() };
 }
 
 /** Reads a conditional table that says its own size, as a graph chunk writes it. */
@@ -665,7 +715,19 @@ export function encodeProfileChunk(chunk: ProfileChunk): ArrayBuffer {
   const conditionText = conditions ? new TextEncoder().encode(conditions.values.join("\0")) : undefined;
   const conditionsAt = alignUp(limitsEnd);
   const conditionTextAt = alignUp(conditionsAt + conditionRows * 7);
-  const buffer = new ArrayBuffer(conditionRows ? conditionTextAt + (conditionText?.byteLength ?? 0) : limitsEnd);
+  const conditionsEnd = conditionRows ? conditionTextAt + (conditionText?.byteLength ?? 0) : limitsEnd;
+
+  // What the track is, for a railway profile. Bytes 40-43 of this header were
+  // never written by any chunk published so far, and a chunk that never set
+  // them reads back as zero rows — which is exactly "this is a road vehicle,
+  // it has no track to describe" — so every existing bundle is unchanged.
+  const railway = chunk.edgeRailway?.gaugeMm.length ? chunk.edgeRailway : undefined;
+  if (railway) assertEdgeRailway(railway, edges);
+  const railwayRows = railway?.gaugeMm.length ?? 0;
+  const railwayAt = alignUp(conditionsEnd);
+  const railwayEnd = railwayRows ? railwayAt + edges * 2 + railwayRows * RAILWAY_ROW_BYTES : conditionsEnd;
+
+  const buffer = new ArrayBuffer(railwayEnd);
   const view = new DataView(buffer);
   view.setUint32(0, COMPACT_MAGIC, true);
   view.setUint16(4, SPLIT_COMPACT_VERSION, true);
@@ -680,6 +742,7 @@ export function encodeProfileChunk(chunk: ProfileChunk): ArrayBuffer {
   view.setUint32(28, turns?.byteLength ?? 0, true);
   view.setUint32(32, conditionRows, true);
   view.setUint32(36, conditionText?.byteLength ?? 0, true);
+  view.setUint32(40, railwayRows, true);
   new Uint16Array(buffer, PROFILE_CHUNK_HEADER_BYTES, edges).set(chunk.edgeDurationsSeconds);
   if (mask) new Uint8Array(buffer, PROFILE_CHUNK_HEADER_BYTES + edges * 2, mask.byteLength).set(mask);
   if (turns) new Uint8Array(buffer, PROFILE_CHUNK_HEADER_BYTES + edges * 2 + (mask?.byteLength ?? 0), turns.byteLength).set(turns);
@@ -697,6 +760,7 @@ export function encodeProfileChunk(chunk: ProfileChunk): ArrayBuffer {
     new Uint8Array(buffer, conditionsAt + conditionRows * 6, conditionRows).set(conditions.kinds);
     new Uint8Array(buffer, conditionTextAt, conditionText.byteLength).set(conditionText);
   }
+  if (railway && railwayRows) writeEdgeRailway(buffer, railwayAt, railway, edges, railwayRows);
   return buffer;
 }
 
@@ -717,6 +781,8 @@ export function decodeProfileChunk(buffer: ArrayBuffer): ProfileChunk {
   // Zero in every chunk written before conditional restrictions existed.
   const conditionRows = view.getUint32(32, true);
   const conditionTextBytes = view.getUint32(36, true);
+  // Zero in every chunk written before railway profiles existed.
+  const railwayRows = view.getUint32(40, true);
   if (!profileId || !getRoutingProfileById(profileId)) throw new Error(`Routing graph was compiled for an unsupported profile (id ${profileId}).`);
   if (!edgeDurationScale) throw new Error("Invalid routing profile chunk: zero duration scale.");
   if (maxSpeedKph > MAX_PLAUSIBLE_SPEED_KPH) throw new Error("Invalid routing profile chunk: implausible profile speed ceiling.");
@@ -727,7 +793,9 @@ export function decodeProfileChunk(buffer: ArrayBuffer): ProfileChunk {
   const limitsEnd = limitRows ? limitsAt + limitRows * 8 : variableAt;
   const conditionsAt = alignUp(limitsEnd);
   const conditionTextAt = alignUp(conditionsAt + conditionRows * 7);
-  const expected = conditionRows ? conditionTextAt + conditionTextBytes : limitsEnd;
+  const conditionsEnd = conditionRows ? conditionTextAt + conditionTextBytes : limitsEnd;
+  const railwayAt = alignUp(conditionsEnd);
+  const expected = railwayRows ? railwayAt + edges * 2 + railwayRows * RAILWAY_ROW_BYTES : conditionsEnd;
   if (limitRows > edges) throw new Error("Invalid routing profile chunk: more limits than edges.");
   if (conditionRows && !conditionTextBytes) throw new Error("Invalid routing profile chunk: conditions with no values.");
   if (buffer.byteLength !== expected) throw new Error("Truncated routing profile chunk");
@@ -776,6 +844,7 @@ export function decodeProfileChunk(buffer: ArrayBuffer): ProfileChunk {
     ...(turnMaskBytes ? { restrictionMask: new Uint8Array(buffer.slice(PROFILE_CHUNK_HEADER_BYTES + edges * 2 + maskBytes, variableAt)) } : {}),
     ...(edgeLimits ? { edgeLimits } : {}),
     ...(edgeConditions ? { edgeConditions } : {}),
+    ...(railwayRows ? { edgeRailway: readEdgeRailway(buffer, railwayAt, edges, railwayRows) } : {}),
   };
 }
 
@@ -807,6 +876,7 @@ export function combineProfiledGraph(shared: SharedRoadGraph, profile: ProfileCh
     ...(profile.edgeAccess ? { edgeAccess: profile.edgeAccess } : {}),
     ...(profile.edgeLimits ? { edgeLimits: profile.edgeLimits } : {}),
     ...(profile.edgeConditions ? { edgeConditions: profile.edgeConditions } : {}),
+    ...(profile.edgeRailway ? { edgeRailway: profile.edgeRailway } : {}),
     ...(profile.restrictionMask ? { restrictionMask: profile.restrictionMask } : {}),
   };
 }
