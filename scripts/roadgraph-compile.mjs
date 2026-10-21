@@ -87,6 +87,7 @@ function createTileGraph(tile, profileCount) {
     edgeUsable: perProfile(() => new Column(Uint8Array)),
     // Sparse: almost no road states a height or a weight.
     edgeLimits: perProfile(() => new Map()),
+    edgeConditions: perProfile(() => []),
     restrictions: perProfile(() => []),
     runs: perProfile(() => []),
   };
@@ -218,10 +219,20 @@ function encodeEfr2(graph, library, profiles) {
   };
 
   const split = profiles.length > 1 || profiles.some((entry) => entry.usesPhysicalLimits);
-  if (!split) return { shared: library.encodeCompactGraph(assembled), profiles: [], limitedEdges: 0 };
+  if (!split) {
+    // One vehicle writes one chunk, and that chunk is its whole graph, so the
+    // conditional restrictions belong in it. Without this a bundle compiled
+    // for a single vehicle would read as though no road were ever shut.
+    const onlyConditions = library.packEdgeConditions(
+      graph.edgeConditions[0].map((row) => ({ ...row, edge: placement[row.edge] })),
+    );
+    const encoded = library.encodeCompactGraph(onlyConditions ? { ...assembled, edgeConditions: onlyConditions } : assembled);
+    return { shared: encoded, profiles: [], limitedEdges: 0, conditionalEdges: onlyConditions?.edges.length ?? 0 };
+  }
 
   const restrictionCount = banned.length + runs.length;
   let limitedEdges = 0;
+  let conditionalEdges = 0;
   const chunks = profiles.map((entry, profileIndex) => {
     const usable = graph.edgeUsable[profileIndex].view();
     // `placement` maps a built edge to its stored position, so the mask is
@@ -233,6 +244,10 @@ function encodeEfr2(graph, library, profiles) {
     for (const [edge, limits] of graph.edgeLimits[profileIndex]) entries.push({ edge: placement[edge], limits });
     const edgeLimits = library.packEdgeLimits(entries);
     limitedEdges += edgeLimits?.edges.length ?? 0;
+    const edgeConditions = library.packEdgeConditions(
+      graph.edgeConditions[profileIndex].map((row) => ({ ...row, edge: placement[row.edge] })),
+    );
+    conditionalEdges += edgeConditions?.edges.length ?? 0;
     const restrictionMask = library.accessMaskFor(restrictionCount, (index) => index < banned.length
       ? pairOwners[pairOrder[index]].has(profileIndex)
       : runOwners[runOrder[index - banned.length]].has(profileIndex));
@@ -242,11 +257,12 @@ function encodeEfr2(graph, library, profiles) {
       edgeDurationScale: durationScales[profileIndex],
       edgeDurationsSeconds: durationColumns[profileIndex],
       edgeAccess,
+      ...(edgeConditions ? { edgeConditions } : {}),
       ...(edgeLimits ? { edgeLimits } : {}),
       ...(restrictionCount ? { restrictionCount, restrictionMask } : {}),
     });
   });
-  return { shared: library.encodeSharedGraph(assembled), profiles: chunks, limitedEdges };
+  return { shared: library.encodeSharedGraph(assembled), profiles: chunks, limitedEdges, conditionalEdges };
 }
 
 /** Writes the fixed-size directory, then streams each chunk straight from the
@@ -314,7 +330,7 @@ function memoryGuard(limitBytes, label, count) { if (count % 1_000 !== 0) return
 async function firstPass(file, roadFile, limitBytes, profiles) {
   const required = approximateIds(), keeperNodes = approximateIds(), stream = createWriteStream(roadFile), bounds = { minLat: Infinity, minLon: Infinity, maxLat: -Infinity, maxLon: -Infinity };
   const restrictions = [], restrictionWays = new Set(), barriers = [];
-  let ways = 0, entities = 0, skippedRestrictions = 0, barrierCount = 0;
+  let ways = 0, entities = 0, skippedRestrictions = 0, barrierCount = 0, conditionalRestrictions = 0;
   // One pass serves every vehicle: the reader is asked for the union of the
   // tags they read, and each way is offered to all of them.
   const wayTags = [...new Set(profiles.flatMap((entry) => entry.wayTagKeys))];
@@ -347,6 +363,10 @@ async function firstPass(file, roadFile, limitBytes, profiles) {
       const perProfile = profiles.map((entry) => entry.evaluateTurnRestriction(entity.tags ?? {}));
       const parsed = perProfile.find(Boolean) ?? null;
       if (!parsed) continue;
+      // A turn banned only at certain hours is banned at every hour here.
+      // Counting them says how much of a region that costs rather than
+      // leaving it to be discovered: in Portugal it is 1 relation in 26,599.
+      if (Object.keys(entity.tags ?? {}).some((key) => key.endsWith(":conditional"))) conditionalRestrictions += 1;
       const members = entity.members ?? [];
       const from = members.find((member) => member.role === "from" && member.type === "way");
       const to = members.find((member) => member.role === "to" && member.type === "way");
@@ -378,8 +398,8 @@ async function firstPass(file, roadFile, limitBytes, profiles) {
     keeperNodes.add(refs[0]); keeperNodes.add(refs[refs.length - 1]);
     await write(stream, {
       id: entity.id, refs,
-      forward: lanes.map((lane) => lane?.forward ? { speed: lane.forwardSpeedKph, limits: lane.forwardLimits ?? null } : null),
-      reverse: lanes.map((lane) => lane?.backward ? { speed: lane.backwardSpeedKph, limits: lane.backwardLimits ?? null } : null),
+      forward: lanes.map((lane) => lane?.forward ? { speed: lane.forwardSpeedKph, limits: lane.forwardLimits ?? null, conditions: lane.conditions ?? null } : null),
+      reverse: lanes.map((lane) => lane?.backward ? { speed: lane.backwardSpeedKph, limits: lane.backwardLimits ?? null, conditions: lane.conditions ?? null } : null),
     });
   }
   await new Promise((resolve, reject) => stream.end((error) => error ? reject(error) : resolve()));
@@ -390,7 +410,7 @@ async function firstPass(file, roadFile, limitBytes, profiles) {
   // A barrier can only matter where a road passes through it, and the node
   // has to survive simplification for the ban to have edges to name.
   for (const blocked of barriers) { if (blocked) for (const id of blocked) if (required.has(id)) keeperNodes.add(id); }
-  return { required, keeperNodes, bounds, ways, restrictions: usable, restrictionWays, skippedRestrictions, barriers, barrierCount };
+  return { required, keeperNodes, bounds, ways, restrictions: usable, restrictionWays, skippedRestrictions, conditionalRestrictions, barriers, barrierCount };
 }
 
 async function secondPass(file, required, limitBytes, databasePath) {
@@ -522,6 +542,7 @@ async function build(roadFile, coordinates, topology, layout, bounds, tolerance,
         graph.edgeDurations[profileIndex].push(distance / (speed * (1000 / 3600)));
         graph.edgeUsable[profileIndex].push(lane ? 1 : 0);
         if (lane?.limits) graph.edgeLimits[profileIndex].set(index, lane.limits);
+        if (lane?.conditions) for (const condition of lane.conditions) graph.edgeConditions[profileIndex].push({ edge: index, ...condition });
       }
       graph.edgeWay.push(tracked ? wayId : 0);
       graph.edgeShapeStart.push(graph.shapeLat.length);
@@ -638,12 +659,14 @@ else {
     // so peak memory tracks the largest single tile rather than the region.
     const spillPath = resolve(workspace, "chunks.bin"), spill = createWriteStream(spillPath), chunks = [];
     let limitedEdges = 0;
+    let conditionalEdges = 0;
     for (let index = 0; index < built.graphs.length; index += 1) {
       const graph = built.graphs[index];
       const encoded = encodeEfr2(graph, library, profiles);
       // The shared half first, then each vehicle's: the reader needs a tile's
       // shared row before the rows that depend on it.
       limitedEdges += encoded.limitedEdges ?? 0;
+      conditionalEdges += encoded.conditionalEdges ?? 0;
       for (const [profileId, buffer] of [[0, encoded.shared], ...encoded.profiles.map((chunk, at) => [profiles[at].id, chunk])]) {
         const raw = new Uint8Array(buffer);
         const data = compression === "gzip" ? gzipSync(raw, { level: constants.Z_BEST_COMPRESSION }) : raw;
@@ -658,7 +681,7 @@ else {
     const bundleBytes = await writeBundle(output, chunks, compression, spillPath, profiles, split, defaultVehicle, library.VehiclePresetId);
     await verifyBundle(output, built.graphs.length);
     const nodesBefore = storedNodes, nodesAfter = built.routingNodes, edges = built.routingEdges, rawBytes = chunks.reduce((sum, chunk) => sum + chunk.rawBytes, 0);
-    const report = { formatVersion: 1, input: file, inputBytes: source.size, profile: profiles.map((entry) => entry.name).join(","), compression: `${compression}-per-tile`, tileSizeKm, paddingKm, pbfPasses: 2, tiles: built.graphs.length, relevantOsmWays: first.ways, relevantOsmNodes, relevantOsmNodesExact: false, routingNodesBeforeSimplification: nodesBefore, routingNodesAfterSimplification: nodesAfter, reductionPercent: Number((100 * (1 - nodesAfter / Math.max(1, nodesBefore))).toFixed(2)), routingEdges: edges, turnRestrictionsRead: first.restrictions.length, turnRestrictionsSkipped: first.skippedRestrictions, barriersRead: first.barrierCount, barrierBans: built.barrierBans, bannedTurnPairs: built.bannedTurns, bannedTurnRuns: built.bannedRuns, layout: split ? "shared-plus-profile" : "single-chunk", profiles: profiles.map((entry) => entry.name), defaultVehicle: defaultVehicle ?? null, edgesWithPhysicalLimits: limitedEdges, uncompressedGraphBytes: rawBytes, bundleBytes, compressionRatio: Number((bundleBytes / Math.max(1, rawBytes)).toFixed(4)), peakRssBytes: Math.max(observedPeakRss, process.memoryUsage().rss), elapsedMilliseconds: Math.round(performance.now() - started) };
+    const report = { formatVersion: 1, input: file, inputBytes: source.size, profile: profiles.map((entry) => entry.name).join(","), compression: `${compression}-per-tile`, tileSizeKm, paddingKm, pbfPasses: 2, tiles: built.graphs.length, relevantOsmWays: first.ways, relevantOsmNodes, relevantOsmNodesExact: false, routingNodesBeforeSimplification: nodesBefore, routingNodesAfterSimplification: nodesAfter, reductionPercent: Number((100 * (1 - nodesAfter / Math.max(1, nodesBefore))).toFixed(2)), routingEdges: edges, turnRestrictionsRead: first.restrictions.length, turnRestrictionsSkipped: first.skippedRestrictions, conditionalTurnRestrictionsIgnored: first.conditionalRestrictions, barriersRead: first.barrierCount, barrierBans: built.barrierBans, bannedTurnPairs: built.bannedTurns, bannedTurnRuns: built.bannedRuns, layout: split ? "shared-plus-profile" : "single-chunk", profiles: profiles.map((entry) => entry.name), defaultVehicle: defaultVehicle ?? null, edgesWithPhysicalLimits: limitedEdges, edgesWithConditionalRestrictions: conditionalEdges, uncompressedGraphBytes: rawBytes, bundleBytes, compressionRatio: Number((bundleBytes / Math.max(1, rawBytes)).toFixed(4)), peakRssBytes: Math.max(observedPeakRss, process.memoryUsage().rss), elapsedMilliseconds: Math.round(performance.now() - started) };
     await writeFile(`${output}.json`, `${JSON.stringify(report, null, 2)}\n`);
     console.table({ input_mb: (source.size / 1e6).toFixed(1), pbf_passes: report.pbfPasses, relevant_ways: first.ways.toLocaleString(), relevant_nodes: relevantOsmNodes.toLocaleString(), nodes_before: nodesBefore.toLocaleString(), nodes_after: nodesAfter.toLocaleString(), reduction_percent: report.reductionPercent, routing_edges: edges.toLocaleString(), turn_restrictions: first.restrictions.length.toLocaleString(), barriers: first.barrierCount.toLocaleString(), banned_turn_pairs: built.bannedTurns.toLocaleString(), banned_turn_runs: built.bannedRuns.toLocaleString(), tiles: built.graphs.length, raw_mb: (rawBytes / 1e6).toFixed(1), efrb_mb: (bundleBytes / 1e6).toFixed(1), compression_ratio: report.compressionRatio, peak_rss_mb: (report.peakRssBytes / 1e6).toFixed(1), elapsed_seconds: (report.elapsedMilliseconds / 1000).toFixed(1) });
   } catch (error) {

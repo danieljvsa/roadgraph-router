@@ -1,10 +1,12 @@
 import { decodeGraph } from "./codec";
-import { route } from "./router";
+import { route, type RouteOptions } from "./router";
 import type { Coordinate, RoadGraph, RoutePreference } from "./types";
 
 type WorkerRequest =
   | { id: number; type: "load"; graph: ArrayBuffer }
-  | { id: number; type: "route"; from: Coordinate; to: Coordinate; preference?: RoutePreference };
+  // `departAt` crosses the worker boundary as a `Date` or as the plain parts,
+  // both of which survive a structured clone.
+  | { id: number; type: "route"; from: Coordinate; to: Coordinate; preference?: RoutePreference; departAt?: RouteOptions["departAt"]; publicHoliday?: boolean };
 
 let graph: RoadGraph | null = null;
 
@@ -16,7 +18,7 @@ self.onmessage = ({ data }: MessageEvent<WorkerRequest>) => {
       return;
     }
     if (!graph) throw new Error("Load a routing graph before requesting a route.");
-    self.postMessage({ id: data.id, ok: true, route: route(graph, data.from, data.to, data.preference) });
+    self.postMessage({ id: data.id, ok: true, route: route(graph, data.from, data.to, data.preference, { departAt: data.departAt, publicHoliday: data.publicHoliday }) });
   } catch (error) {
     self.postMessage({ id: data.id, ok: false, error: error instanceof Error ? error.message : "Routing failed" });
   }

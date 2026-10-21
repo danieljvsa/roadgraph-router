@@ -5,10 +5,21 @@
  * and lets the rules be unit-tested without a PBF file.
  */
 
+import { ConditionKind } from "./conditional";
+import { parseMaxSpeedKph } from "./speed";
+
+export { parseMaxSpeedKph };
+
 export type OsmTags = Record<string, string | undefined>;
 
 /** How a profile may traverse one OSM way. */
 export type WayTraversal = {
+  /**
+   * Conditional restrictions tagged on the way, kept as written for the
+   * router to evaluate against a departure time. They apply to both
+   * directions: OSM states these per vehicle class, not per direction.
+   */
+  conditions?: { kind: number; value: string }[];
   /** Travel from the first node reference towards the last is allowed. */
   forward: boolean;
   /** Travel from the last node reference towards the first is allowed. */
@@ -202,18 +213,7 @@ function clampSpeed(value: number) {
  * `none`, `signals` and `variable` included — so the caller can fall back to a
  * class default instead of inventing a country-specific table.
  */
-export function parseMaxSpeedKph(value: string | undefined): number | null {
-  if (!value) return null;
-  const text = value.trim().toLowerCase();
-  if (text === "walk") return 7;
-  const match = /^(\d+(?:\.\d+)?)\s*(mph|km\/h|kmh|kph|knots)?$/.exec(text);
-  if (!match) return null;
-  const amount = Number(match[1]);
-  if (!Number.isFinite(amount) || amount <= 0) return null;
-  if (match[2] === "mph") return amount * 1.609344;
-  if (match[2] === "knots") return amount * 1.852;
-  return amount;
-}
+
 
 /** Values that are not a measurement: a sign exists, or does not, but neither states a number. */
 const UNMEASURED = new Set(["default", "below_default", "none", "unsigned", "no_sign", "no", "yes", "unknown"]);
@@ -280,6 +280,31 @@ function limitsFor(tags: OsmTags, mode: string, direction: "forward" | "backward
   return found ? limits : undefined;
 }
 
+/**
+ * The conditional restrictions on a way that this vehicle must obey.
+ *
+ * Access follows the same ladder as the plain tags, where the most specific
+ * key present wins: `hgv:conditional` answers for a lorry even where
+ * `access:conditional` says otherwise. Only one access rule is kept, because a
+ * more specific key replaces a less specific one rather than adding to it.
+ */
+function conditionsFor(tags: OsmTags, accessKeys: readonly string[], speedKeys: readonly string[]) {
+  const found: { kind: number; value: string }[] = [];
+  let access: string | undefined;
+  for (const key of accessKeys) {
+    const value = tags[`${key}:conditional`];
+    if (value !== undefined) access = value;
+  }
+  if (access) found.push({ kind: ConditionKind.access, value: access });
+  let speed: string | undefined;
+  for (const key of speedKeys) {
+    const value = tags[`${key}:conditional`];
+    if (value !== undefined) speed = value;
+  }
+  if (speed) found.push({ kind: ConditionKind.maxspeed, value: speed });
+  return found.length ? found : undefined;
+}
+
 /** Resolves the OSM access hierarchy, where the most specific tag present wins. */
 function accessAllowed(tags: OsmTags, keys: readonly string[]) {
   let allowed = true;
@@ -336,9 +361,12 @@ function motorVehicleProfile(options: { name: string; id: ProfileId; mode: strin
     wayTagKeys: [
       "highway", "junction", "maxspeed", "maxspeed:forward", "maxspeed:backward", `maxspeed:${mode}`,
       ...accessKeys, ...onewayKeys,
+      // The conditional forms of the same keys, which the router reads against
+      // a departure time rather than the compiler against nothing.
+      ...accessKeys.map((key) => `${key}:conditional`), "maxspeed:conditional", `maxspeed:${mode}:conditional`,
       ...(options.physicalLimits ? LIMIT_KEYS.flatMap(([, key]) => [key, `${key}:${mode}`, `${key}:forward`, `${key}:backward`, ...(key === "maxheight" || key === "maxwidth" ? [`${key}:physical`] : [])]) : []),
     ],
-    relationTagKeys: ["type", "except", ...restrictionKeys],
+    relationTagKeys: ["type", "except", ...restrictionKeys, ...restrictionKeys.map((key) => `${key}:conditional`)],
     maxSpeedKph: ceiling,
     nodeTagKeys: BARRIER_TAG_KEYS,
     evaluateBarrier: (tags) => barrierAllows(tags, accessKeys, "motor"),
@@ -363,6 +391,7 @@ function motorVehicleProfile(options: { name: string; id: ProfileId; mode: strin
           forwardLimits: limitsFor(tags, mode, "forward"),
           backwardLimits: limitsFor(tags, mode, "backward"),
         } : {}),
+        ...((conditions) => conditions ? { conditions } : {})(conditionsFor(tags, accessKeys, ["maxspeed", `maxspeed:${mode}`])),
       };
     },
 
@@ -500,8 +529,11 @@ function activeTravelProfile(options: {
   return {
     name,
     id,
-    wayTagKeys: ["highway", "junction", "maxspeed", ...accessKeys, "oneway", ...onewayKeys],
-    relationTagKeys: ["type", "except", ...restrictionKeys],
+    wayTagKeys: [
+      "highway", "junction", "maxspeed", ...accessKeys, "oneway", ...onewayKeys,
+      ...accessKeys.map((key) => `${key}:conditional`),
+    ],
+    relationTagKeys: ["type", "except", ...restrictionKeys, ...restrictionKeys.map((key) => `${key}:conditional`)],
     maxSpeedKph: ceilingKph,
     nodeTagKeys: BARRIER_TAG_KEYS,
     evaluateBarrier: (tags) => barrierAllows(tags, accessKeys, mode === "foot" ? "foot" : "bicycle"),
@@ -529,7 +561,10 @@ function activeTravelProfile(options: {
       const posted = parseMaxSpeedKph(tags.maxspeed);
       const wanted = Math.min(speeds[highway], posted !== null && posted > 0 ? posted : Infinity);
       const speed = Math.min(ceilingKph, Math.max(floorKph, wanted));
-      return { forward, backward, forwardSpeedKph: speed, backwardSpeedKph: speed };
+      // A walker or a cyclist is held up by a closure but not by a speed
+      // limit, so only the access side is kept.
+      const conditions = conditionsFor(tags, accessKeys, []);
+      return { forward, backward, forwardSpeedKph: speed, backwardSpeedKph: speed, ...(conditions ? { conditions } : {}) };
     },
 
     evaluateTurnRestriction(tags) {

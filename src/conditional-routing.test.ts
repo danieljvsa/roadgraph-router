@@ -1,0 +1,378 @@
+import { packEdgeConditions, ConditionKind, countClosedAt, conditionsOf, conditionsOnEdge, parseEdgeConditions } from "./conditional";
+import { decodeGraph, decodeProfileChunk, encodeCompactGraph, encodeProfileChunk } from "./codec";
+import { compactGraph } from "./compact";
+import { route } from "./router";
+import { routeAlternatives } from "./alternatives";
+import { mergeRoadGraphs } from "./merge";
+import { buildGraph, pathOf } from "./test-support";
+import type { RoadGraph } from "./types";
+
+/** The index of the directed edge running from one named node to another. */
+function edgeFrom(graph: ReturnType<typeof buildGraph>, from: string, to: string) {
+  const start = graph.nodeIndex[from];
+  const target = graph.nodeIndex[to];
+  for (let edge = graph.edgeOffsets[start]; edge < graph.edgeOffsets[start + 1]; edge += 1) {
+    if (graph.edgeTargets[edge] === target) return edge;
+  }
+  throw new Error(`No edge ${from}>${to}`);
+}
+
+/**
+ * A short straight road through B, and a longer way round through D. Closing
+ * the straight one at certain hours should push the route onto the detour and
+ * nowhere else.
+ */
+function townWithADetour() {
+  const graph = buildGraph({
+    nodes: { A: [41.0, -8.0], B: [41.0, -7.99], C: [41.0, -7.98], D: [41.01, -7.99] },
+    roads: ["A-B", "B-C", "A-D", "D-C"],
+    speedsKph: { "A-B": 50, "B-C": 50, "A-D": 50, "D-C": 50 },
+  });
+  return graph;
+}
+
+const CLOSED_IN_WORKING_HOURS = "no @ (Mo-Fr 07:00-19:00)";
+const mondayMorning = new Date(2026, 9, 12, 8, 0);
+const sundayMorning = new Date(2026, 9, 18, 8, 0);
+
+function graphWithClosure(value = CLOSED_IN_WORKING_HOURS): RoadGraph & { nodeNames: string[]; nodeIndex: Record<string, number> } {
+  const built = townWithADetour();
+  // Both directions of the road through B, as a closure applies to the way.
+  const edges = [edgeFrom(built, "B", "C"), edgeFrom(built, "C", "B")].sort((a, b) => a - b);
+  return {
+    ...built,
+    edgeConditions: packEdgeConditions(edges.map((edge) => ({ edge, kind: ConditionKind.access, value }))),
+  };
+}
+
+describe("routing around a road closed at this hour", () => {
+  const graph = graphWithClosure();
+  const from = { lat: 41.0, lng: -8.0 };
+  const to = { lat: 41.0, lng: -7.98 };
+
+  it("takes the short way when no departure time is given", () => {
+    expect(pathOf(graph as never, route(graph, from, to).nodeIds)).toBe("A>B>C");
+  });
+
+  it("takes the detour when the road is shut", () => {
+    const result = route(graph, from, to, "fastest", { departAt: mondayMorning });
+    expect(pathOf(graph as never, result.nodeIds)).toBe("A>D>C");
+  });
+
+  it("takes the short way again on a Sunday", () => {
+    const result = route(graph, from, to, "fastest", { departAt: sundayMorning });
+    expect(pathOf(graph as never, result.nodeIds)).toBe("A>B>C");
+  });
+
+  it("takes the short way again after the ban lifts", () => {
+    const result = route(graph, from, to, "fastest", { departAt: new Date(2026, 9, 12, 20, 0) });
+    expect(pathOf(graph as never, result.nodeIds)).toBe("A>B>C");
+  });
+
+  it("answers the same from a travel time as from a date", () => {
+    const result = route(graph, from, to, "fastest", { departAt: { weekday: 0, minutes: 8 * 60, month: 10 } });
+    expect(pathOf(graph as never, result.nodeIds)).toBe("A>D>C");
+  });
+
+  it("obeys the closure when routing for distance too", () => {
+    const result = route(graph, from, to, "shortest", { departAt: mondayMorning });
+    expect(pathOf(graph as never, result.nodeIds)).toBe("A>D>C");
+  });
+
+  it("counts the roads the hour closes", () => {
+    const parsed = conditionsOf(graph);
+    expect(countClosedAt(graph, parsed, { weekday: 0, minutes: 8 * 60, month: 10 })).toBe(2);
+    expect(countClosedAt(graph, parsed, { weekday: 6, minutes: 8 * 60, month: 10 })).toBe(0);
+  });
+});
+
+describe("a value this library cannot act on", () => {
+  it("leaves the road open rather than guessing at the weather", () => {
+    const graph = graphWithClosure("no @ (wet)");
+    const result = route(graph, { lat: 41.0, lng: -8.0 }, { lat: 41.0, lng: -7.98 }, "fastest", { departAt: mondayMorning });
+    expect(pathOf(graph as never, result.nodeIds)).toBe("A>B>C");
+  });
+
+  it("treats a residents-only hour as closed, having no notion of who is driving", () => {
+    const graph = graphWithClosure("destination @ (Mo-Fr 07:00-19:00)");
+    const result = route(graph, { lat: 41.0, lng: -8.0 }, { lat: 41.0, lng: -7.98 }, "fastest", { departAt: mondayMorning });
+    expect(pathOf(graph as never, result.nodeIds)).toBe("A>D>C");
+  });
+});
+
+describe("a conditional speed limit", () => {
+  const built = townWithADetour();
+  const slowAtNight = {
+    ...built,
+    edgeConditions: packEdgeConditions([edgeFrom(built, "A", "B"), edgeFrom(built, "B", "A")].sort((a, b) => a - b)
+      .map((edge) => ({ edge, kind: ConditionKind.maxspeed, value: "20 @ (22:00-06:00)" }))),
+  };
+  const from = { lat: 41.0, lng: -8.0 };
+  const to = { lat: 41.0, lng: -7.99 };
+
+  it("slows the road while it applies", () => {
+    const byDay = route(slowAtNight, from, to, "fastest", { departAt: new Date(2026, 9, 12, 12, 0) });
+    const byNight = route(slowAtNight, from, to, "fastest", { departAt: new Date(2026, 9, 12, 23, 0) });
+    expect(byNight.durationSeconds).toBeGreaterThan(byDay.durationSeconds * 2);
+    expect(byNight.distanceMeters).toBeCloseTo(byDay.distanceMeters, 0);
+  });
+
+  it("never makes a road quicker than the graph says", () => {
+    const quick = {
+      ...built,
+      edgeConditions: packEdgeConditions([{ edge: edgeFrom(built, "A", "B"), kind: ConditionKind.maxspeed, value: "200 @ (06:00-22:00)" }]),
+    };
+    const plain = route(built, from, to, "fastest");
+    const raised = route(quick, from, to, "fastest", { departAt: new Date(2026, 9, 12, 12, 0) });
+    expect(raised.durationSeconds).toBeCloseTo(plain.durationSeconds, 5);
+  });
+
+  it("sends the search the other way when a limit slows the quick road", () => {
+    // Not the same as the test above: there the slowed road is reached by
+    // snapping, so a cost the search itself never consults still shows up in
+    // the answer. Here the choice between two whole paths is the search's
+    // alone, which is what a conditional limit has to be able to change.
+    const twoWays = buildGraph({
+      nodes: { A: [41.0, -8.0], B: [41.0, -7.99], C: [41.0, -7.98], D: [41.02, -7.99] },
+      roads: ["A-B", "B-C", "A-D", "D-C"],
+      speedsKph: { "A-B": 90, "B-C": 90, "A-D": 90, "D-C": 90 },
+    });
+    const crawlingAtNight = {
+      ...twoWays,
+      edgeConditions: packEdgeConditions(
+        [edgeFrom(twoWays, "A", "B"), edgeFrom(twoWays, "B", "A"), edgeFrom(twoWays, "B", "C"), edgeFrom(twoWays, "C", "B")]
+          .sort((a, b) => a - b)
+          .map((edge) => ({ edge, kind: ConditionKind.maxspeed, value: "5 @ (22:00-06:00)" })),
+      ),
+    };
+    const ends = [{ lat: 41.0, lng: -8.0 }, { lat: 41.0, lng: -7.98 }] as const;
+    expect(pathOf(crawlingAtNight as never, route(crawlingAtNight, ends[0], ends[1]).nodeIds)).toBe("A>B>C");
+    const atNight = route(crawlingAtNight, ends[0], ends[1], "fastest", { departAt: new Date(2026, 9, 12, 23, 0) });
+    expect(pathOf(crawlingAtNight as never, atNight.nodeIds)).toBe("A>D>C");
+  });
+});
+
+
+describe("carrying conditions through a profile chunk", () => {
+  const compacted = compactGraph(townWithADetour());
+  const conditions = packEdgeConditions([
+    { edge: 0, kind: ConditionKind.access, value: CLOSED_IN_WORKING_HOURS },
+    { edge: 0, kind: ConditionKind.maxspeed, value: "30 @ (Mo-Fr 08:00-09:00)" },
+    { edge: 2, kind: ConditionKind.access, value: CLOSED_IN_WORKING_HOURS },
+  ])!;
+
+  it("round-trips through the format", () => {
+    const decoded = decodeProfileChunk(encodeProfileChunk({
+      profileId: 1,
+      maxSpeedKph: 130,
+      edgeDurationScale: 1,
+      edgeDurationsSeconds: Uint16Array.from(compacted.edgeDurationsSeconds),
+      edgeConditions: conditions,
+    }));
+    expect(decoded.edgeConditions?.values).toEqual([CLOSED_IN_WORKING_HOURS, "30 @ (Mo-Fr 08:00-09:00)"]);
+    expect([...decoded.edgeConditions!.edges]).toEqual([0, 0, 2]);
+    expect([...decoded.edgeConditions!.kinds]).toEqual([ConditionKind.access, ConditionKind.maxspeed, ConditionKind.access]);
+    expect([...decoded.edgeConditions!.rules]).toEqual([0, 1, 0]);
+  });
+
+  it("writes the same bytes as before when no road carries one", () => {
+    const chunk = {
+      profileId: 1,
+      maxSpeedKph: 130,
+      edgeDurationScale: 1,
+      edgeDurationsSeconds: Uint16Array.from(compacted.edgeDurationsSeconds),
+    };
+    expect(encodeProfileChunk(chunk).byteLength).toBe(encodeProfileChunk({ ...chunk, edgeConditions: undefined }).byteLength);
+  });
+
+  it("stores one copy of a value however many roads share it", () => {
+    expect(conditions.values).toHaveLength(2);
+    expect(conditions.edges).toHaveLength(3);
+  });
+
+  it("refuses a condition naming an edge the graph does not have", () => {
+    expect(() => encodeProfileChunk({
+      profileId: 1,
+      maxSpeedKph: 130,
+      edgeDurationScale: 1,
+      edgeDurationsSeconds: Uint16Array.from(compacted.edgeDurationsSeconds),
+      edgeConditions: packEdgeConditions([{ edge: 9999, kind: ConditionKind.access, value: CLOSED_IN_WORKING_HOURS }]),
+    })).toThrow(/outside the graph/);
+  });
+});
+
+describe("conditions crossing a tile boundary", () => {
+  const westTile = {
+    nodeLatitudes: new Float64Array([37, 37]), nodeLongitudes: new Float64Array([-8, -7.9]),
+    edgeOffsets: new Uint32Array([0, 1, 1]), edgeTargets: new Uint32Array([1]),
+    edgeDistancesMeters: new Float32Array([100]), edgeDurationsSeconds: new Float32Array([10]),
+    edgeConditions: packEdgeConditions([{ edge: 0, kind: ConditionKind.access, value: CLOSED_IN_WORKING_HOURS }]),
+  };
+  const eastTile = {
+    nodeLatitudes: new Float64Array([37, 37]), nodeLongitudes: new Float64Array([-7.9, -7.8]),
+    edgeOffsets: new Uint32Array([0, 1, 1]), edgeTargets: new Uint32Array([1]),
+    edgeDistancesMeters: new Float32Array([100]), edgeDurationsSeconds: new Float32Array([10]),
+    edgeConditions: packEdgeConditions([{ edge: 0, kind: ConditionKind.access, value: "no @ (Sa,Su)" }]),
+  };
+
+  it("keeps what each tile said, rebased onto the merged edges", () => {
+    const merged = mergeRoadGraphs([westTile, eastTile]);
+    expect(merged.edgeConditions?.values.sort()).toEqual([CLOSED_IN_WORKING_HOURS, "no @ (Sa,Su)"].sort());
+    expect(merged.edgeConditions?.edges).toHaveLength(2);
+    expect(merged.edgeConditions!.edges[0]).not.toBe(merged.edgeConditions!.edges[1]);
+  });
+
+  it("closes the road the hour closes and leaves the other open", () => {
+    const merged = mergeRoadGraphs([westTile, eastTile]);
+    const parsed = conditionsOf(merged);
+    expect(countClosedAt(merged, parsed, { weekday: 0, minutes: 8 * 60, month: 3 })).toBe(1);
+    expect(countClosedAt(merged, parsed, { weekday: 5, minutes: 8 * 60, month: 3 })).toBe(1);
+    expect(countClosedAt(merged, parsed, { weekday: 0, minutes: 22 * 60, month: 3 })).toBe(0);
+  });
+
+  it("stops a route that has to cross a shut road", () => {
+    const merged = mergeRoadGraphs([westTile, eastTile]);
+    const ends = [{ lat: 37, lng: -8 }, { lat: 37, lng: -7.8 }] as const;
+    expect(route(merged, ends[0], ends[1]).distanceMeters).toBe(200);
+    expect(() => route(merged, ends[0], ends[1], "fastest", { departAt: mondayMorning })).toThrow();
+  });
+
+  it("keeps one copy when overlapping tiles both describe the same road", () => {
+    const sameRoadTwice = mergeRoadGraphs([westTile, { ...westTile }]);
+    expect(sameRoadTwice.edgeConditions?.edges).toHaveLength(1);
+  });
+});
+
+describe("carrying conditions in a one-vehicle chunk", () => {
+  // A bundle compiled for a single vehicle writes one chunk holding that
+  // vehicle's whole graph, rather than a shared half and a profile half. The
+  // restrictions have to travel in it, or a one-vehicle bundle would read as
+  // though no road were ever shut.
+  const built = townWithADetour();
+  const compacted = compactGraph(built);
+  const closed = packEdgeConditions([
+    { edge: 0, kind: ConditionKind.access, value: CLOSED_IN_WORKING_HOURS },
+    { edge: 0, kind: ConditionKind.maxspeed, value: "30 @ (Mo-Fr 08:00-09:00)" },
+    { edge: 2, kind: ConditionKind.access, value: CLOSED_IN_WORKING_HOURS },
+  ])!;
+
+  it("round-trips through the single-chunk format", () => {
+    const decoded = decodeGraph(encodeCompactGraph({ ...compacted, edgeConditions: closed }));
+    expect(decoded.edgeConditions?.values).toEqual([CLOSED_IN_WORKING_HOURS, "30 @ (Mo-Fr 08:00-09:00)"]);
+    expect([...decoded.edgeConditions!.edges]).toEqual([0, 0, 2]);
+    expect([...decoded.edgeConditions!.kinds]).toEqual([ConditionKind.access, ConditionKind.maxspeed, ConditionKind.access]);
+    expect([...decoded.edgeConditions!.rules]).toEqual([0, 1, 0]);
+  });
+
+  it("writes the same bytes as before when no road carries one", () => {
+    const without = encodeCompactGraph(compacted);
+    const explicitlyNone = encodeCompactGraph({ ...compacted, edgeConditions: undefined });
+    expect(new Uint8Array(explicitlyNone)).toEqual(new Uint8Array(without));
+  });
+
+  it("is longer only by what the conditions take", () => {
+    const without = encodeCompactGraph(compacted).byteLength;
+    const with_ = encodeCompactGraph({ ...compacted, edgeConditions: closed }).byteLength;
+    expect(with_).toBeGreaterThan(without);
+    // Three rows and two short strings, not a second copy of the graph.
+    expect(with_ - without).toBeLessThan(200);
+  });
+
+  it("keeps a route off a road shut at the departure time", () => {
+    const built2 = townWithADetour();
+    const edges = [edgeFrom(built2, "B", "C"), edgeFrom(built2, "C", "B")].sort((a, b) => a - b);
+    const graph = decodeGraph(encodeCompactGraph({
+      ...compactGraph(built2),
+      edgeConditions: packEdgeConditions(edges.map((edge) => ({ edge, kind: ConditionKind.access, value: CLOSED_IN_WORKING_HOURS }))),
+    }));
+    const from = { lat: 41.0, lng: -8.0 };
+    const to = { lat: 41.0, lng: -7.98 };
+    const open = route(graph, from, to, "fastest", { departAt: sundayMorning });
+    const shut = route(graph, from, to, "fastest", { departAt: mondayMorning });
+    expect(shut.distanceMeters).toBeGreaterThan(open.distanceMeters);
+  });
+
+  it("refuses a condition naming an edge the graph does not have", () => {
+    expect(() => encodeCompactGraph({
+      ...compacted,
+      edgeConditions: packEdgeConditions([{ edge: 9999, kind: ConditionKind.access, value: CLOSED_IN_WORKING_HOURS }]),
+    })).toThrow(/outside the graph/);
+  });
+});
+
+describe("a conditional speed limit written with units", () => {
+  const speedFrom = (value: string) => {
+    const table = packEdgeConditions([{ edge: 0, kind: ConditionKind.maxspeed, value }])!;
+    return conditionsOnEdge(parseEdgeConditions(table)!, 0, { weekday: 0, minutes: 9 * 60, month: 3 }).speedKph;
+  };
+
+  it("reads miles per hour as miles per hour", () => {
+    // Taken as a bare number this would slow the road to 30 km/h, two-thirds
+    // of what the sign says.
+    expect(speedFrom("30 mph @ (Mo-Fr 07:00-19:00)")).toBeCloseTo(48.28, 1);
+  });
+
+  it("reads km/h, however it is spelled", () => {
+    expect(speedFrom("50 km/h @ (Mo-Fr 07:00-19:00)")).toBeCloseTo(50, 5);
+    expect(speedFrom("50 kmh @ (Mo-Fr 07:00-19:00)")).toBeCloseTo(50, 5);
+    expect(speedFrom("50 @ (Mo-Fr 07:00-19:00)")).toBeCloseTo(50, 5);
+  });
+
+  it("takes no speed at all from something that is not one", () => {
+    expect(speedFrom("fast @ (Mo-Fr 07:00-19:00)")).toBeUndefined();
+    expect(speedFrom("30 furlongs @ (Mo-Fr 07:00-19:00)")).toBeUndefined();
+    expect(speedFrom("-30 @ (Mo-Fr 07:00-19:00)")).toBeUndefined();
+  });
+
+  it("takes the lowest where several apply", () => {
+    const table = packEdgeConditions([
+      { edge: 0, kind: ConditionKind.maxspeed, value: "50 @ (Mo-Fr 07:00-19:00)" },
+      { edge: 0, kind: ConditionKind.maxspeed, value: "20 mph @ (Mo-Fr 07:00-19:00)" },
+    ])!;
+    expect(conditionsOnEdge(parseEdgeConditions(table)!, 0, { weekday: 0, minutes: 9 * 60, month: 3 }).speedKph).toBeCloseTo(32.19, 1);
+  });
+});
+
+describe("a conditional limit and the routes on offer", () => {
+  // Two ways from A to C, the middle one quicker until a night limit slows it.
+  const twoWays = () => buildGraph({
+    nodes: { A: [41.0, -8.0], B: [41.0, -7.99], C: [41.0, -7.98], D: [41.004, -7.99] },
+    roads: ["A-B", "B-C", "A-D", "D-C"],
+    speedsKph: { "A-B": 90, "B-C": 90, "A-D": 70, "D-C": 70 },
+  });
+
+  const slowedAtNight = () => {
+    const built = twoWays();
+    const middle = [edgeFrom(built, "A", "B"), edgeFrom(built, "B", "A"), edgeFrom(built, "B", "C"), edgeFrom(built, "C", "B")].sort((a, b) => a - b);
+    return {
+      ...built,
+      edgeConditions: packEdgeConditions(middle.map((edge) => ({ edge, kind: ConditionKind.maxspeed, value: "10 @ (22:00-06:00)" }))),
+    };
+  };
+
+  const ends = [{ lat: 41.0, lng: -8.0 }, { lat: 41.0, lng: -7.98 }] as const;
+
+  it("changes which route is the best one", () => {
+    const graph = slowedAtNight();
+    const byDay = routeAlternatives(graph, ends[0], ends[1], "fastest", { count: 3, departAt: new Date(2026, 9, 12, 12, 0) });
+    const byNight = routeAlternatives(graph, ends[0], ends[1], "fastest", { count: 3, departAt: new Date(2026, 9, 12, 23, 0) });
+    expect(pathOf(graph as never, byDay[0].nodeIds)).toBe("A>B>C");
+    expect(pathOf(graph as never, byNight[0].nodeIds)).toBe("A>D>C");
+  });
+
+  it("keeps them in order under the limit that applies", () => {
+    const graph = slowedAtNight();
+    for (const hour of [12, 23]) {
+      const routes = routeAlternatives(graph, ends[0], ends[1], "fastest", { count: 3, departAt: new Date(2026, 9, 12, hour, 0) });
+      const costs = routes.map((result) => result.durationSeconds);
+      expect(costs).toEqual([...costs].sort((left, right) => left - right));
+    }
+  });
+
+  it("reports the slowed time, not the daytime one", () => {
+    const graph = slowedAtNight();
+    const [byNight] = routeAlternatives(graph, ends[0], ends[1], "fastest", { count: 3, departAt: new Date(2026, 9, 12, 23, 0) });
+    const sameRouteByDay = route(graph, ends[0], ends[1], "fastest", { departAt: new Date(2026, 9, 12, 12, 0) });
+    expect(byNight.durationSeconds).toBeGreaterThan(sameRouteByDay.durationSeconds);
+  });
+});

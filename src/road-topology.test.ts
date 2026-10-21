@@ -90,7 +90,11 @@ describe("roundabouts", () => {
     // Entering from S, the only legal exit is W via R4, so the normal shortest
     // hop to E is no longer available on that approach.
     const graph = viaDisk({ ...roundabout, bans: [["S>R1", "R1>R2"]] });
-    expect(() => route(graph, point(0, 0.001), point(0.001, 0.004))).toThrow(/No car route/);
+    expect(() => route(graph, point(0, 0.001), point(0.001, 0.004), "fastest", { finishOnANearbyRoad: false })).toThrow(/No car route/);
+
+    // Allowed to finish nearby, it may still not take the banned turn.
+    const nearby = route(graph, point(0, 0.001), point(0.001, 0.004));
+    expect(pathOf(graph, nearby.nodeIds)).not.toContain("S>R1>R2");
   });
 });
 

@@ -4,16 +4,21 @@ import { RouterError } from "./types";
 import { nearbyNodeIds } from "./spatial-index";
 import { edgeAllowed } from "./access";
 import { accessForVehicle } from "./limits";
+import { accessAvoiding, type AvoidArea } from "./avoid";
+import { accessAtTime, conditionalDurations, conditionsOf, travelTimeFrom, type Circumstances, type TravelTime } from "./conditional";
 import { componentSizes, componentsFor } from "./connectivity";
 import { searchBoundsFor, straightLineAtMost } from "./search-bounds";
 import type { VehicleDimensions } from "./vehicle";
 import { buildTurnRestrictionIndex, buildTurnSequenceIndex, guardedJunctionsFor, type TurnRestrictionIndex, type TurnSequenceIndex } from "./turn-restrictions";
 import { profileOf } from "./routing-profile";
-import { coordinateFor, geometryAfter, geometryBefore, geometryBetween, haversineMeters, snapToGraph, type EdgeProjection, type GraphSnap } from "./snap";
+import { FALLBACK_SNAP_RADIUS_METERS, coordinateFor, geometryAfter, geometryBefore, geometryBetween, haversineMeters, snapToGraph, type EdgeProjection, type GraphSnap } from "./snap";
 
 /** Entering the graph: traverse the tail of `edge` to reach `node`. `edge` is -1 at a junction. */
 type Seed = { node: number; edge: number; cost: number };
 /** Leaving the graph: from `node`, traverse the head of `edge`. `edge` is -1 at a junction. */
+/** How many of the nearest roads a failed route tries before giving up. */
+const ROADS_TO_TRY = 6;
+
 type Finisher = { node: number; edge: number; cost: number };
 
 function assertGraph(graph: RoadGraph) {
@@ -48,7 +53,7 @@ export function findNearestNode(graph: RoadGraph, coordinate: Coordinate, maxDis
   return closest;
 }
 
-function searchContext(graph: RoadGraph, destinationPoint: Coordinate, preference: RoutePreference) {
+function searchContext(graph: RoadGraph, destinationPoint: Coordinate, preference: RoutePreference, slowed?: Map<number, number>) {
   const distanceScale = graph.edgeDistanceScale ?? 1;
   const durationScale = graph.edgeDurationScale ?? 1;
   // Both bounds are measured from the graph rather than assumed, and cached
@@ -64,7 +69,13 @@ function searchContext(graph: RoadGraph, destinationPoint: Coordinate, preferenc
   const destinationLongitude = destinationPoint.lng;
   const toCost = preference === "fastest" ? 1 / maxSpeedMps : 1;
   return {
-    costOf: (edge: number) => preference === "fastest" ? graph.edgeDurationsSeconds[edge] * durationScale : graph.edgeDistancesMeters[edge] * distanceScale,
+    // An overridden cost only ever exceeds the graph's own — a conditional
+    // limit slows an edge and a penalty makes it dearer — so the heuristic
+    // built from the graph's fastest edge stays a lower bound and the search
+    // still returns the best route under the costs it was given.
+    costOf: (edge: number) => slowed?.get(edge) ?? (preference === "fastest"
+      ? graph.edgeDurationsSeconds[edge] * durationScale
+      : graph.edgeDistancesMeters[edge] * distanceScale),
     // Called once per relaxation, millions of times on a long route, so it
     // reads the coordinate arrays directly and avoids a haversine's four
     // trigonometric calls for a number that only has to be a lower bound.
@@ -81,8 +92,8 @@ type SearchOutcome = { edges: number[]; finisher: Finisher; seed: Seed } | null;
  * Node-labelled A*. Valid only when no turn is forbidden, because the cost of
  * reaching a node is then independent of how the node was reached.
  */
-function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, costBound: number, access: Uint8Array | undefined): SearchOutcome {
-  const { costOf, heuristicFor } = searchContext(graph, destinationPoint, preference);
+function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, costBound: number, access: Uint8Array | undefined, slowed?: Map<number, number>): SearchOutcome {
+  const { costOf, heuristicFor } = searchContext(graph, destinationPoint, preference, slowed);
   const nodeCount = graph.nodeLatitudes.length;
   const costs = new Float64Array(nodeCount).fill(Infinity);
   const previousNode = new Int32Array(nodeCount).fill(-1);
@@ -143,8 +154,8 @@ function searchByNode(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Fi
  * along a known edge, so entering part-way along a road obeys a restriction on
  * the very first turn as before.
  */
-function searchWithRestrictions(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, restrictions: TurnRestrictionIndex | null, sequenceIndex: TurnSequenceIndex | null, costBound: number, access: Uint8Array | undefined): SearchOutcome {
-  const { costOf, heuristicFor } = searchContext(graph, destinationPoint, preference);
+function searchWithRestrictions(graph: RoadGraph, seeds: Seed[], finishers: Map<number, Finisher[]>, destinationPoint: Coordinate, preference: RoutePreference, restrictions: TurnRestrictionIndex | null, sequenceIndex: TurnSequenceIndex | null, costBound: number, access: Uint8Array | undefined, slowed?: Map<number, number>): SearchOutcome {
+  const { costOf, heuristicFor } = searchContext(graph, destinationPoint, preference, slowed);
   const targets = graph.edgeTargets;
   const { guarded, stateOfEdge, edgeOfState, count: guardedStates } = guardedJunctionsFor(graph, restrictions, sequenceIndex);
 
@@ -337,10 +348,10 @@ function projectionOf(snap: GraphSnap, edge: number) {
   return snap.kind === "edge" ? snap.projections.find((projection) => projection.edge === edge) : undefined;
 }
 
-function snapSummary(snap: GraphSnap): RouteSnap {
+function snapSummary(snap: GraphSnap, travelledMeters = 0): RouteSnap {
   return snap.kind === "node"
-    ? { node: snap.node, edge: -1, point: snap.point, distanceMeters: snap.distanceMeters }
-    : { node: -1, edge: snap.projections[0].edge, point: snap.point, distanceMeters: snap.distanceMeters };
+    ? { node: snap.node, edge: -1, point: snap.point, distanceMeters: snap.distanceMeters, travelledMeters: 0 }
+    : { node: -1, edge: snap.projections[0].edge, point: snap.point, distanceMeters: snap.distanceMeters, travelledMeters };
 }
 
 /**
@@ -356,7 +367,94 @@ export type RouteOptions = {
    * is too large or too heavy for are closed to the search and to snapping.
    */
   vehicle?: VehicleDimensions;
+  /**
+   * When the journey starts, in the local time of the roads being travelled.
+   *
+   * Leaving it out ignores every conditional restriction, which is what this
+   * library did before it could read them: a road closed only at certain hours
+   * counts as open. Supplying it closes the roads shut at that moment and
+   * slows the ones a conditional speed limit slows.
+   *
+   * One moment is used for the whole route rather than an arrival time per
+   * edge. A route crossing a boundary as a restriction begins is therefore
+   * judged by where it set out, which is the honest limit of a departure time.
+   */
+  departAt?: Date | TravelTime;
+  /** Whether that day is a public holiday, which only a caller can know. */
+  publicHoliday?: boolean;
+  /**
+   * The time zone the roads are in, as an IANA name such as
+   * `"Europe/Lisbon"`. A restriction is written in the local time of the road
+   * it is on, so a caller routing somewhere other than where it is running
+   * should say where. Left out, a `Date` is read as this machine reads it.
+   */
+  timeZone?: string;
+  /**
+   * What the map cannot know: whether it is raining, who is driving, what the
+   * journey is for. A conditional rule resting on one of these is ignored
+   * unless it is answered here, so a road shut `@ (wet)` stays open until a
+   * caller says it is wet.
+   */
+  circumstances?: Circumstances;
+  /**
+   * Roads the caller knows are shut — roadworks, an incident, an event. A
+   * compiled bundle cannot know about any of them; whoever is reading a feed
+   * of them can say so here, and the search will neither drive through a
+   * closure nor begin in the middle of one.
+   */
+  avoid?: AvoidArea[];
+  /**
+   * Multipliers making certain edges dearer to the search than they really
+   * are, used to push a search away from a route already found. The route
+   * reported back is always priced at the graph's own cost, so a penalty
+   * changes which roads are chosen and never what they are said to cost.
+   */
+  costPenalties?: ReadonlyMap<number, number>;
+  /**
+   * Whether a route that cannot reach the road nearest its destination may
+   * finish on one a little further away. On by default, because the nearest
+   * road is sometimes one the network cannot legally enter — a pocket of
+   * one-way streets behind banned turns, an island of service roads — and
+   * refusing to route at all is a worse answer than finishing nearby.
+   *
+   * Turn it off to be told plainly that the point asked for cannot be
+   * reached. `RouteResult.destinationSnap.distanceMeters` reports how far
+   * short a route finished either way.
+   */
+  finishOnANearbyRoad?: boolean;
 };
+
+/**
+ * The per-edge costs a search should use: the conditional slowdowns, with any
+ * penalty folded in on top. Absent both, the search reads the graph directly.
+ */
+function withPenalties(
+  graph: RoadGraph,
+  preference: RoutePreference,
+  slowed: Map<number, number> | undefined,
+  penalties: ReadonlyMap<number, number> | undefined,
+): Map<number, number> | undefined {
+  if (!penalties?.size) return slowed;
+  const distanceScale = graph.edgeDistanceScale ?? 1;
+  const durationScale = graph.edgeDurationScale ?? 1;
+  const costs = new Map(slowed);
+  for (const [edge, multiplier] of penalties) {
+    const base = costs.get(edge) ?? (preference === "fastest"
+      ? graph.edgeDurationsSeconds[edge] * durationScale
+      : graph.edgeDistancesMeters[edge] * distanceScale);
+    costs.set(edge, base * multiplier);
+  }
+  return costs;
+}
+
+/** Reads whichever form of departure time a caller supplied. */
+export function departureTime(options: Pick<RouteOptions, "departAt" | "publicHoliday" | "timeZone">): TravelTime | undefined {
+  const departAt = options.departAt;
+  if (!departAt) return undefined;
+  return departAt instanceof Date
+    ? travelTimeFrom(departAt, options.publicHoliday, options.timeZone)
+    : { ...departAt, publicHoliday: departAt.publicHoliday ?? options.publicHoliday };
+}
 
 /** The node a snap stands on, for asking which piece of the network it is in. */
 function nodeOfSnap(snap: GraphSnap) {
@@ -406,24 +504,102 @@ export function route(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   assertGraph(graph);
   // The vehicle narrows the profile's own mask, so every later step — snapping
   // included — sees one answer about which roads are usable.
-  const access = accessForVehicle(graph, options.vehicle);
+  const vehicleAccess = accessForVehicle(graph, options.vehicle);
+  // The departure time narrows the mask further, so snapping and search agree
+  // about which roads are usable at the moment the journey starts.
+  const timed = accessAtTime(graph, conditionsOf(graph), departureTime(options), options.vehicle, vehicleAccess, options.circumstances);
+  // What the caller knows is shut comes last: it outranks anything the map
+  // has to say about the road being open.
+  const access = accessAvoiding(graph, options.avoid, timed);
   try {
     return routeBetween(graph, from, to, preference, options, access);
   } catch (error) {
     if (!(error instanceof RouterError) || error.code !== "NO_ROUTE") throw error;
-    return reconnect(graph, from, to, preference, options, access) ?? (() => { throw error; })();
+    const mended = reconnect(graph, from, to, preference, options, access);
+    if (mended) return mended;
+    // The nearest road is not always one the rest of the network can reach: a
+    // pocket of one-way streets behind banned turns can be left but not
+    // entered, and an island of service roads joins nothing at all. Both ends
+    // already sit in one piece of the network here, so re-snapping by
+    // component cannot help, and the only thing left is to look further and
+    // let the search finish on a road it can actually get to.
+    if (options.finishOnANearbyRoad === false) throw error;
+    return onAnotherRoad(graph, from, to, preference, options, access) ?? (() => { throw error; })();
   }
 }
 
-function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, preference: RoutePreference, options: RouteOptions, access: Uint8Array | undefined, acceptOrigin?: (node: number) => boolean, acceptDestination?: (node: number) => boolean): RouteResult {
-  const originSnap = snapToGraph(graph, from, undefined, access, acceptOrigin);
+/** The roads near a point, nearest first, each as a snap of its own. */
+function roadsNear(graph: RoadGraph, point: Coordinate, access: Uint8Array | undefined): GraphSnap[] {
+  const nearby = snapToGraph(graph, point, FALLBACK_SNAP_RADIUS_METERS, access, undefined, true);
+  if (!nearby || nearby.kind === "node") return nearby ? [nearby] : [];
+  // The forward and reverse copies of one stretch are one road: a route may
+  // use either direction, so they are offered together.
+  const byRoad = new Map<string, EdgeProjection[]>();
+  for (const projection of nearby.projections) {
+    const key = `${Math.min(projection.source, projection.target)}:${Math.max(projection.source, projection.target)}`;
+    const held = byRoad.get(key);
+    if (held) held.push(projection); else byRoad.set(key, [projection]);
+  }
+  return [...byRoad.values()].map((projections) => ({
+    kind: "edge" as const,
+    projections,
+    point: projections[0].point,
+    distanceMeters: projections[0].distanceMeters,
+  }));
+}
+
+/**
+ * The last thing tried when a route fails: finish, or start, on a road a
+ * little further away.
+ *
+ * The nearest road is not always one the rest of the network can reach. A
+ * pocket of one-way streets behind banned turns can be left but not entered,
+ * and an island of service roads joins nothing at all. Both ends are in one
+ * piece of the network by the time this runs, so re-snapping by component
+ * cannot help; what is left is to try the next nearest roads in turn.
+ *
+ * Nearest first, and only a few of them, so the answer is the closest road
+ * that actually works rather than whichever one makes the sums smallest. The
+ * route then ends short of where it was asked to, which
+ * `RouteResult.destinationSnap.distanceMeters` reports.
+ */
+function onAnotherRoad(graph: RoadGraph, from: Coordinate, to: Coordinate, preference: RoutePreference, options: RouteOptions, access: Uint8Array | undefined): RouteResult | null {
+  const attempt = (chosen: { origin?: GraphSnap; destination?: GraphSnap }) => {
+    try {
+      return routeBetween(graph, from, to, preference, options, access, undefined, undefined, chosen);
+    } catch {
+      return null;
+    }
+  };
+  // The destination first: a point someone typed is far likelier to be a door
+  // in a restricted street than the place they are standing.
+  for (const destination of roadsNear(graph, to, access).slice(1, ROADS_TO_TRY + 1)) {
+    const found = attempt({ destination });
+    if (found) return found;
+  }
+  for (const origin of roadsNear(graph, from, access).slice(1, ROADS_TO_TRY + 1)) {
+    const found = attempt({ origin });
+    if (found) return found;
+  }
+  return null;
+}
+
+function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, preference: RoutePreference, options: RouteOptions, access: Uint8Array | undefined, acceptOrigin?: (node: number) => boolean, acceptDestination?: (node: number) => boolean, chosen?: { origin?: GraphSnap; destination?: GraphSnap }): RouteResult {
+  const originSnap = chosen?.origin ?? snapToGraph(graph, from, undefined, access, acceptOrigin);
   if (!originSnap) throw new RouterError("ORIGIN_NOT_ON_GRAPH", "No routable road is close to the origin.");
-  const destinationSnap = snapToGraph(graph, to, undefined, access, acceptDestination);
+  const destinationSnap = chosen?.destination ?? snapToGraph(graph, to, undefined, access, acceptDestination);
   if (!destinationSnap) throw new RouterError("DESTINATION_NOT_ON_GRAPH", "No routable road is close to the destination.");
 
   const distanceScale = graph.edgeDistanceScale ?? 1;
   const durationScale = graph.edgeDurationScale ?? 1;
-  const costOf = (edge: number) => preference === "fastest" ? graph.edgeDurationsSeconds[edge] * durationScale : graph.edgeDistancesMeters[edge] * distanceScale;
+  const when = departureTime(options);
+  const conditionallySlowed = preference === "fastest" && when ? conditionalDurations(graph, conditionsOf(graph), when, options.vehicle, options.circumstances) : undefined;
+  // A penalty makes an edge dearer to the search without making it dearer in
+  // the answer: the distance and duration reported below are the real ones.
+  const slowed = withPenalties(graph, preference, conditionallySlowed, options.costPenalties);
+  const costOf = (edge: number) => preference === "fastest"
+    ? (conditionallySlowed?.get(edge) ?? graph.edgeDurationsSeconds[edge] * durationScale)
+    : graph.edgeDistancesMeters[edge] * distanceScale;
 
   const seeds = seedsFor(originSnap, costOf);
   const finisherList = finishersFor(destinationSnap, costOf);
@@ -453,8 +629,8 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   const outcome: SearchOutcome = sameNode
     ? { edges: [], finisher: finisherList[0], seed: seeds[0] }
     : restrictions || sequenceIndex
-      ? searchWithRestrictions(graph, seeds, finishers, destinationSnap.point, preference, restrictions, sequenceIndex, costBound, access)
-      : searchByNode(graph, seeds, finishers, destinationSnap.point, preference, costBound, access);
+      ? searchWithRestrictions(graph, seeds, finishers, destinationSnap.point, preference, restrictions, sequenceIndex, costBound, access, slowed)
+      : searchByNode(graph, seeds, finishers, destinationSnap.point, preference, costBound, access, slowed);
   if (direct && direct.cost >= costBound) direct = null;
   if (!outcome && !direct) throw new RouterError("NO_ROUTE", `No ${profileOf(graph).name} route connects the selected points.`);
 
@@ -470,12 +646,18 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
   let edgeIds: number[] = [];
   let distanceMeters = 0;
   let durationSeconds = 0;
+  // How much of the road each end sits on the route actually drives.
+  let travelledAtOrigin = 0;
+  let travelledAtDestination = 0;
 
   if (direct && direct.cost <= searchCost) {
     for (const point of geometryBetween(direct.origin, direct.destination)) push(point);
     const span = partial(direct.origin, direct.destination.fraction - direct.origin.fraction);
     distanceMeters = span.distance;
     durationSeconds = span.duration;
+    // One road, driven once: the whole of it is recorded at the origin so
+    // that the two ends do not add up to twice the journey.
+    travelledAtOrigin = span.distance;
   } else {
     const { edges, finisher, seed } = outcome!;
     edgeIds = edges;
@@ -486,6 +668,7 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
       const span = partial(entry, 1 - entry.fraction);
       distanceMeters += span.distance;
       durationSeconds += span.duration;
+      travelledAtOrigin = span.distance;
       nodeIds.push(entry.target);
       push(coordinateFor(graph, entry.target));
     } else {
@@ -494,7 +677,10 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     const scale = graph.coordinateScale ?? 1;
     for (const edge of edges) {
       distanceMeters += graph.edgeDistancesMeters[edge] * distanceScale;
-      durationSeconds += graph.edgeDurationsSeconds[edge] * durationScale;
+      // The conditional slowdown the search planned with, so a route held up
+      // by a night speed limit is not reported at the daytime time. Never the
+      // search penalties, which are a way of steering and not a real cost.
+      durationSeconds += conditionallySlowed?.get(edge) ?? graph.edgeDurationsSeconds[edge] * durationScale;
       if (graph.edgeShapeOffsets && graph.edgeShapeLatitudes && graph.edgeShapeLongitudes) {
         for (let point = graph.edgeShapeOffsets[edge]; point < graph.edgeShapeOffsets[edge + 1]; point += 1) {
           coordinates.push([graph.edgeShapeLongitudes[point] / scale, graph.edgeShapeLatitudes[point] / scale]);
@@ -509,6 +695,7 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
       const span = partial(exit, exit.fraction);
       distanceMeters += span.distance;
       durationSeconds += span.duration;
+      travelledAtDestination = span.distance;
     }
   }
 
@@ -517,8 +704,8 @@ function routeBetween(graph: RoadGraph, from: Coordinate, to: Coordinate, prefer
     edgeIds,
     distanceMeters,
     durationSeconds,
-    originSnap: snapSummary(originSnap),
-    destinationSnap: snapSummary(destinationSnap),
+    originSnap: snapSummary(originSnap, travelledAtOrigin),
+    destinationSnap: snapSummary(destinationSnap, travelledAtDestination),
     geometry: { type: "LineString", coordinates },
   };
 }
