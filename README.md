@@ -1,4 +1,4 @@
-# roadgraph-router
+# roadgraph-router-v2
 
 Compile any OpenStreetMap `.osm.pbf` extract into a compact, range-addressable
 routing bundle, then route over it with A* — in Node.js or in the browser, with
@@ -73,7 +73,7 @@ region's restriction data was used.
 ## Install
 
 ```sh
-npm install roadgraph-router
+npm install roadgraph-router-v2
 ```
 
 **Requirements.** The routing engine runs on Node.js 18+ and in any browser
@@ -95,7 +95,7 @@ npx roadgraph-compile monaco.osm.pbf --output monaco.efrb
 ```
 
 ```ts
-import { RoadRouter } from "roadgraph-router";
+import { RoadRouter } from "roadgraph-router-v2";
 
 const router = await RoadRouter.open("/routing/monaco.efrb");
 const result = await router.route(
@@ -161,7 +161,7 @@ clamped to the profile range the A* heuristic assumes, so a mistagged
 `maxspeed=400` cannot make the heuristic inadmissible.
 
 ```ts
-import { carRoutingProfile, truckRoutingProfile } from "roadgraph-router";
+import { carRoutingProfile, truckRoutingProfile } from "roadgraph-router-v2";
 
 carRoutingProfile.evaluateWay({ highway: "primary", maxspeed: "60 mph" });
 // { forward: true, backward: true, forwardSpeedKph: 96.56, backwardSpeedKph: 96.56 }
@@ -359,7 +359,7 @@ report beside the bundle (`portugal-rail.efrb.json`) does record it.
 The public API is the one you already have:
 
 ```ts
-import { RoadRouter } from "roadgraph-router";
+import { RoadRouter } from "roadgraph-router-v2";
 
 const router = await RoadRouter.open("portugal-rail.efrb", undefined, { profile: "train" });
 
@@ -1116,7 +1116,7 @@ The routing engine has no Node built-ins in it. Bundled for the browser it is
 and it needs only `fetch` and `DecompressionStream`:
 
 ```ts
-import { RoadRouter } from "roadgraph-router";
+import { RoadRouter } from "roadgraph-router-v2";
 
 // Served as application/octet-stream, without whole-file content encoding,
 // so the byte offsets in the bundle directory stay valid.
@@ -1128,7 +1128,7 @@ Routing a long distance merges a lot of tiles, so run it off the main thread
 when the region is large:
 
 ```ts
-import RoutingWorker from "roadgraph-router/worker?worker";
+import RoutingWorker from "roadgraph-router-v2/worker?worker";
 ```
 
 The `roadgraph-compile` CLI is Node-only and is never imported by the browser
@@ -1204,7 +1204,7 @@ were zero in every chunk written before, so a road chunk is unchanged.
 For fast snapping, add a local index after loading a graph:
 
 ```ts
-import { withSpatialIndex } from "roadgraph-router";
+import { withSpatialIndex } from "roadgraph-router-v2";
 
 const indexedGraph = withSpatialIndex(graph);
 ```
