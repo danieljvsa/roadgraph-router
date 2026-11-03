@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-03
+
+### Added
+
+- **Public transport from GTFS: `roadgraph-router-v2/transit`.** A separate
+  entry point, so road-only applications download none of it.
+  `TransitRouter.plan()` finds journeys of walk, ride, change and ride with
+  published departure times, using RAPTOR over trip patterns. Filters by mode
+  (`modes`) and operator (`feeds`), handles trips past midnight and changes
+  of the clocks, and routes walks over a pedestrian `RoadRouter` when given
+  one.
+- **`roadgraph-compile-gtfs`.** Compiles one or more GTFS feeds (zip or
+  directory) into an EFTT timetable — 0.34 MB for Metro do Porto and STCP
+  together — with a report of everything it skipped, interpolated or
+  approximated.
+- **Rides drawn along the track.** With `--rail-bundle`, rail hops whose feed
+  shape is missing, joins only the stations, or is too coarse are routed over
+  mapped track at compile time, including at interchanges where a station
+  snaps to another line's track.
+- **`dateFallback: "same-weekday"`** for feeds that do not cover the requested
+  day, reported in `plan.serviceDates`.
+
+### Notes
+
+- The README no longer says GTFS is not planned.
+- No change to road or railway routing, bundle formats or the existing
+  entry points.
+
 ## [0.4.0] - 2026-10-16
 
 ### Fixed, after review of real Metro do Porto routes
