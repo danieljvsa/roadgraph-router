@@ -175,6 +175,8 @@ describe("planning", () => {
     expect(new Date(bus.departAt).toISOString()).toBe("2026-09-14T07:30:00.000Z"); // 08:30: 08:15 is too soon after 08:14 + walk
     expect(best.rides).toBe(2);
     expect(metro.kind === "ride" && metro.intermediateStops.map((s) => s.name)).toEqual(["Bravo"]);
+    // m2 has no time of its own at Bravo; it was interpolated to 08:12.
+    expect(metro.kind === "ride" && new Date(metro.intermediateStops[0].arriveAt).toISOString()).toBe("2026-09-14T07:12:00.000Z");
   });
 
   test("an overtaking express is found even though it leaves later", async () => {
@@ -301,4 +303,24 @@ test("a hop that snaps to another line's track is routed through to the next sto
   });
   expect(report.hops).toMatchObject({ routed: 2, straight: 0 });
   expect(report.hopFallbacks).toEqual([]);
+});
+
+test("alternatives offers later departures, each once, ordered by when they leave", async () => {
+  const router = new TransitRouter((await compileTransit([metroFeed, busFeed])).timetable);
+  const plan = await router.plan(A, C, { maxWalkMeters: 150, departAt: lisbon("2026-09-14", "08:05"), alternatives: 2 });
+  const departures = plan.journeys.map((j) => new Date(j.legs.find((l) => l.kind === "ride")!.departAt).toISOString());
+  // m2 08:10, m3 08:20, then Monday's 24:30 trip.
+  expect(departures).toEqual(["2026-09-14T07:10:00.000Z", "2026-09-14T07:20:00.000Z", "2026-09-14T23:30:00.000Z"]);
+});
+
+test("walking to a stop and walking on is not a public transport journey", async () => {
+  // C and C2 are both within reach of both ends; there is still a real ride to offer.
+  const router = new TransitRouter((await compileTransit([metroFeed, busFeed])).timetable);
+  const near = { lat: C.lat - 0.0005, lng: C.lng };
+  const plan = await router.plan(near, E, { maxWalkMeters: 1000, departAt: lisbon("2026-09-14", "08:05"), alternatives: 2 });
+  for (const journey of plan.journeys) {
+    // Either the direct walk (one leg) or a journey with a ride in it.
+    expect(journey.legs.length === 1 || journey.rides > 0).toBe(true);
+  }
+  expect(plan.journeys.filter((j) => j.rides > 0).length).toBeGreaterThanOrEqual(3);
 });

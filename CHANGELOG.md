@@ -25,6 +25,9 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   snaps to another line's track.
 - **`dateFallback: "same-weekday"`** for feeds that do not cover the requested
   day, reported in `plan.serviceDates`.
+- **`alternatives`**: later departures besides the earliest arrival, each the
+  best journey leaving after the previous option, ordered by departure.
+- **Times at every stop of a ride**: `intermediateStops[].arriveAt`.
 
 ### Notes
 

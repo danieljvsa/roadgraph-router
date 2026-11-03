@@ -33,6 +33,12 @@ export type TransitPlanOptions = {
   maxWalkMeters?: number;
   /** Extra time allowed for a change of vehicle at the same stop. Default 60 s. */
   minTransferSeconds?: number;
+  /**
+   * How many later departures to offer besides the earliest arrival: each is
+   * the best journey leaving after the previous option. Default 0. Journeys
+   * come back ordered by when they leave.
+   */
+  alternatives?: number;
   /** Walking pace, for estimated walks. Default 1.25 m/s. */
   walkSpeedMps?: number;
   /** How much longer than the straight line an estimated walk is. Default 1.3. */
@@ -52,6 +58,7 @@ export type TransitPlanOptions = {
 export type TransitRouterOptions = { walkRouter?: WalkRouter };
 
 const DEFAULTS = {
+  alternatives: 0,
   maxRides: 4,
   maxWalkMeters: 1000,
   minTransferSeconds: 60,
@@ -187,41 +194,63 @@ export class TransitRouter {
     // Search; then route the walks the answers actually use and, if any took
     // a different time from its estimate, search again with the real time.
     // Each stop is routed at most once, so this settles in a few passes.
-    let found: RaptorJourney[] = [];
-    for (let pass = 0; pass < 4; pass += 1) {
-      found = raptor(t, this.index, {
-        sources: access.map(({ stop }) => ({ stop, arrival: departSeconds + accessSeconds.get(stop)! })),
-        targets: egressSeconds,
-        layers,
-        patternAllowed,
-        maxRides: o.maxRides,
-        minTransferSeconds: o.minTransferSeconds,
-      });
-      if (!walkRouter) break;
-      let changed = false;
-      for (const journey of found) {
-        const first = journey.steps[0];
-        if (first?.kind === "access") {
-          const routed = await walk(from, this.coord(first.stop), `a${first.stop}`);
-          if (routed && Math.round(routed.durationSeconds) !== accessSeconds.get(first.stop)) {
-            accessSeconds.set(first.stop, Math.round(routed.durationSeconds));
+    const search = async (startSeconds: number) => {
+      let found: RaptorJourney[] = [];
+      for (let pass = 0; pass < 4; pass += 1) {
+        found = raptor(t, this.index, {
+          sources: access.map(({ stop }) => ({ stop, arrival: startSeconds + accessSeconds.get(stop)! })),
+          targets: egressSeconds,
+          layers,
+          patternAllowed,
+          maxRides: o.maxRides,
+          minTransferSeconds: o.minTransferSeconds,
+        });
+        if (!walkRouter) break;
+        let changed = false;
+        for (const journey of found) {
+          const first = journey.steps[0];
+          if (first?.kind === "access") {
+            const routed = await walk(from, this.coord(first.stop), `a${first.stop}`);
+            if (routed && Math.round(routed.durationSeconds) !== accessSeconds.get(first.stop)) {
+              accessSeconds.set(first.stop, Math.round(routed.durationSeconds));
+              changed = true;
+            }
+          }
+          const routed = await walk(this.coord(journey.egressStop), to, `e${journey.egressStop}`);
+          if (routed && Math.round(routed.durationSeconds) !== egressSeconds.get(journey.egressStop)) {
+            egressSeconds.set(journey.egressStop, Math.round(routed.durationSeconds));
             changed = true;
           }
         }
-        const routed = await walk(this.coord(journey.egressStop), to, `e${journey.egressStop}`);
-        if (routed && Math.round(routed.durationSeconds) !== egressSeconds.get(journey.egressStop)) {
-          egressSeconds.set(journey.egressStop, Math.round(routed.durationSeconds));
-          changed = true;
-        }
+        if (!changed) break;
       }
-      if (!changed) break;
-    }
+      return found;
+    };
 
     const at = (seconds: number) => origin + seconds * 1000;
     const journeys: TransitJourney[] = [];
-    for (const result of found) {
-      journeys.push(await this.buildJourney(result, from, to, departSeconds, at, walk, accessSeconds, egressSeconds));
+    const seen = new Set<string>();
+    const wanted = 1 + Math.max(0, Math.floor(o.alternatives));
+    // Later departures: search again from just after the earliest option found
+    // so far leaves, which yields the next departure, until enough distinct
+    // journeys are in hand. A bounded number of searches either way.
+    let startSeconds = departSeconds;
+    for (let round = 0; round < wanted * 2 && journeys.length < wanted; round += 1) {
+      const found = await search(startSeconds);
+      if (found.length === 0) break;
+      let earliestLeave = Infinity;
+      for (const result of found) {
+        const journey = await this.buildJourney(result, from, to, startSeconds, at, walk, accessSeconds, egressSeconds);
+        earliestLeave = Math.min(earliestLeave, journey.departAt);
+        const key = journey.legs.map((leg) => (leg.kind === "ride" ? `${leg.line.id}@${leg.departAt}` : "")).join("|");
+        if (seen.has(key)) continue;
+        seen.add(key);
+        journeys.push(journey);
+      }
+      if (!Number.isFinite(earliestLeave)) break;
+      startSeconds = Math.max(startSeconds + 60, Math.round((earliestLeave - origin) / 1000) + 60);
     }
+    journeys.sort((a, b) => a.departAt - b.departAt || a.arriveAt - b.arriveAt);
 
     // Walking the whole way is a journey too, and sometimes the best one.
     const directMeters = haversineMeters(from.lat, from.lng, to.lat, to.lng);
@@ -376,8 +405,12 @@ export class TransitRouter {
         if (!prior || prior[0] !== point[0] || prior[1] !== point[1]) coordinates.push(point);
       }
     }
-    const intermediateStops: TransitStop[] = [];
-    for (let pos = ride.boardPos + 1; pos < ride.alightPos; pos += 1) intermediateStops.push(this.stop(t.patternStops[stopBase + pos]));
+    const tripBase = t.tripTimeOffset[ride.trip];
+    const shift = ride.departure - t.tripTimes[tripBase + 2 * ride.boardPos + 1];
+    const intermediateStops: (TransitStop & { arriveAt: number })[] = [];
+    for (let pos = ride.boardPos + 1; pos < ride.alightPos; pos += 1) {
+      intermediateStops.push({ ...this.stop(t.patternStops[stopBase + pos]), arriveAt: at(t.tripTimes[tripBase + 2 * pos] + shift) });
+    }
     const source = sources.size > 1 ? "mixed" : sources.has(HopSource.Shape) ? "shape" : sources.has(HopSource.Routed) ? "routed" : "straight";
     return {
       kind: "ride",

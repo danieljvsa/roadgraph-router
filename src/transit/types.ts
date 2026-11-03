@@ -172,8 +172,8 @@ export type RideLeg = {
   headsign: string;
   from: TransitStop;
   to: TransitStop;
-  /** Stops passed through between boarding and alighting, not including either. */
-  intermediateStops: TransitStop[];
+  /** Stops passed through between boarding and alighting, not including either, with when the vehicle is there. */
+  intermediateStops: (TransitStop & { arriveAt: number })[];
   departAt: number;
   arriveAt: number;
   durationSeconds: number;

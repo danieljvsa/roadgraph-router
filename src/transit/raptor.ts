@@ -202,6 +202,10 @@ export function raptor(t: TransitTimetable, index: StopPatternIndex, query: Rapt
     for (const [stop, egress] of query.targets) {
       const arrival = arr[base + stop];
       if (arrival === INF) continue;
+      // A stop reached on foot from the origin and left on foot is not a
+      // public transport journey: walking the whole way is offered separately,
+      // and counting it here would prune every ride slower than the walk.
+      if (origin[base + stop] === 0) continue;
       if (arrival + egress < roundBest) { roundBest = arrival + egress; roundStop = stop; }
     }
     if (roundStop >= 0 && roundBest < targetBest) {
