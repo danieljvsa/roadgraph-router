@@ -22,7 +22,10 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Rides drawn along the track.** With `--rail-bundle`, rail hops whose feed
   shape is missing, joins only the stations, or is too coarse are routed over
   mapped track at compile time, including at interchanges where a station
-  snaps to another line's track.
+  snaps to another line's track. Stations a feed places off the track (at an
+  entrance, or on the street: Metro do Porto's Campanhã is 50 m from its
+  platforms) are moved onto it, so rides and walks start at the platform;
+  the report lists them in `stopsPlacedOnTrack`.
 - **`dateFallback: "same-weekday"`** for feeds that do not cover the requested
   day, reported in `plan.serviceDates`.
 - **`alternatives`**: later departures besides the earliest arrival, each the

@@ -324,3 +324,30 @@ test("walking to a stop and walking on is not a public transport journey", async
   }
   expect(plan.journeys.filter((j) => j.rides > 0).length).toBeGreaterThanOrEqual(3);
 });
+
+test("rail stops placed off the track are moved onto it, and their rides end there", async () => {
+  // The track runs 50 m south of where the feed puts the stations, as Metro do
+  // Porto places Campanhã on the street beside its platforms.
+  const offset = (metres: number) => async (r: HopGeometryRequest) => [
+    [r.from.lng, r.from.lat - metres / 111_320],
+    [(r.from.lng + r.to.lng) / 2, r.from.lat - metres / 111_320],
+    [r.to.lng, r.to.lat - metres / 111_320],
+  ];
+  const { timetable, report } = await compiled({ routeHop: offset(50) });
+  expect(report.stopsPlacedOnTrack.map((s) => [s.stop, s.meters])).toEqual([["metro:A", 50], ["metro:B", 50], ["metro:C", 50]]);
+  const b = timetable.stopIds.indexOf("metro:B");
+  expect(timetable.stopLat[b]).toBeCloseTo(B.lat - 50 / 111_320, 6);
+  // The first ride starts exactly at the moved stop, with no stub to the feed's point.
+  const metroGeometry = timetable.patternGeometry[[...timetable.patternRoute].findIndex((r) => timetable.routeIds[r] === "metro:M")];
+  const first = timetable.hopPointOffset[timetable.geometryHopOffset[metroGeometry]];
+  const a = timetable.stopIds.indexOf("metro:A");
+  expect([timetable.hopCoords[2 * first], timetable.hopCoords[2 * first + 1]]).toEqual([timetable.stopLng[a], timetable.stopLat[a]]);
+  expect(timetable.hopPointOffset[timetable.geometryHopOffset[metroGeometry] + 1] - first).toBe(3);
+  // Bus stops, drawn from their own shape, stay where the feed put them.
+  expect(timetable.stopLat[timetable.stopIds.indexOf("bus:C2")]).toBe(C2.lat);
+
+  // A track too far away to be the station's is not trusted.
+  const far = await compiled({ routeHop: offset(400) });
+  expect(far.report.stopsPlacedOnTrack).toEqual([]);
+  expect(far.timetable.stopLat[far.timetable.stopIds.indexOf("metro:B")]).toBe(B.lat);
+});

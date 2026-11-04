@@ -134,6 +134,11 @@ export type TransitCompileReport = {
   hops: { total: number; shape: number; routed: number; straight: number };
   /** Hops that wanted a routed geometry and fell back to a straight line, with the reason. */
   hopFallbacks: { route: string; from: string; to: string; reason: string }[];
+  /**
+   * Rail stops moved onto the track their routed rides run along, and how far,
+   * when a feed placed them at an entrance or on the street.
+   */
+  stopsPlacedOnTrack: { stop: string; name: string; meters: number }[];
   timetableBytes?: number;
 };
 

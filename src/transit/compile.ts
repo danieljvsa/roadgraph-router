@@ -52,6 +52,12 @@ const SHAPE_MAX_STOP_OFFSET_METERS = 200;
 const MAX_REPORTED_FALLBACKS = 200;
 /** How close a longer routed span must pass a stop for it to be cut there. */
 const CUT_MAX_STOP_OFFSET_METERS = 60;
+/** How far a rail stop may be moved onto its track, and how far apart its platforms' track points may be. */
+const STOP_ON_TRACK_MAX_MOVE_METERS = 150;
+const STOP_ON_TRACK_MAX_SPREAD_METERS = 80;
+
+type HopDraft = { coords: number[][]; source: number; from: number; to: number };
+const round6 = (value: number) => Math.round(value * 1e6) / 1e6;
 /**
  * Below this many points per kilometre a shape is a sketch: Metro do Porto's
  * line D has three. When the hop could be routed along mapped track instead,
@@ -407,11 +413,21 @@ export async function compileTransit(feeds: GtfsFeedInput[], options: CompileTra
 
   const stopCoord = (s: number): Coordinate => ({ lat: stopLat[s], lng: stopLng[s] });
 
+  // Ride geometry for every group first: routed hops show where the track
+  // runs past each station, which decides where rail stops are placed.
+  const groupHops: HopDraft[][] = [];
+  for (const group of groups.values()) groupHops.push(await hopGeometries(group));
+  const stopsPlacedOnTrack = placeStopsOnTrack();
+
+  let groupIndex = 0;
   for (const group of groups.values()) {
     const geometry = geometryHopOffset.length - 1;
-    const hops = await hopGeometries(group);
-    for (const hop of hops) {
-      for (const [lng, lat] of hop.coords) hopCoords.push(lng, lat);
+    for (const hop of groupHops[groupIndex++]) {
+      // Routed hops start and end exactly at the stops, so consecutive hops join up.
+      const coords = hop.source === HopSource.Routed
+        ? dedupe([[stopLng[hop.from], stopLat[hop.from]], ...hop.coords, [stopLng[hop.to], stopLat[hop.to]]])
+        : hop.coords;
+      for (const [lng, lat] of coords) hopCoords.push(lng, lat);
       hopPointOffset.push(hopCoords.length / 2);
       hopSource.push(hop.source);
     }
@@ -449,7 +465,7 @@ export async function compileTransit(feeds: GtfsFeedInput[], options: CompileTra
       !(routable && shapePointsPerKm(group.shape) < MIN_SHAPE_POINTS_PER_KM_WHEN_ROUTABLE),
     );
     const fromShape = shapeUsable ? cutShape(group, stopLat, stopLng) : null;
-    const result: { coords: number[][]; source: number }[] = [];
+    const result: HopDraft[] = [];
     for (let i = 0; i < n - 1; i += 1) {
       hopStats.total += 1;
       const a = group.stops[i];
@@ -457,7 +473,7 @@ export async function compileTransit(feeds: GtfsFeedInput[], options: CompileTra
       const cut = fromShape?.[i];
       if (cut) {
         hopStats.shape += 1;
-        result.push({ coords: cut, source: HopSource.Shape });
+        result.push({ coords: cut, source: HopSource.Shape, from: a, to: b });
         continue;
       }
       const straight = [[stopLng[a], stopLat[a]], [stopLng[b], stopLat[b]]];
@@ -477,16 +493,60 @@ export async function compileTransit(feeds: GtfsFeedInput[], options: CompileTra
         if (coords && polylineMeters(coords) > Math.max(direct * ROUTED_HOP_MAX_STRETCH, direct + ROUTED_HOP_SLACK_METERS)) coords = null;
         if (coords) {
           hopStats.routed += 1;
-          // Start and end exactly at the stops, so consecutive hops join up.
-          result.push({ coords: dedupe([straight[0], ...coords, straight[1]]), source: HopSource.Routed });
+          result.push({ coords, source: HopSource.Routed, from: a, to: b });
           continue;
         }
       }
       if (hopFallbacks.length < MAX_REPORTED_FALLBACKS) hopFallbacks.push({ route: routes[group.route].id, from: stopIds[a], to: stopIds[b], reason });
       hopStats.straight += 1;
-      result.push({ coords: straight, source: HopSource.Straight });
+      result.push({ coords: straight, source: HopSource.Straight, from: a, to: b });
     }
     return result;
+  }
+
+  /**
+   * Moves each stop that only routed rail hops serve onto the track. A feed
+   * often places a station at its entrance or its street address (Metro do
+   * Porto's Campanhã is on the street, 50 m from the platforms), so a ride
+   * drawn along the track would leave it for a stub across the street, and
+   * walks would start there. The routed hops already end where the track
+   * passes the station; the stop goes to the middle of those points (one per
+   * track, so between the platforms of a two-track station).
+   */
+  function placeStopsOnTrack(): TransitCompileReport["stopsPlacedOnTrack"] {
+    const points = new Map<number, number[][]>();
+    const offTrack = new Set<number>();
+    const add = (stop: number, point: number[] | undefined) => {
+      if (!point) return;
+      let list = points.get(stop);
+      if (!list) points.set(stop, (list = []));
+      list.push(point);
+    };
+    for (const hops of groupHops) {
+      for (const hop of hops) {
+        if (hop.source === HopSource.Routed) {
+          add(hop.from, hop.coords[0]);
+          add(hop.to, hop.coords[hop.coords.length - 1]);
+        } else {
+          offTrack.add(hop.from);
+          offTrack.add(hop.to);
+        }
+      }
+    }
+    const moved: TransitCompileReport["stopsPlacedOnTrack"] = [];
+    for (const [stop, list] of points) {
+      if (offTrack.has(stop)) continue;
+      const lat = list.reduce((sum, p) => sum + p[1], 0) / list.length;
+      const lng = list.reduce((sum, p) => sum + p[0], 0) / list.length;
+      // Points far apart are not one station's platforms; leave the stop be.
+      if (list.some((p) => haversineMeters(p[1], p[0], lat, lng) > STOP_ON_TRACK_MAX_SPREAD_METERS)) continue;
+      const meters = haversineMeters(stopLat[stop], stopLng[stop], lat, lng);
+      if (meters > STOP_ON_TRACK_MAX_MOVE_METERS) continue;
+      if (meters >= 1) moved.push({ stop: stopIds[stop], name: stopNames[stop], meters: Math.round(meters) });
+      stopLat[stop] = round6(lat);
+      stopLng[stop] = round6(lng);
+    }
+    return moved.sort((x, y) => y.meters - x.meters);
   }
 
   /** A routed path between two stops, or the reason there is no plausible one. */
@@ -634,6 +694,7 @@ export async function compileTransit(feeds: GtfsFeedInput[], options: CompileTra
     servicesWithoutTrips,
     hops: hopStats,
     hopFallbacks,
+    stopsPlacedOnTrack,
   };
   return { timetable, report };
 }
@@ -781,6 +842,8 @@ function project(a: ShapePoint, b: ShapePoint, pLat: number, pLng: number) {
   return { t, lat, lng, offset: haversineMeters(lat, lng, pLat, pLng) };
 }
 
+/** Drops repeated points: equal at the micro-degree precision the timetable stores. */
 function dedupe(coords: number[][]) {
-  return coords.filter((c, i) => i === 0 || c[0] !== coords[i - 1][0] || c[1] !== coords[i - 1][1]);
+  const same = (x: number, y: number) => Math.round(x * 1e6) === Math.round(y * 1e6);
+  return coords.filter((c, i) => i === 0 || !same(c[0], coords[i - 1][0]) || !same(c[1], coords[i - 1][1]));
 }

@@ -158,6 +158,10 @@ await writeFile(`${output}.json`, JSON.stringify(report, null, 2));
 
 console.log(`Wrote ${output}: ${(bytes.length / 1e6).toFixed(2)} MB, ${report.stops} stops, ${report.routes} lines, ${report.trips} trips in ${report.patterns} patterns, ${report.transfers} walking transfers.`);
 console.log(`Ride geometry: ${report.hops.shape} hops from shapes, ${report.hops.routed} routed, ${report.hops.straight} straight.`);
+if (report.stopsPlacedOnTrack.length) {
+  const far = report.stopsPlacedOnTrack.filter((s) => s.meters >= 25);
+  console.log(`Placed ${report.stopsPlacedOnTrack.length} rail stops on the track${far.length ? `; moved 25 m or more: ${far.map((s) => `${s.name} ${s.meters} m`).join(", ")}` : ""}.`);
+}
 for (const feed of report.feeds) console.log(`  ${feed.id}: service ${feed.firstServiceDate} – ${feed.lastServiceDate} (${feed.publisher})`);
 if (Object.keys(report.skippedTrips).length) console.log("Skipped trips:", report.skippedTrips);
 if (report.hopFallbacks.length) console.log(`${report.hopFallbacks.length} hops fell back to straight lines; see ${output}.json.`);
