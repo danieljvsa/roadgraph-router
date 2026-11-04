@@ -1,6 +1,7 @@
 import type { GeoJsonLineString } from "../types";
 import { ServiceCalendar } from "./calendar";
 import { haversineMeters } from "./compile";
+import { buildStopPatternIndex, type StopPatternIndex } from "./raptor";
 import { dateOfDay, localServiceTime, serviceDayOrigin } from "./time";
 import {
   TRANSIT_MODES,
@@ -58,6 +59,29 @@ export type TripDetails = {
   serviceDate: string;
 };
 
+/** One scheduled departure from a stop. */
+export type Departure = {
+  trip: number;
+  line: TransitLine;
+  headsign: string;
+  /** Epoch ms. */
+  departAt: number;
+  stop: TransitStop;
+  /** The service day it was read from, YYYYMMDD: another week's when a fallback was used. */
+  serviceDate: string;
+};
+
+export type DeparturesOptions = {
+  /** How far from the point a stop may be. Default 60 m: a stop, or a station's platforms. */
+  radiusMeters?: number;
+  /** Only these feeds' lines, by compile id. Default: all the simulator shows. */
+  feeds?: string[];
+  /** At most this many departures. Default 12. */
+  limit?: number;
+  /** How far ahead to look. Default 3 hours. */
+  windowSeconds?: number;
+};
+
 /** The service days a running vehicle can belong to: one that set out yesterday, or today. */
 const DAY_OFFSETS = [-1, 0] as const;
 
@@ -85,6 +109,8 @@ export class TransitSimulator {
   private readonly dateFallback: "none" | "same-weekday";
   /** Active services per (day, offset), cached: a day's set changes once a day. */
   private activeCache = new Map<string, Uint8Array>();
+  /** Which patterns call at each stop; built on the first departures request. */
+  private stopIndex: StopPatternIndex | null = null;
 
   constructor(readonly timetable: TransitTimetable, options: TransitSimulatorOptions = {}) {
     const t = timetable;
@@ -209,8 +235,75 @@ export class TransitSimulator {
       departAt: stops[0].departAt,
       arriveAt: stops[count - 1].arriveAt,
       geometry: { type: "LineString", coordinates: this.patternCoordinates(p) },
-      serviceDate: dateOfDay(chosen.base + chosen.offset),
+      serviceDate: dateOfDay(chosen.base),
     };
+  }
+
+  /**
+   * The next departures from the stops near a point, from instant `ms`:
+   * each trip once per stop it leaves from (not from its last stop), soonest
+   * first. Stops are matched by position, so a station whose platforms are
+   * separate stops in the feed answers as one.
+   */
+  departures(point: { lat: number; lng: number }, ms: number, options: DeparturesOptions = {}): Departure[] {
+    const t = this.timetable;
+    const radius = options.radiusMeters ?? 60;
+    const limit = options.limit ?? 12;
+    const window = options.windowSeconds ?? 3 * 3600;
+    const feeds = options.feeds ? new Set(options.feeds) : null;
+    this.stopIndex ??= buildStopPatternIndex(t);
+    const index = this.stopIndex;
+
+    const latSpan = radius / 111_320;
+    const lngSpan = latSpan / Math.max(0.2, Math.cos((point.lat * Math.PI) / 180));
+    const stops: number[] = [];
+    for (let s = 0; s < t.stopCount; s += 1) {
+      if (Math.abs(t.stopLat[s] - point.lat) > latSpan || Math.abs(t.stopLng[s] - point.lng) > lngSpan) continue;
+      if (feeds && !feeds.has(t.feeds[t.stopFeed[s]].id)) continue;
+      if (haversineMeters(point.lat, point.lng, t.stopLat[s], t.stopLng[s]) <= radius) stops.push(s);
+    }
+
+    const { day, seconds } = localServiceTime(ms, t.timezone);
+    const origin = serviceDayOrigin(day, t.timezone);
+    const found: Departure[] = [];
+    // Yesterday's trips running past midnight, today's, and tomorrow's when
+    // the window reaches past it.
+    for (const offset of [-1, 0, 1]) {
+      const { active, shift, bases } = this.layer(day, offset, origin);
+      const from = seconds - shift;
+      const to = from + window;
+      if (to < 0) continue;
+      const dayOrigin = serviceDayOrigin(day + offset, t.timezone);
+      for (const s of stops) {
+        for (let i = index.offset[s]; i < index.offset[s + 1]; i += 1) {
+          const p = index.pattern[i];
+          const pos = index.position[i];
+          const count = t.patternStopOffset[p + 1] - t.patternStopOffset[p];
+          if (pos === count - 1) continue; // arrives there, departs nowhere
+          for (let trip = t.patternTripOffset[p]; trip < t.patternTripOffset[p + 1]; trip += 1) {
+            if (!this.tripAllowed[trip]) continue;
+            const service = t.tripService[trip];
+            if (!active[service]) continue;
+            const departs = t.tripTimes[t.tripTimeOffset[trip] + 2 * pos + 1];
+            if (departs < from || departs > to) continue;
+            const r = t.patternRoute[p];
+            found.push({
+              trip,
+              line: {
+                id: t.routeIds[r], shortName: t.routeShortNames[r], longName: t.routeLongNames[r],
+                color: t.routeColors[r], textColor: t.routeTextColors[r], mode: t.routeModes[r], feed: t.feeds[t.routeFeed[r]].id,
+              },
+              headsign: t.patternHeadsigns[p] || t.stopNames[t.patternStops[t.patternStopOffset[p + 1] - 1]],
+              departAt: dayOrigin + departs * 1000,
+              stop: { id: t.stopIds[s], name: t.stopNames[s], lat: t.stopLat[s], lng: t.stopLng[s] },
+              serviceDate: dateOfDay(bases[t.serviceFeed[service]] ?? day + offset),
+            });
+          }
+        }
+      }
+    }
+    found.sort((a, b) => a.departAt - b.departAt || a.line.shortName.localeCompare(b.line.shortName));
+    return found.slice(0, limit);
   }
 
   /** Calls `visit` for each allowed trip running at `ms`, with its service-day offset and local seconds. */
@@ -231,19 +324,21 @@ export class TransitSimulator {
 
   /**
    * The services running on the day `offset` days from `day`, each feed read
-   * on its own (possibly substituted) day, and how many seconds that day's
-   * origin lies before `day`'s.
+   * on that day or, with the fallback, the covered day standing in for it;
+   * and how many seconds that day's origin lies before `day`'s.
    */
   private layer(day: number, offset: number, origin: number) {
     const t = this.timetable;
     const key = `${day}:${offset}`;
     let active = this.activeCache.get(key);
-    const bases = t.feeds.map((_, index) => this.calendar.dayFor(index, day, this.dateFallback));
+    // Each service day is mapped on its own: on the day before a feed starts,
+    // tomorrow is covered even though today is not.
+    const bases = t.feeds.map((_, index) => this.calendar.dayFor(index, day + offset, this.dateFallback));
     if (!active) {
       active = new Uint8Array(t.serviceCount);
       for (let s = 0; s < t.serviceCount; s += 1) {
         const base = bases[t.serviceFeed[s]];
-        active[s] = base !== null && this.calendar.runsOn(s, base + offset) ? 1 : 0;
+        active[s] = base !== null && this.calendar.runsOn(s, base) ? 1 : 0;
       }
       if (this.activeCache.size > 8) this.activeCache.clear();
       this.activeCache.set(key, active);

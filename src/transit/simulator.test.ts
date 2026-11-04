@@ -160,4 +160,28 @@ describe("simulating vehicles", () => {
     expect(lateDetails.serviceDate).toBe("20260914");
     expect(sim.tripDetails(9999, at)).toBeNull();
   });
+
+  test("departures near a point: soonest first, not from a trip's last stop, past midnight too", async () => {
+    const sim = await simulator();
+    // At B, 07:55 Monday: the metro leaves B at 08:03 (it waits a minute).
+    const atB = sim.departures(B, lisbon("2026-09-14", "07:55:00"));
+    expect(atB.map((d) => [d.line.shortName, d.headsign, d.departAt])).toEqual([
+      ["M", "Charlie", lisbon("2026-09-14", "08:03:00")],
+    ]);
+    expect(atB[0].stop.name).toBe("Bravo");
+    // C is where the metro ends and the bus (60 m away as "Charlie Bus", same point here) starts.
+    expect(sim.departures(C, lisbon("2026-09-14", "07:55:00")).map((d) => d.line.shortName)).toEqual(["10"]);
+    // Monday's late trip leaves A at 00:30 on Tuesday.
+    const late = sim.departures(A, lisbon("2026-09-15", "00:20:00"));
+    expect(late.map((d) => d.departAt)).toEqual([lisbon("2026-09-15", "00:30:00")]);
+    expect(late[0].serviceDate).toBe("20260914");
+    // From Sunday evening, the window reaches Monday's first departures.
+    expect(sim.departures(A, lisbon("2026-09-13", "23:00:00"), { windowSeconds: 10 * 3600 }).map((d) => d.departAt)).toEqual([
+      lisbon("2026-09-14", "08:00:00"),
+    ]);
+    // Feeds, radius and window limit what is found.
+    expect(sim.departures(C, lisbon("2026-09-14", "07:55:00"), { feeds: ["metro"] })).toEqual([]);
+    expect(sim.departures({ lat: 41.16, lng: -8.62 }, lisbon("2026-09-14", "07:55:00"))).toEqual([]);
+    expect(sim.departures(B, lisbon("2026-09-14", "07:55:00"), { windowSeconds: 60 })).toEqual([]);
+  });
 });

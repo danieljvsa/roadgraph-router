@@ -351,3 +351,12 @@ test("rail stops placed off the track are moved onto it, and their rides end the
   expect(far.report.stopsPlacedOnTrack).toEqual([]);
   expect(far.timetable.stopLat[far.timetable.stopIds.indexOf("metro:B")]).toBe(B.lat);
 });
+
+test("the night before a feed starts, a plan reaches its first morning", async () => {
+  const { timetable } = await compiled();
+  const router = new TransitRouter(timetable);
+  // Sunday 13 September is before either feed; Monday's first metro leaves A at 08:00.
+  const plan = await router.plan(A, C, { departAt: lisbon("2026-09-13", "23:00"), modes: ["metro"], walkRouter: null });
+  const ride = plan.journeys.flatMap((j) => j.legs).find((leg) => leg.kind === "ride");
+  expect(ride?.departAt).toBe(lisbon("2026-09-14", "08:00").getTime());
+});

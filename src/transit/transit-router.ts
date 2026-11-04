@@ -144,10 +144,13 @@ export class TransitRouter {
       return used;
     });
     const layers: DayLayer[] = [-1, 0, 1].map((offset) => {
+      // Each service day is mapped on its own, so the night before a feed
+      // starts still reaches its first morning.
+      const bases = offset === 0 ? feedDay : t.feeds.map((_, index) => this.calendar.dayFor(index, day + offset, o.dateFallback ?? "none"));
       const active = new Uint8Array(t.serviceCount);
       for (let s = 0; s < t.serviceCount; s += 1) {
-        const base = feedDay[t.serviceFeed[s]];
-        if (base !== null) active[s] = this.calendar.runsOn(s, base + offset) ? 1 : 0;
+        const base = bases[t.serviceFeed[s]];
+        if (base !== null) active[s] = this.calendar.runsOn(s, base) ? 1 : 0;
       }
       // Exact seconds between the two service-day origins, DST included.
       return { shift: Math.round((serviceDayOrigin(day + offset, t.timezone) - origin) / 1000), active };

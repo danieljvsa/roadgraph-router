@@ -23,6 +23,9 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   times, the next stop and the trip's geometry. Same mode, feed and
   same-weekday fallback options as `plan()`; about 2 ms a frame for the 800
   vehicles of Porto's morning peak.
+- **`TransitSimulator.departures()`.** The next departures from the stops
+  near a point, soonest first, with line, direction and time; trips past
+  midnight and windows into the next day included.
 - **`roadgraph-compile-gtfs`.** Compiles one or more GTFS feeds (zip or
   directory) into an EFTT timetable — 0.34 MB for Metro do Porto and STCP
   together — with a report of everything it skipped, interpolated or
