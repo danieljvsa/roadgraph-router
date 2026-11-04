@@ -443,4 +443,20 @@ describe("going to the first station by car or bicycle", () => {
     const failing = { route: async () => { throw new Error("no road"); } };
     expect((await router.plan(B, home, { departAt, walkRouter: null, egress: { mode: "car", router: failing, station: C } })).journeys).toEqual([]);
   });
+
+  test("a station's own time to park decides between stations", async () => {
+    const router = new TransitRouter((await compiled()).timetable);
+    const departAt = lisbon("2026-09-14", "07:40");
+    const car = { mode: "car" as const, router: straightAt(10) };
+    // Alpha is nearer, but with no space to be found the next station wins.
+    const plan = await router.plan(home, C, {
+      departAt,
+      walkRouter: null,
+      access: { ...car, parkSecondsAt: (id) => (id === "metro:A" ? 1800 : 60) },
+    });
+    const fastest = plan.journeys.reduce((a, b) => (b.arriveAt < a.arriveAt ? b : a));
+    const drive = fastest.legs[0];
+    expect(drive.kind === "drive" && drive.toStop?.name).toBe("Bravo");
+    expect(drive.kind === "drive" && drive.parkSeconds).toBe(60);
+  });
 });

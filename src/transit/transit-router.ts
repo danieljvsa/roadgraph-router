@@ -36,6 +36,11 @@ export type AccessOptions = {
   stationModes?: TransitMode[];
   /** Time to park or lock up and reach the platform. Default 5 min by car, 2 min by bicycle. */
   parkSeconds?: number;
+  /**
+   * That time station by station, by stop id: shorter where there is a car
+   * park, longer where a space has to be found. Falls back to `parkSeconds`.
+   */
+  parkSecondsAt?: (stopId: string) => number | undefined;
   /** At most this many stations are routed to. Default 24. */
   maxStations?: number;
 };
@@ -230,6 +235,8 @@ export class TransitRouter {
           router: options.access.router,
         }
       : null;
+    /** Time to park at a station, its own when the caller knows it. */
+    const parkAt = (stop: number) => (vehicle ? vehicle.parkSecondsAt?.(t.stopIds[stop]) ?? vehicle.parkSeconds : 0);
     // The way there by car or bicycle, routed for real before the search: it
     // decides which departure can be caught.
     const vehicleRoutes = new Map<number, Awaited<ReturnType<WalkRouter["route"]>>>();
@@ -270,7 +277,7 @@ export class TransitRouter {
     await Promise.all([
       ...access.map(async ({ stop, meters }, i) => {
         if (vehicle) {
-          accessSeconds.set(stop, Math.round(vehicleRoutes.get(stop)!.durationSeconds) + vehicle.parkSeconds);
+          accessSeconds.set(stop, Math.round(vehicleRoutes.get(stop)!.durationSeconds) + parkAt(stop));
           return;
         }
         const routed = i < NEAREST_ALWAYS ? await walk(from, this.coord(stop), `a${stop}`) : null;
@@ -331,7 +338,7 @@ export class TransitRouter {
       if (found.length === 0) break;
       let earliestLeave = Infinity;
       for (const result of found) {
-        const journey = await this.buildJourney(result, from, to, startSeconds, at, walk, accessSeconds, egressSeconds, vehicle && { mode: vehicle.mode, parkSeconds: vehicle.parkSeconds, routes: vehicleRoutes });
+        const journey = await this.buildJourney(result, from, to, startSeconds, at, walk, accessSeconds, egressSeconds, vehicle && { mode: vehicle.mode, parkAt, routes: vehicleRoutes });
         earliestLeave = Math.min(earliestLeave, journey.departAt);
         const key = journey.legs.map((leg) => (leg.kind === "ride" ? `${leg.line.id}@${leg.departAt}` : "")).join("|");
         if (seen.has(key)) continue;
@@ -470,7 +477,7 @@ export class TransitRouter {
     walk: (a: Coordinate, b: Coordinate, key: string) => Promise<Awaited<ReturnType<WalkRouter["route"]>> | null>,
     accessSeconds: Map<number, number>,
     egressSeconds: Map<number, number>,
-    vehicle: { mode: "bicycle" | "car"; parkSeconds: number; routes: Map<number, Awaited<ReturnType<WalkRouter["route"]>>> } | null = null,
+    vehicle: { mode: "bicycle" | "car"; parkAt: (stop: number) => number; routes: Map<number, Awaited<ReturnType<WalkRouter["route"]>>> } | null = null,
   ): Promise<TransitJourney> {
     const legs: TransitLeg[] = [];
     const firstRide = result.steps.find((step) => step.kind === "ride");
@@ -478,9 +485,10 @@ export class TransitRouter {
       if (step.kind === "access" && vehicle) {
         const routed = vehicle.routes.get(step.stop)!;
         const seconds = Math.round(routed.durationSeconds);
+        const parkSeconds = vehicle.parkAt(step.stop);
         // Leave in time to drive, park and catch the first departure.
-        const board = firstRide?.kind === "ride" ? firstRide.ride.departure : departSeconds + seconds + vehicle.parkSeconds;
-        const leave = board - seconds - vehicle.parkSeconds;
+        const board = firstRide?.kind === "ride" ? firstRide.ride.departure : departSeconds + seconds + parkSeconds;
+        const leave = board - seconds - parkSeconds;
         const leg: VehicleLeg = {
           kind: vehicle.mode === "car" ? "drive" : "cycle",
           from,
@@ -490,7 +498,7 @@ export class TransitRouter {
           arriveAt: at(leave + seconds),
           durationSeconds: seconds,
           distanceMeters: Math.round(routed.distanceMeters),
-          parkSeconds: vehicle.parkSeconds,
+          parkSeconds,
           geometry: routed.geometry,
         };
         legs.push(leg);
