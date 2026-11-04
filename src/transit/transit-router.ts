@@ -40,6 +40,20 @@ export type AccessOptions = {
   maxStations?: number;
 };
 
+/**
+ * Finishing by bicycle or car from a given station, where it was left on the
+ * way out: the plan rides to `station` and goes on from there to the
+ * destination with `router`.
+ */
+export type EgressOptions = {
+  mode: "bicycle" | "car";
+  router: WalkRouter;
+  /** Where the car or bicycle is: the station it was left at. */
+  station: Coordinate & { name?: string; id?: string };
+  /** Time to get from the platform back to it. Default 5 min for a car, 2 for a bicycle. */
+  parkSeconds?: number;
+};
+
 const ACCESS_DEFAULTS = {
   car: { maxMeters: 10_000, parkSeconds: 300 },
   bicycle: { maxMeters: 5_000, parkSeconds: 120 },
@@ -84,6 +98,12 @@ export type TransitPlanOptions = {
    * without it to see whether it saves time.
    */
   access?: AccessOptions;
+  /**
+   * Finish by bicycle or car from the station it was left at (the way back
+   * of a park-and-ride trip). Every journey then ends with a `drive` or
+   * `cycle` leg from that station.
+   */
+  egress?: EgressOptions;
 };
 
 export type TransitRouterOptions = { walkRouter?: WalkRouter };
@@ -159,6 +179,7 @@ export class TransitRouter {
   }
 
   async plan(from: Coordinate, to: Coordinate, options: TransitPlanOptions = {}): Promise<TransitPlan> {
+    if (options.egress) return this.planToVehicle(from, to, options, options.egress);
     const t = this.timetable;
     const o = { ...DEFAULTS, ...definedOnly(options) };
     const walkRouter = options.walkRouter === null ? undefined : options.walkRouter ?? this.walkRouter;
@@ -325,6 +346,45 @@ export class TransitRouter {
       }
     }
     return { journeys, serviceDates };
+  }
+
+  /**
+   * A plan to the station where the car or bicycle waits, each journey then
+   * continued by it to the destination: one route, the same for every
+   * journey, starting when the traveller is back at the vehicle.
+   */
+  private async planToVehicle(from: Coordinate, to: Coordinate, options: TransitPlanOptions, egress: EgressOptions): Promise<TransitPlan> {
+    const parkSeconds = egress.parkSeconds ?? ACCESS_DEFAULTS[egress.mode].parkSeconds;
+    const station = { lat: egress.station.lat, lng: egress.station.lng };
+    const [plan, routed] = await Promise.all([
+      this.plan(from, station, { ...options, egress: undefined }),
+      egress.router.route(station, to).catch(() => null),
+    ]);
+    if (!routed) return { ...plan, journeys: [] };
+    const seconds = Math.round(routed.durationSeconds);
+    const fromStop: TransitStop = { id: egress.station.id ?? "", name: egress.station.name ?? "", lat: station.lat, lng: station.lng };
+    const journeys = plan.journeys.map((journey): TransitJourney => {
+      const leave = journey.arriveAt + parkSeconds * 1000;
+      const leg: VehicleLeg = {
+        kind: egress.mode === "car" ? "drive" : "cycle",
+        from: station,
+        to,
+        fromStop,
+        departAt: leave,
+        arriveAt: leave + seconds * 1000,
+        durationSeconds: seconds,
+        distanceMeters: Math.round(routed.distanceMeters),
+        parkSeconds,
+        geometry: routed.geometry,
+      };
+      return {
+        ...journey,
+        legs: [...journey.legs, leg],
+        arriveAt: leg.arriveAt,
+        durationSeconds: Math.round((leg.arriveAt - journey.departAt) / 1000),
+      };
+    });
+    return { ...plan, journeys };
   }
 
   private coord(stop: number): Coordinate {

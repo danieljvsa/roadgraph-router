@@ -29,6 +29,8 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are routed to, a time to park or lock up is added (5 / 2 min), and
   journeys start with a `drive` or `cycle` leg (`VehicleLeg`). Stations
   within walking reach of the destination are left out.
+  `plan({ egress })` is the way back: ride to the station where the car or
+  bicycle was left and finish by it, after time to get back to it.
 - **`TransitSimulator.departures()`.** The next departures from the stops
   near a point, soonest first, with line, direction and time; trips past
   midnight and windows into the next day included.

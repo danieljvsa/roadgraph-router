@@ -386,7 +386,7 @@ describe("going to the first station by car or bicycle", () => {
     const [drive, ride] = journey.legs;
     expect(drive.kind).toBe("drive");
     if (drive.kind !== "drive" || ride.kind !== "ride") throw new Error("expected drive then ride");
-    expect(drive.toStop.name).toBe("Alpha, Station");
+    expect(drive.toStop?.name).toBe("Alpha, Station");
     expect(drive.parkSeconds).toBe(300);
     // Leaves in time to drive ~3 km, park 5 min and catch the 08:00.
     expect(ride.departAt).toBe(lisbon("2026-09-14", "08:00").getTime());
@@ -414,8 +414,33 @@ describe("going to the first station by car or bicycle", () => {
     // Bus stops allowed: the car can reach C2 for the bus.
     const toE = await router.plan(home, E, { departAt, walkRouter: null, access: { mode: "car", router: straightAt(10), stationModes: ["bus"] } });
     const drive = toE.journeys[0]?.legs[0];
-    expect(drive?.kind === "drive" && drive.toStop.name).toBe("Charlie Bus");
+    expect(drive?.kind === "drive" && drive.toStop?.name).toBe("Charlie Bus");
     const failing = { route: async () => { throw new Error("no road"); } };
     expect((await router.plan(home, C, { departAt, walkRouter: null, access: { mode: "car", router: failing } })).journeys).toEqual([]);
+  });
+
+  test("the way back ends at the station where the car was left, then drives home", async () => {
+    const router = new TransitRouter((await compiled()).timetable);
+    const departAt = lisbon("2026-09-14", "08:00");
+    const plan = await router.plan(B, home, {
+      departAt,
+      walkRouter: null,
+      modes: ["metro"],
+      egress: { mode: "car", router: straightAt(10), station: { ...C, name: "Charlie", id: "metro:C" } },
+    });
+    expect(plan.journeys.length).toBeGreaterThan(0);
+    const journey = plan.journeys[0];
+    const last = journey.legs[journey.legs.length - 1];
+    const ride = journey.legs.find((leg) => leg.kind === "ride");
+    if (last.kind !== "drive" || ride?.kind !== "ride") throw new Error("expected a ride, then a drive");
+    expect(ride.to.name).toBe("Charlie");
+    expect(last.fromStop?.name).toBe("Charlie");
+    // Five minutes back to the car after the 08:05 arrival, then the drive.
+    expect(last.departAt).toBe(ride.arriveAt + 300_000);
+    expect(journey.arriveAt).toBe(last.arriveAt);
+    expect(journey.durationSeconds).toBe(Math.round((last.arriveAt - journey.departAt) / 1000));
+    // No road back: no journeys.
+    const failing = { route: async () => { throw new Error("no road"); } };
+    expect((await router.plan(B, home, { departAt, walkRouter: null, egress: { mode: "car", router: failing, station: C } })).journeys).toEqual([]);
   });
 });

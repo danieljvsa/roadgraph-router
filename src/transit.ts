@@ -8,7 +8,7 @@
 export { compileTransit, modeOfRouteType, type CompileTransitOptions, type GtfsFeedInput, type HopGeometryRequest } from "./transit/compile";
 export { decodeTransitTimetable, encodeTransitTimetable } from "./transit/codec";
 export {
-  TransitRouter, type AccessOptions, type TransitPlanOptions, type TransitRouterOptions, type WalkRouter,
+  TransitRouter, type AccessOptions, type EgressOptions, type TransitPlanOptions, type TransitRouterOptions, type WalkRouter,
 } from "./transit/transit-router";
 export {
   TransitSimulator, type Departure, type DeparturesOptions, type TransitSimulatorOptions, type TripDetails, type VehiclePositions,

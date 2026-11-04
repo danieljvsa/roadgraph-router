@@ -188,20 +188,23 @@ export type RideLeg = {
 };
 
 /**
- * Driving or cycling to the first station, where the car or bicycle is
- * left (`TransitPlanOptions.access`). The ride after it leaves at least
- * `parkSeconds` after `arriveAt`.
+ * Driving or cycling between a station and the origin or destination (park
+ * and ride). To the first station (`TransitPlanOptions.access`), `toStop` is
+ * set and the ride after it leaves at least `parkSeconds` after `arriveAt`;
+ * from the last station (`egress`), `fromStop` is set and the leg starts
+ * `parkSeconds` after the ride before it arrives.
  */
 export type VehicleLeg = {
   kind: "drive" | "cycle";
   from: Coordinate;
   to: Coordinate;
-  toStop: TransitStop;
+  fromStop?: TransitStop;
+  toStop?: TransitStop;
   departAt: number;
   arriveAt: number;
   durationSeconds: number;
   distanceMeters: number;
-  /** Time allowed after arriving to park or lock up and reach the platform. */
+  /** Time allowed at the station: parking or locking up, or getting back to the car or bicycle. */
   parkSeconds: number;
   geometry: GeoJsonLineString;
 };
