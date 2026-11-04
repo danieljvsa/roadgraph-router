@@ -23,6 +23,12 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   times, the next stop and the trip's geometry. Same mode, feed and
   same-weekday fallback options as `plan()`; about 2 ms a frame for the 800
   vehicles of Porto's morning peak.
+- **Park and ride: `plan({ access })`.** Reach the first station by car or
+  bicycle (any `WalkRouter`, e.g. a `RoadRouter` on that profile) instead of
+  on foot: metro and rail stations within reach (10 km / 5 km by default)
+  are routed to, a time to park or lock up is added (5 / 2 min), and
+  journeys start with a `drive` or `cycle` leg (`VehicleLeg`). Stations
+  within walking reach of the destination are left out.
 - **`TransitSimulator.departures()`.** The next departures from the stops
   near a point, soonest first, with line, direction and time; trips past
   midnight and windows into the next day included.

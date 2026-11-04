@@ -7,7 +7,9 @@
  */
 export { compileTransit, modeOfRouteType, type CompileTransitOptions, type GtfsFeedInput, type HopGeometryRequest } from "./transit/compile";
 export { decodeTransitTimetable, encodeTransitTimetable } from "./transit/codec";
-export { TransitRouter, type TransitPlanOptions, type TransitRouterOptions, type WalkRouter } from "./transit/transit-router";
+export {
+  TransitRouter, type AccessOptions, type TransitPlanOptions, type TransitRouterOptions, type WalkRouter,
+} from "./transit/transit-router";
 export {
   TransitSimulator, type Departure, type DeparturesOptions, type TransitSimulatorOptions, type TripDetails, type VehiclePositions,
 } from "./transit/simulator";
@@ -16,5 +18,5 @@ export { dateOfDay, dayNumber, parseGtfsTime } from "./transit/time";
 export { HopSource, TRANSIT_MODES } from "./transit/types";
 export type {
   RideLeg, TransitCompileReport, TransitFeedInfo, TransitJourney, TransitLeg, TransitLine, TransitMode, TransitPlan,
-  TransitStop, TransitTimetable, WalkLeg,
+  TransitStop, TransitTimetable, VehicleLeg, WalkLeg,
 } from "./transit/types";

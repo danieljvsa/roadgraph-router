@@ -7,7 +7,7 @@ import { dateOfDay, localServiceTime, serviceDayOrigin } from "./time";
 import {
   HopSource, TRANSIT_MODES,
   type RideLeg, type TransitJourney, type TransitLeg, type TransitLine, type TransitMode, type TransitPlan,
-  type TransitStop, type TransitTimetable, type WalkLeg,
+  type TransitStop, type TransitTimetable, type VehicleLeg, type WalkLeg,
 } from "./types";
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -19,6 +19,30 @@ type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respo
  */
 export type WalkRouter = {
   route(from: Coordinate, to: Coordinate): Promise<{ distanceMeters: number; durationSeconds: number; geometry: GeoJsonLineString }>;
+};
+
+/**
+ * Reaching the first station by bicycle or car instead of on foot, and
+ * leaving it there (park and ride). Only stations served by `stationModes`
+ * qualify: a car is not left at a bus stop.
+ */
+export type AccessOptions = {
+  mode: "bicycle" | "car";
+  /** Routes the way to each candidate station: a `RoadRouter` on a bicycle or car profile. */
+  router: WalkRouter;
+  /** How far, in a straight line, a station may be. Default 10 km by car, 5 km by bicycle. */
+  maxMeters?: number;
+  /** Which stations qualify, by the modes serving them. Default metro and rail. */
+  stationModes?: TransitMode[];
+  /** Time to park or lock up and reach the platform. Default 5 min by car, 2 min by bicycle. */
+  parkSeconds?: number;
+  /** At most this many stations are routed to. Default 24. */
+  maxStations?: number;
+};
+
+const ACCESS_DEFAULTS = {
+  car: { maxMeters: 10_000, parkSeconds: 300 },
+  bicycle: { maxMeters: 5_000, parkSeconds: 120 },
 };
 
 export type TransitPlanOptions = {
@@ -54,6 +78,12 @@ export type TransitPlanOptions = {
   dateFallback?: "none" | "same-weekday";
   /** Overrides the router's walk router for this plan; `null` estimates walks. */
   walkRouter?: WalkRouter | null;
+  /**
+   * Go to the first station by bicycle or car instead of walking. Every
+   * journey then starts with a `drive` or `cycle` leg; compare with a plan
+   * without it to see whether it saves time.
+   */
+  access?: AccessOptions;
 };
 
 export type TransitRouterOptions = { walkRouter?: WalkRouter };
@@ -166,8 +196,36 @@ export class TransitRouter {
     for (let p = 0; p < t.patternCount; p += 1) patternAllowed[p] = routeAllowed[t.patternRoute[p]];
 
     const estimate = (meters: number) => Math.ceil((meters * o.walkDetourFactor) / o.walkSpeedMps);
-    const access = this.candidates(from, o.maxWalkMeters, routeAllowed);
+    const vehicle = options.access
+      ? {
+          ...ACCESS_DEFAULTS[options.access.mode],
+          stationModes: ["metro", "rail"] as TransitMode[],
+          maxStations: 24,
+          ...definedOnly(options.access),
+          mode: options.access.mode,
+          router: options.access.router,
+        }
+      : null;
+    // The way there by car or bicycle, routed for real before the search: it
+    // decides which departure can be caught.
+    const vehicleRoutes = new Map<number, Awaited<ReturnType<WalkRouter["route"]>>>();
+    let access = vehicle ? this.stations(from, vehicle.maxMeters, new Set(vehicle.stationModes), routeAllowed, vehicle.maxStations) : this.candidates(from, o.maxWalkMeters, routeAllowed);
+    if (vehicle) {
+      await Promise.all(
+        access.map(async ({ stop }) => {
+          const routed = await vehicle.router.route(from, this.coord(stop)).catch(() => null);
+          if (routed) vehicleRoutes.set(stop, routed);
+        }),
+      );
+      access = access.filter(({ stop }) => vehicleRoutes.has(stop));
+    }
     const egress = this.candidates(to, o.maxWalkMeters, routeAllowed);
+    // Driving to a station within walking reach of the destination is just
+    // driving; it would also outrun, and so hide, every ride to that station.
+    if (vehicle) {
+      const nearDestination = new Set(egress.map(({ stop }) => stop));
+      access = access.filter(({ stop }) => !nearDestination.has(stop));
+    }
 
     // Walks to the nearest few stops are worth routing for real before the
     // search, because whether a departure can be caught depends on them.
@@ -181,6 +239,10 @@ export class TransitRouter {
     };
     await Promise.all([
       ...access.map(async ({ stop, meters }, i) => {
+        if (vehicle) {
+          accessSeconds.set(stop, Math.round(vehicleRoutes.get(stop)!.durationSeconds) + vehicle.parkSeconds);
+          return;
+        }
         const routed = i < NEAREST_ALWAYS ? await walk(from, this.coord(stop), `a${stop}`) : null;
         accessSeconds.set(stop, routed ? Math.round(routed.durationSeconds) : estimate(meters));
       }),
@@ -208,7 +270,7 @@ export class TransitRouter {
         let changed = false;
         for (const journey of found) {
           const first = journey.steps[0];
-          if (first?.kind === "access") {
+          if (first?.kind === "access" && !vehicle) {
             const routed = await walk(from, this.coord(first.stop), `a${first.stop}`);
             if (routed && Math.round(routed.durationSeconds) !== accessSeconds.get(first.stop)) {
               accessSeconds.set(first.stop, Math.round(routed.durationSeconds));
@@ -239,7 +301,7 @@ export class TransitRouter {
       if (found.length === 0) break;
       let earliestLeave = Infinity;
       for (const result of found) {
-        const journey = await this.buildJourney(result, from, to, startSeconds, at, walk, accessSeconds, egressSeconds);
+        const journey = await this.buildJourney(result, from, to, startSeconds, at, walk, accessSeconds, egressSeconds, vehicle && { mode: vehicle.mode, parkSeconds: vehicle.parkSeconds, routes: vehicleRoutes });
         earliestLeave = Math.min(earliestLeave, journey.departAt);
         const key = journey.legs.map((leg) => (leg.kind === "ride" ? `${leg.line.id}@${leg.departAt}` : "")).join("|");
         if (seen.has(key)) continue;
@@ -253,7 +315,7 @@ export class TransitRouter {
 
     // Walking the whole way is a journey too, and sometimes the best one.
     const directMeters = haversineMeters(from.lat, from.lng, to.lat, to.lng);
-    if (directMeters <= Math.max(o.maxWalkMeters * 2, 1500) || journeys.length === 0) {
+    if (!vehicle && (directMeters <= Math.max(o.maxWalkMeters * 2, 1500) || journeys.length === 0)) {
       const routed = await walk(from, to, "direct");
       const seconds = routed ? Math.round(routed.durationSeconds) : estimate(directMeters);
       const earliest = journeys.reduce((min, j) => Math.min(min, j.arriveAt), Infinity);
@@ -267,6 +329,36 @@ export class TransitRouter {
 
   private coord(stop: number): Coordinate {
     return { lat: this.timetable.stopLat[stop], lng: this.timetable.stopLng[stop] };
+  }
+
+  /**
+   * Stations within reach by car or bicycle: stops served by one of
+   * `stationModes`, the nearest few and then the nearest two of every line,
+   * so a park-and-ride further out along a line is tried too.
+   */
+  private stations(point: Coordinate, maxMeters: number, stationModes: Set<TransitMode>, routeAllowed: Uint8Array, maxStations: number) {
+    const t = this.timetable;
+    const near: { stop: number; meters: number }[] = [];
+    const latSpan = maxMeters / 111_320;
+    const lngSpan = latSpan / Math.max(0.2, Math.cos((point.lat * Math.PI) / 180));
+    for (let s = 0; s < t.stopCount; s += 1) {
+      if (Math.abs(t.stopLat[s] - point.lat) > latSpan || Math.abs(t.stopLng[s] - point.lng) > lngSpan) continue;
+      if (!this.stopRoutes[s].some((r) => routeAllowed[r] && stationModes.has(t.routeModes[r]))) continue;
+      const meters = haversineMeters(point.lat, point.lng, t.stopLat[s], t.stopLng[s]);
+      if (meters <= maxMeters) near.push({ stop: s, meters });
+    }
+    near.sort((a, b) => a.meters - b.meters);
+    const perRoute = new Map<number, number>();
+    const chosen: { stop: number; meters: number }[] = [];
+    for (const candidate of near) {
+      const routes = [...this.stopRoutes[candidate.stop]].filter((r) => routeAllowed[r] && stationModes.has(t.routeModes[r]));
+      if (chosen.length < NEAREST_ALWAYS || routes.some((r) => (perRoute.get(r) ?? 0) < 2)) {
+        chosen.push(candidate);
+        routes.forEach((r) => perRoute.set(r, (perRoute.get(r) ?? 0) + 1));
+        if (chosen.length >= maxStations) break;
+      }
+    }
+    return chosen;
   }
 
   /**
@@ -309,11 +401,31 @@ export class TransitRouter {
     walk: (a: Coordinate, b: Coordinate, key: string) => Promise<Awaited<ReturnType<WalkRouter["route"]>> | null>,
     accessSeconds: Map<number, number>,
     egressSeconds: Map<number, number>,
+    vehicle: { mode: "bicycle" | "car"; parkSeconds: number; routes: Map<number, Awaited<ReturnType<WalkRouter["route"]>>> } | null = null,
   ): Promise<TransitJourney> {
     const legs: TransitLeg[] = [];
     const firstRide = result.steps.find((step) => step.kind === "ride");
     for (const step of result.steps) {
-      if (step.kind === "access") {
+      if (step.kind === "access" && vehicle) {
+        const routed = vehicle.routes.get(step.stop)!;
+        const seconds = Math.round(routed.durationSeconds);
+        // Leave in time to drive, park and catch the first departure.
+        const board = firstRide?.kind === "ride" ? firstRide.ride.departure : departSeconds + seconds + vehicle.parkSeconds;
+        const leave = board - seconds - vehicle.parkSeconds;
+        const leg: VehicleLeg = {
+          kind: vehicle.mode === "car" ? "drive" : "cycle",
+          from,
+          to: this.coord(step.stop),
+          toStop: this.stop(step.stop),
+          departAt: at(leave),
+          arriveAt: at(leave + seconds),
+          durationSeconds: seconds,
+          distanceMeters: Math.round(routed.distanceMeters),
+          parkSeconds: vehicle.parkSeconds,
+          geometry: routed.geometry,
+        };
+        legs.push(leg);
+      } else if (step.kind === "access") {
         const stop = this.coord(step.stop);
         const meters = haversineMeters(from.lat, from.lng, stop.lat, stop.lng);
         const routed = await walk(from, stop, `a${step.stop}`);

@@ -1,5 +1,6 @@
 import { compileTransit, decodeTransitTimetable, encodeTransitTimetable, parseCsv, parseGtfsTime, TransitRouter, type GtfsFeedInput, type HopGeometryRequest } from "../transit";
 import { serviceDayOrigin, localServiceTime, dayNumber } from "./time";
+import { haversineMeters } from "./compile";
 
 /**
  * A small two-operator network laid out east-west along latitude 41.15 in
@@ -190,7 +191,7 @@ describe("planning", () => {
     const router = new TransitRouter((await compiled()).timetable);
     const at = lisbon("2026-09-14", "08:05");
     const busOnly = await router.plan(A, E, { ...options, departAt: at, modes: ["bus"] });
-    expect(busOnly.journeys.every((j) => j.legs.every((leg) => leg.kind === "walk" || leg.line.mode === "bus"))).toBe(true);
+    expect(busOnly.journeys.every((j) => j.legs.every((leg) => leg.kind !== "ride" || leg.line.mode === "bus"))).toBe(true);
     expect(busOnly.journeys.some((j) => j.rides > 0)).toBe(false); // A is out of reach of every bus stop
     const metroOnly = await router.plan(A, C, { ...options, departAt: at, feeds: ["metro"] });
     expect(metroOnly.journeys.at(-1)!.legs.some((leg) => leg.kind === "ride" && leg.line.feed === "metro")).toBe(true);
@@ -359,4 +360,62 @@ test("the night before a feed starts, a plan reaches its first morning", async (
   const plan = await router.plan(A, C, { departAt: lisbon("2026-09-13", "23:00"), modes: ["metro"], walkRouter: null });
   const ride = plan.journeys.flatMap((j) => j.legs).find((leg) => leg.kind === "ride");
   expect(ride?.departAt).toBe(lisbon("2026-09-14", "08:00").getTime());
+});
+
+describe("going to the first station by car or bicycle", () => {
+  // 3 km west of A: out of walking reach of every stop.
+  const home = { lat: 41.15, lng: -8.656 };
+  /** A stand-in road router: the straight line at a fixed speed. */
+  const straightAt = (mps: number) => ({
+    route: async (a: { lat: number; lng: number }, b: { lat: number; lng: number }) => {
+      const meters = haversineMeters(a.lat, a.lng, b.lat, b.lng);
+      return { distanceMeters: meters, durationSeconds: meters / mps, geometry: { type: "LineString" as const, coordinates: [[a.lng, a.lat], [b.lng, b.lat]] } };
+    },
+  });
+
+  test("drives to a station, parks, and rides on; bus stops are not parking places", async () => {
+    const router = new TransitRouter((await compiled()).timetable);
+    // 5 min to drive 3 km, 5 to park: 07:45 catches the 08:00.
+    const departAt = lisbon("2026-09-14", "07:45");
+    const onFoot = await router.plan(home, C, { departAt, walkRouter: null });
+    expect(onFoot.journeys.some((j) => j.rides > 0)).toBe(false);
+
+    const plan = await router.plan(home, C, { departAt, walkRouter: null, access: { mode: "car", router: straightAt(10) } });
+    expect(plan.journeys.length).toBeGreaterThan(0);
+    const [journey] = plan.journeys;
+    const [drive, ride] = journey.legs;
+    expect(drive.kind).toBe("drive");
+    if (drive.kind !== "drive" || ride.kind !== "ride") throw new Error("expected drive then ride");
+    expect(drive.toStop.name).toBe("Alpha, Station");
+    expect(drive.parkSeconds).toBe(300);
+    // Leaves in time to drive ~3 km, park 5 min and catch the 08:00.
+    expect(ride.departAt).toBe(lisbon("2026-09-14", "08:00").getTime());
+    expect(drive.arriveAt + drive.parkSeconds * 1000).toBeLessThanOrEqual(ride.departAt);
+    expect(ride.departAt - (drive.arriveAt + drive.parkSeconds * 1000)).toBeLessThan(1000);
+    // No walking-the-whole-way option is mixed in.
+    expect(plan.journeys.every((j) => j.legs[0].kind === "drive")).toBe(true);
+  });
+
+  test("by bicycle: a shorter reach and less time to lock up", async () => {
+    const router = new TransitRouter((await compiled()).timetable);
+    const departAt = lisbon("2026-09-14", "07:50");
+    const plan = await router.plan(home, C, { departAt, walkRouter: null, access: { mode: "bicycle", router: straightAt(4.5) } });
+    const first = plan.journeys[0].legs[0];
+    expect(first.kind).toBe("cycle");
+    if (first.kind === "cycle") expect(first.parkSeconds).toBe(120);
+    // Beyond its reach, nothing.
+    const far = { lat: 41.15, lng: -8.72 }; // ~8 km west
+    expect((await router.plan(far, C, { departAt, walkRouter: null, access: { mode: "bicycle", router: straightAt(4.5) } })).journeys).toEqual([]);
+  });
+
+  test("only stations of the given modes qualify, and failed routes are skipped", async () => {
+    const router = new TransitRouter((await compiled()).timetable);
+    const departAt = lisbon("2026-09-14", "08:10");
+    // Bus stops allowed: the car can reach C2 for the bus.
+    const toE = await router.plan(home, E, { departAt, walkRouter: null, access: { mode: "car", router: straightAt(10), stationModes: ["bus"] } });
+    const drive = toE.journeys[0]?.legs[0];
+    expect(drive?.kind === "drive" && drive.toStop.name).toBe("Charlie Bus");
+    const failing = { route: async () => { throw new Error("no road"); } };
+    expect((await router.plan(home, C, { departAt, walkRouter: null, access: { mode: "car", router: failing } })).journeys).toEqual([]);
+  });
 });

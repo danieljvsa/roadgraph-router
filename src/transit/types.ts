@@ -187,7 +187,26 @@ export type RideLeg = {
   geometrySource: "shape" | "routed" | "straight" | "mixed";
 };
 
-export type TransitLeg = WalkLeg | RideLeg;
+/**
+ * Driving or cycling to the first station, where the car or bicycle is
+ * left (`TransitPlanOptions.access`). The ride after it leaves at least
+ * `parkSeconds` after `arriveAt`.
+ */
+export type VehicleLeg = {
+  kind: "drive" | "cycle";
+  from: Coordinate;
+  to: Coordinate;
+  toStop: TransitStop;
+  departAt: number;
+  arriveAt: number;
+  durationSeconds: number;
+  distanceMeters: number;
+  /** Time allowed after arriving to park or lock up and reach the platform. */
+  parkSeconds: number;
+  geometry: GeoJsonLineString;
+};
+
+export type TransitLeg = WalkLeg | RideLeg | VehicleLeg;
 
 export type TransitJourney = {
   departAt: number;
