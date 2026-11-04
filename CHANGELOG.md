@@ -15,6 +15,14 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`modes`) and operator (`feeds`), handles trips past midnight and changes
   of the clocks, and routes walks over a pedestrian `RoadRouter` when given
   one.
+- **`TransitSimulator`: every vehicle on the timetable at a given moment.**
+  `positions(ms)` returns each running trip's position, interpolated by
+  distance along its ride geometry between the times it is due at each stop,
+  with its heading and whether it is standing at a stop, in flat typed arrays
+  a worker can transfer. `tripDetails(trip, ms)` gives the line, every stop's
+  times, the next stop and the trip's geometry. Same mode, feed and
+  same-weekday fallback options as `plan()`; about 2 ms a frame for the 800
+  vehicles of Porto's morning peak.
 - **`roadgraph-compile-gtfs`.** Compiles one or more GTFS feeds (zip or
   directory) into an EFTT timetable — 0.34 MB for Metro do Porto and STCP
   together — with a report of everything it skipped, interpolated or

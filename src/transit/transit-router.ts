@@ -2,7 +2,8 @@ import type { Coordinate, GeoJsonLineString } from "../types";
 import { decodeTransitTimetable } from "./codec";
 import { definedOnly, haversineMeters } from "./compile";
 import { buildStopPatternIndex, raptor, type DayLayer, type RaptorJourney, type StopPatternIndex } from "./raptor";
-import { dateOfDay, dayNumber, localServiceTime, serviceDayOrigin, weekdayOfDay } from "./time";
+import { ServiceCalendar } from "./calendar";
+import { dateOfDay, localServiceTime, serviceDayOrigin } from "./time";
 import {
   HopSource, TRANSIT_MODES,
   type RideLeg, type TransitJourney, type TransitLeg, type TransitLine, type TransitMode, type TransitPlan,
@@ -73,18 +74,13 @@ const MAX_CANDIDATE_STOPS = 40;
 export class TransitRouter {
   private readonly index: StopPatternIndex;
   private readonly stopRoutes: Uint32Array[];
-  /** Per feed, 1 for each day (from `firstDay`) on which that feed runs any trip. */
-  private readonly feedRuns: Uint8Array[];
+  private readonly calendar: ServiceCalendar;
   private walkRouter: WalkRouter | undefined;
 
   constructor(readonly timetable: TransitTimetable, options: TransitRouterOptions = {}) {
     this.index = buildStopPatternIndex(timetable);
     this.walkRouter = options.walkRouter;
-    this.feedRuns = timetable.feeds.map(() => new Uint8Array(timetable.dayCount));
-    for (let s = 0; s < timetable.serviceCount; s += 1) {
-      const runs = this.feedRuns[timetable.serviceFeed[s]];
-      for (let d = 0; d < timetable.dayCount; d += 1) if (this.runsOn(s, timetable.firstDay + d)) runs[d] = 1;
-    }
+    this.calendar = new ServiceCalendar(timetable);
     this.stopRoutes = [];
     for (let s = 0; s < timetable.stopCount; s += 1) {
       const routes = new Set<number>();
@@ -142,8 +138,8 @@ export class TransitRouter {
 
     // Which service day each feed's timetable is read on.
     const serviceDates: TransitPlan["serviceDates"] = [];
-    const feedDay = t.feeds.map((feed) => {
-      const used = this.serviceDayFor(feed.id, day, o.dateFallback ?? "none");
+    const feedDay = t.feeds.map((feed, index) => {
+      const used = this.calendar.dayFor(index, day, o.dateFallback ?? "none");
       serviceDates.push({ feed: feed.id, requested: dateOfDay(day), used: used === null ? "" : dateOfDay(used), substituted: used !== null && used !== day });
       return used;
     });
@@ -151,7 +147,7 @@ export class TransitRouter {
       const active = new Uint8Array(t.serviceCount);
       for (let s = 0; s < t.serviceCount; s += 1) {
         const base = feedDay[t.serviceFeed[s]];
-        if (base !== null) active[s] = this.runsOn(s, base + offset) ? 1 : 0;
+        if (base !== null) active[s] = this.calendar.runsOn(s, base + offset) ? 1 : 0;
       }
       // Exact seconds between the two service-day origins, DST included.
       return { shift: Math.round((serviceDayOrigin(day + offset, t.timezone) - origin) / 1000), active };
@@ -268,36 +264,6 @@ export class TransitRouter {
 
   private coord(stop: number): Coordinate {
     return { lat: this.timetable.stopLat[stop], lng: this.timetable.stopLng[stop] };
-  }
-
-  private runsOn(service: number, day: number) {
-    const t = this.timetable;
-    const bit = day - t.firstDay;
-    if (bit < 0 || bit >= t.dayCount) return false;
-    return (t.serviceDays[service * Math.ceil(t.dayCount / 8) + (bit >> 3)] & (1 << (bit & 7))) !== 0;
-  }
-
-  /** The day whose timetable a feed is read on, or null when it has none to offer. */
-  private serviceDayFor(feedId: string, day: number, fallback: "none" | "same-weekday"): number | null {
-    const index = this.timetable.feeds.findIndex((f) => f.id === feedId);
-    const feed = this.timetable.feeds[index];
-    if (!feed.firstServiceDate) return null;
-    // A substitute must be a day the feed actually runs trips on: some exports
-    // list dates for a service no trip uses, which would be a day with nothing.
-    const runs = (d: number) => this.feedRuns[index][d - this.timetable.firstDay] === 1;
-    const first = dayNumber(feed.firstServiceDate);
-    const last = dayNumber(feed.lastServiceDate);
-    if (day >= first && day <= last) return day;
-    if (fallback === "none") return null;
-    const weekday = weekdayOfDay(day);
-    // The covered day nearest in time with the same weekday: the last such day
-    // when the feed has expired, the first when it has not started yet.
-    if (day > last) {
-      for (let d = last; d >= first; d -= 1) if (weekdayOfDay(d) === weekday && runs(d)) return d;
-    } else {
-      for (let d = first; d <= last; d += 1) if (weekdayOfDay(d) === weekday && runs(d)) return d;
-    }
-    return null;
   }
 
   /**
