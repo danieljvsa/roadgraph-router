@@ -54,6 +54,9 @@ export type EgressOptions = {
   parkSeconds?: number;
 };
 
+/** Stations routed to before the rest, to find out whether the origin can be left by car or bicycle at all. */
+const PROBE_STATIONS = 3;
+
 const ACCESS_DEFAULTS = {
   car: { maxMeters: 10_000, parkSeconds: 300 },
   bicycle: { maxMeters: 5_000, parkSeconds: 120 },
@@ -232,12 +235,18 @@ export class TransitRouter {
     const vehicleRoutes = new Map<number, Awaited<ReturnType<WalkRouter["route"]>>>();
     let access = vehicle ? this.stations(from, vehicle.maxMeters, new Set(vehicle.stationModes), routeAllowed, vehicle.maxStations) : this.candidates(from, o.maxWalkMeters, routeAllowed);
     if (vehicle) {
-      await Promise.all(
-        access.map(async ({ stop }) => {
-          const routed = await vehicle.router.route(from, this.coord(stop)).catch(() => null);
-          if (routed) vehicleRoutes.set(stop, routed);
-        }),
-      );
+      const routeTo = (list: typeof access) =>
+        Promise.all(
+          list.map(async ({ stop }) => {
+            const routed = await vehicle.router.route(from, this.coord(stop)).catch(() => null);
+            if (routed) vehicleRoutes.set(stop, routed);
+          }),
+        );
+      // The nearest few first: when none of them can be reached, the origin
+      // is off the network for this vehicle (a footpath, a park), every other
+      // station would fail the same slow way, and the plan gives up at once.
+      await routeTo(access.slice(0, PROBE_STATIONS));
+      if (vehicleRoutes.size > 0) await routeTo(access.slice(PROBE_STATIONS));
       access = access.filter(({ stop }) => vehicleRoutes.has(stop));
     }
     const egress = this.candidates(to, o.maxWalkMeters, routeAllowed);
