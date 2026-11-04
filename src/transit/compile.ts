@@ -511,10 +511,11 @@ export async function compileTransit(feeds: GtfsFeedInput[], options: CompileTra
    * drawn along the track would leave it for a stub across the street, and
    * walks would start there. The routed hops already end where the track
    * passes the station; the stop goes to the middle of those points (one per
-   * track, so between the platforms of a two-track station).
+   * track and direction), projected back onto the track.
    */
   function placeStopsOnTrack(): TransitCompileReport["stopsPlacedOnTrack"] {
     const points = new Map<number, number[][]>();
+    const tracks = new Map<number, number[][][]>();
     const offTrack = new Set<number>();
     const add = (stop: number, point: number[] | undefined) => {
       if (!point) return;
@@ -523,10 +524,22 @@ export async function compileTransit(feeds: GtfsFeedInput[], options: CompileTra
       list.push(point);
     };
     for (const hops of groupHops) {
+      // Through a station, a train runs from where one hop meets the track
+      // to where the next leaves it: that stretch is the platform.
+      for (let i = 0; i + 1 < hops.length; i += 1) {
+        if (hops[i].source !== HopSource.Routed || hops[i + 1].source !== HopSource.Routed) continue;
+        const stop = hops[i].to;
+        if (!tracks.has(stop)) tracks.set(stop, []);
+        tracks.get(stop)!.push([hops[i].coords[hops[i].coords.length - 1], hops[i + 1].coords[0]]);
+      }
       for (const hop of hops) {
         if (hop.source === HopSource.Routed) {
           add(hop.from, hop.coords[0]);
           add(hop.to, hop.coords[hop.coords.length - 1]);
+          for (const stop of [hop.from, hop.to]) {
+            if (!tracks.has(stop)) tracks.set(stop, []);
+            tracks.get(stop)!.push(hop.coords);
+          }
         } else {
           offTrack.add(hop.from);
           offTrack.add(hop.to);
@@ -536,10 +549,21 @@ export async function compileTransit(feeds: GtfsFeedInput[], options: CompileTra
     const moved: TransitCompileReport["stopsPlacedOnTrack"] = [];
     for (const [stop, list] of points) {
       if (offTrack.has(stop)) continue;
-      const lat = list.reduce((sum, p) => sum + p[1], 0) / list.length;
-      const lng = list.reduce((sum, p) => sum + p[0], 0) / list.length;
+      const midLat = list.reduce((sum, p) => sum + p[1], 0) / list.length;
+      const midLng = list.reduce((sum, p) => sum + p[0], 0) / list.length;
       // Points far apart are not one station's platforms; leave the stop be.
-      if (list.some((p) => haversineMeters(p[1], p[0], lat, lng) > STOP_ON_TRACK_MAX_SPREAD_METERS)) continue;
+      if (list.some((p) => haversineMeters(p[1], p[0], midLat, midLng) > STOP_ON_TRACK_MAX_SPREAD_METERS)) continue;
+      // The middle, projected onto the track the hops run along: on a curve
+      // or at a junction the average of points on the track lies beside it.
+      let [lng, lat] = [midLng, midLat];
+      let best = Infinity;
+      for (const line of tracks.get(stop) ?? []) {
+        for (let i = 0; i + 1 < line.length; i += 1) {
+          const p = projectOnSegment(midLng, midLat, line[i], line[i + 1]);
+          const meters = haversineMeters(p[1], p[0], midLat, midLng);
+          if (meters < best) { best = meters; [lng, lat] = p; }
+        }
+      }
       const meters = haversineMeters(stopLat[stop], stopLng[stop], lat, lng);
       if (meters > STOP_ON_TRACK_MAX_MOVE_METERS) continue;
       if (meters >= 1) moved.push({ stop: stopIds[stop], name: stopNames[stop], meters: Math.round(meters) });
@@ -840,6 +864,16 @@ function project(a: ShapePoint, b: ShapePoint, pLat: number, pLng: number) {
   const lat = a.lat + t * (b.lat - a.lat);
   const lng = a.lng + t * (b.lng - a.lng);
   return { t, lat, lng, offset: haversineMeters(lat, lng, pLat, pLng) };
+}
+
+/** The point of segment a–b nearest p, all [lng, lat], in a local flat projection. */
+function projectOnSegment(lng: number, lat: number, a: number[], b: number[]): number[] {
+  const k = Math.cos((lat * Math.PI) / 180);
+  const ax = (a[0] - lng) * k, ay = a[1] - lat;
+  const dx = (b[0] - a[0]) * k, dy = b[1] - a[1];
+  const length2 = dx * dx + dy * dy;
+  const u = length2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / length2)) : 0;
+  return [a[0] + u * (b[0] - a[0]), a[1] + u * (b[1] - a[1])];
 }
 
 /** Drops repeated points: equal at the micro-degree precision the timetable stores. */
