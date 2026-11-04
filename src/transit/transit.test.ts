@@ -449,9 +449,12 @@ describe("going to the first station by car or bicycle", () => {
     const departAt = lisbon("2026-09-14", "07:40");
     const car = { mode: "car" as const, router: straightAt(10) };
     // Alpha is nearer, but with no space to be found the next station wins.
+    // Bravo is 840 m from Charlie: within the default walk it would count as
+    // the destination's own station, and be left out.
     const plan = await router.plan(home, C, {
       departAt,
       walkRouter: null,
+      maxWalkMeters: 500,
       access: { ...car, parkSecondsAt: (id) => (id === "metro:A" ? 1800 : 60) },
     });
     const fastest = plan.journeys.reduce((a, b) => (b.arriveAt < a.arriveAt ? b : a));
