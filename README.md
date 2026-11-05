@@ -27,9 +27,11 @@ On a railway the gap is different and wider, so it is stated separately:
 > currently operational, or that a real train is authorised or physically
 > capable of using the calculated path.**
 
-There is no GTFS support, no timetable, no passenger journey, no arrival time
-and no signalling model here, and none is planned. A railway duration is a
-line-speed estimate over mapped track. See [Railways](#railways).
+A railway route has no timetable, no arrival time and no signalling model: a
+railway duration is a line-speed estimate over mapped track. See
+[Railways](#railways). Passenger journeys with real departures are a separate
+entry point, `roadgraph-router-v2/transit`, which reads GTFS timetables; see
+[Public transport](#public-transport).
 
 Four kinds of rule are read and obeyed: tags on the way, such as access,
 direction and signed limits; turn restriction relations; barriers on nodes;
@@ -689,6 +691,120 @@ would invent a restriction OpenStreetMap never stated.
 - A bundle does not record which `--railway-include` set it was compiled with.
 - `train` and `metro` are intentionally coarse. A system tagged in some other
   way needs `--railway-include`, and the profiles will not guess.
+
+## Public transport
+
+`roadgraph-router-v2/transit` plans journeys on public transport from GTFS
+timetables: walk to a stop, ride, change, ride, walk to the destination, with
+the departure times the operators publish. It is a separate entry point, so an
+application that only routes over roads never downloads it.
+
+Compile one or more feeds into a timetable, once:
+
+```sh
+roadgraph-compile-gtfs --feed metro=metro-porto.zip --feed stcp=stcp.zip \
+  --rail-bundle porto-metro.efrb --output porto.eftt
+```
+
+Then plan:
+
+```ts
+import { RoadRouter } from "roadgraph-router-v2";
+import { TransitRouter } from "roadgraph-router-v2/transit";
+
+const walk = await RoadRouter.open("/routing/porto-active.efrb", undefined, { profile: "pedestrian" });
+const transit = await TransitRouter.open("/routing/porto.eftt", undefined, { walkRouter: walk });
+
+const plan = await transit.plan(from, to, { departAt: new Date(), modes: ["metro", "bus"] });
+plan.journeys; // fewest rides first; each has walk and ride legs with times and geometry
+```
+
+### What a journey here does and does not mean
+
+A journey is the earliest arrival the **published timetable** allows. It does
+not know about delays, cancellations or crowding — there is no GTFS-Realtime —
+nor about fares, step-free access or bicycles on board. Walking legs are
+routed over the street network when a pedestrian `RoadRouter` is given, and
+estimated from the straight line (× 1.3 at 4.5 km/h) when not.
+
+A feed covers a range of dates and nothing outside it. By default a day the
+feed does not cover has no service from that feed. `dateFallback:
+"same-weekday"` instead reads the nearest covered day with the same weekday on
+which the feed runs trips, and reports the substitution in
+`plan.serviceDates`, so an application can say "timetable from September"
+rather than present a guess as a schedule.
+
+### Choosing what to ride
+
+`modes` filters by kind of vehicle — `tram`, `metro`, `rail`, `bus`, `ferry`,
+`cable`, `funicular` — collapsed from GTFS `route_type`, basic and extended.
+`feeds` filters by operator, using the ids given at compile time. Both apply
+to the whole journey, so `modes: ["metro"]` walks rather than take a bus to
+the station. A producer's `route_type` is taken at its word: a feed that types
+its trams as buses is filtered as buses.
+
+### How the search works
+
+RAPTOR (Delling, Pajor and Werneck, 2012): round *k* finds the earliest
+arrival at every stop with at most *k* rides, and walking transfers spread
+each improvement to stops within 250 m. The best journey for each number of
+rides falls out as a side effect, and a journey is returned only if it arrives
+earlier than every journey with fewer rides. A change of vehicle at the same
+stop is allowed 60 seconds (`minTransferSeconds`).
+
+Trips are grouped into patterns — one line, one sequence of stops — and a
+pattern is split wherever a trip overtakes an earlier one, so that within a
+pattern every stop's departures are in order and the next departure is a
+binary search. Trips running past midnight (`25:10:00`) belong to the day they
+set out on: the search reads yesterday's, today's and tomorrow's service, each
+shifted onto today's clock, including across a change of the clocks.
+
+Walks to and from stops are routed for the nearest few candidates before the
+search; after it, the walks the answers actually use are routed and, if one
+differs from its estimate, the search runs again with the real time, so a
+journey never asks the traveller to leave before the time they gave.
+
+### Ride geometry: following the track
+
+Many feeds' `shapes.txt` is good; some is not. Metro do Porto's "shapes" are
+its stations joined in order, which draws straight lines across the city. The
+compiler therefore decides per hop, between two consecutive stops:
+
+1. **The feed's shape**, cut between the two stops by `shape_dist_traveled`
+   when both shape and stop times carry it, and by projecting each stop
+   forward along the shape otherwise. A shape whose points are mostly the
+   stops themselves is rejected as not following the way; for a rail mode
+   with track to route on, so is one coarser than 10 points per kilometre.
+2. **Routed over mapped track** with `--rail-bundle` (the `metro` profile, or
+   `train` for heavy rail when the bundle carries it). At an interchange a
+   station can snap to another line's track — at Trindade line D runs beneath
+   lines A, B, C, E and F — so a hop whose direct route is implausible is
+   routed on to the following stop, or from the preceding one, and cut where
+   it passes its own stop.
+3. **A straight line**, as a last resort.
+
+Every hop that fell back is listed in `<output>.json` with the reason, and
+each ride leg says which it got (`geometrySource`). Compiling Metro do Porto
+and STCP: 7,147 hops from STCP's shapes, all 420 metro hops routed along
+track, and 4 straight, where one STCP stop lies more than 200 m from its own
+line's shape.
+
+### What the compiler checks
+
+The report also lists calendar services that have dates but no trips. A feed
+whose weekday service appears there runs nothing on those weekdays, which is
+nearly always a broken export: the STCP feed of September 2026 dates its
+school-term weekdays to a service named `UTIL ECOLAR` that no trip uses.
+Stop times without a time of their own are interpolated by distance and
+counted; trips whose times run backwards, or that reference an unknown stop
+or route, are skipped and counted by reason.
+
+### Measured on Porto
+
+Metro do Porto (September–December 2026) and STCP (September 2026): 2,633
+stops, 78 lines, 15,464 trips in 365 patterns and 10,554 walking transfers
+compile in 1.5 s to a **0.34 MB** timetable. Opening it takes about 60 ms, and
+a plan with walks routed over a pedestrian bundle takes 220–550 ms.
 
 ## Routing at a time of day
 

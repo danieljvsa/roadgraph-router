@@ -4,6 +4,59 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-03
+
+### Added
+
+- **Public transport from GTFS: `roadgraph-router-v2/transit`.** A separate
+  entry point, so road-only applications download none of it.
+  `TransitRouter.plan()` finds journeys of walk, ride, change and ride with
+  published departure times, using RAPTOR over trip patterns. Filters by mode
+  (`modes`) and operator (`feeds`), handles trips past midnight and changes
+  of the clocks, and routes walks over a pedestrian `RoadRouter` when given
+  one.
+- **`TransitSimulator`: every vehicle on the timetable at a given moment.**
+  `positions(ms)` returns each running trip's position, interpolated by
+  distance along its ride geometry between the times it is due at each stop,
+  with its heading and whether it is standing at a stop, in flat typed arrays
+  a worker can transfer. `tripDetails(trip, ms)` gives the line, every stop's
+  times, the next stop and the trip's geometry. Same mode, feed and
+  same-weekday fallback options as `plan()`; about 2 ms a frame for the 800
+  vehicles of Porto's morning peak.
+- **Park and ride: `plan({ access })`.** Reach the first station by car or
+  bicycle (any `WalkRouter`, e.g. a `RoadRouter` on that profile) instead of
+  on foot: metro and rail stations within reach (10 km / 5 km by default)
+  are routed to, a time to park or lock up is added (5 / 2 min), and
+  journeys start with a `drive` or `cycle` leg (`VehicleLeg`). Stations
+  within walking reach of the destination are left out.
+  `plan({ egress })` is the way back: ride to the station where the car or
+  bicycle was left and finish by it, after time to get back to it.
+- **`TransitSimulator.departures()`.** The next departures from the stops
+  near a point, soonest first, with line, direction and time; trips past
+  midnight and windows into the next day included.
+- **`roadgraph-compile-gtfs`.** Compiles one or more GTFS feeds (zip or
+  directory) into an EFTT timetable — 0.34 MB for Metro do Porto and STCP
+  together — with a report of everything it skipped, interpolated or
+  approximated.
+- **Rides drawn along the track.** With `--rail-bundle`, rail hops whose feed
+  shape is missing, joins only the stations, or is too coarse are routed over
+  mapped track at compile time, including at interchanges where a station
+  snaps to another line's track. Stations a feed places off the track (at an
+  entrance, or on the street: Metro do Porto's Campanhã is 50 m from its
+  platforms) are moved onto it, so rides and walks start at the platform;
+  the report lists them in `stopsPlacedOnTrack`.
+- **`dateFallback: "same-weekday"`** for feeds that do not cover the requested
+  day, reported in `plan.serviceDates`.
+- **`alternatives`**: later departures besides the earliest arrival, each the
+  best journey leaving after the previous option, ordered by departure.
+- **Times at every stop of a ride**: `intermediateStops[].arriveAt`.
+
+### Notes
+
+- The README no longer says GTFS is not planned.
+- No change to road or railway routing, bundle formats or the existing
+  entry points.
+
 ## [0.4.0] - 2026-10-16
 
 ### Fixed, after review of real Metro do Porto routes
