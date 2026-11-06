@@ -1192,6 +1192,34 @@ smaller download while staying independent of tile size:
 const router = await RoadRouter.open("/routing/region.efrb", undefined, { maxDetourFactor: 1.15 });
 ```
 
+### Memory
+
+A router keeps the tiles it has decoded, and the corridors it stitches from
+them, so the next route nearby is fast. Both are bounded by size, counting the
+graphs' typed arrays, least recently used first:
+
+- `tileCacheBytes`, default 64 MiB: decoded tiles. One tile is always kept,
+  however large.
+- `mergedCacheBytes`, default 32 MiB: stitched corridors. A short route's two
+  corridors fit with room to spare; a corridor too large for the whole budget,
+  a long trip's, is not kept at all.
+
+`mergedCacheSize` still limits the corridors by count. On the Porto area's
+bundle a session of seven car trips, one of 45 km, peaked at 80 MB held
+instead of 107 MB, and no longer grows with every new area visited. Smaller
+budgets trade speed for memory:
+
+```ts
+const router = await RoadRouter.open("/routing/region.efrb", undefined, {
+  tileCacheBytes: 24 * 1024 * 1024,
+  mergedCacheBytes: 16 * 1024 * 1024,
+});
+```
+
+An application that routes only now and then can also drop the router between
+uses and open it again when needed: with the bundle's pieces in the browser's
+cache, reopening costs a fraction of a second.
+
 ## Compile any region
 
 The package includes a Node 22.5+ streaming PBF compiler. It discovers bounds,

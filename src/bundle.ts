@@ -1,4 +1,5 @@
 import { compactGraph } from "./compact";
+import { BoundedCache, heldBytes } from "./bounded-cache";
 import { combineProfiledGraph, decodeGraph, decodeProfileChunk, decodeSharedGraph, encodeCompactGraph, encodeProfileChunk, encodeSharedGraph } from "./codec";
 import { mergeRoadGraphs } from "./merge";
 import { withSpatialIndex } from "./spatial-index";
@@ -30,6 +31,15 @@ const COORDINATE_SCALE = 10_000_000;
  * discard the stitching every time.
  */
 const DEFAULT_MERGED_CACHE_SIZE = 2;
+const DEFAULT_MERGED_CACHE_BYTES = 32 * 1024 * 1024;
+const DEFAULT_TILE_CACHE_BYTES = 64 * 1024 * 1024;
+
+/** A byte budget option: absent takes the default; it must be a number, 0 or more. */
+function nonNegative(value: number | undefined, fallback: number, name: string) {
+  if (value === undefined) return fallback;
+  if (!(typeof value === "number" && value >= 0)) throw new RangeError(`${name} must be a number of bytes, 0 or more.`);
+  return value;
+}
 
 export const BundleCompression = {
   none: 0,
@@ -97,9 +107,19 @@ export type BundleProfiledTile = { id: number; bounds: BundleBounds; graph: Road
  * for the same tiles, so one is worth holding. Each entry is a whole merged
  * corridor, so raising this trades memory for repeat speed; `0` keeps none and
  * restores the behaviour of releasing a corridor as soon as the route is done.
+ *
+ * `mergedCacheBytes` bounds the same cache by size, since a corridor across a
+ * region is many times one across a district: a corridor that does not fit
+ * alone is not kept at all. `tileCacheBytes` bounds the decoded tiles the
+ * corridors are stitched from, least recently used first; one tile is always
+ * kept, however large. Both count the bytes of the graphs' typed arrays.
  */
 export type BundleOpenOptions = {
   mergedCacheSize?: number;
+  /** Default 32 MiB: a short route's two corridors, with room to spare. */
+  mergedCacheBytes?: number;
+  /** Default 64 MiB. */
+  tileCacheBytes?: number;
   /**
    * Which vehicle to route as, by profile name. Only a multi-profile bundle
    * offers a choice; leaving it out uses the bundle's own default.
@@ -382,7 +402,21 @@ export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetc
   // switching vehicle then costs only the small per-vehicle chunk.
   const sharedCache = new Map<number, Promise<SharedRoadGraph>>();
   const profileCache = new Map<string, Promise<ProfileChunk>>();
-  const cache = new Map<string, Promise<RoadGraph>>();
+  // Decoded tiles, by `${tile}:${profile}`, bounded by size. A tile dropped
+  // here takes its vehicle's columns with it, and its shared half once no
+  // vehicle of that tile is left.
+  const cache: BoundedCache<RoadGraph> = new BoundedCache<RoadGraph>({
+    maxEntries: Infinity,
+    maxBytes: nonNegative(options.tileCacheBytes, DEFAULT_TILE_CACHE_BYTES, "tileCacheBytes"),
+    sizeOf: (graph) => heldBytes(graph),
+    keepOversized: true,
+    onEvict: (key) => {
+      profileCache.delete(key);
+      const tileId = key.slice(0, key.indexOf(":"));
+      for (const held of cache.keys()) if (held.startsWith(`${tileId}:`)) return;
+      sharedCache.delete(Number(tileId));
+    },
+  });
 
   const loadTile = (tile: BundleTile, profileId: number) => {
     const key = `${tile.id}:${profileId}`;
@@ -406,7 +440,6 @@ export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetc
       graph = Promise.all([shared, columns]).then(([half, vehicle]) => withSpatialIndex(combineProfiledGraph(half, vehicle)));
     }
     cache.set(key, graph);
-    graph.catch(() => cache.delete(key));
     return graph;
   };
   const routeTiles = (origin: Coordinate, destination: Coordinate, ring: number) => {
@@ -429,28 +462,21 @@ export async function openRoadGraphBundle(url: string, fetcher: FetchLike = fetc
   // not throw away the stitching each time; never fewer than the two an
   // ordinary route needs for its own widening.
   const mergedLimit = Math.max(0, Math.trunc(options.mergedCacheSize ?? Math.max(DEFAULT_MERGED_CACHE_SIZE, available.length)));
-  const merged = new Map<string, Promise<RoadGraph>>();
+  const merged = new BoundedCache<RoadGraph>({
+    maxEntries: mergedLimit,
+    maxBytes: nonNegative(options.mergedCacheBytes, DEFAULT_MERGED_CACHE_BYTES, "mergedCacheBytes"),
+    sizeOf: (graph) => heldBytes(graph),
+    keepOversized: false,
+  });
   const loadTiles = async (routeTiles: BundleTile[], profileId = chosenId) => {
     if (!routeTiles.length) throw new RouterError("ROUTE_ACROSS_TILES", "No local graph tiles cover the route corridor.");
     if (routeTiles.length === 1) return loadTile(routeTiles[0], profileId);
     const key = `${profileId}/${routeTiles.map((tile) => tile.id).sort((a, b) => a - b).join(",")}`;
     const held = merged.get(key);
-    if (held) {
-      // Re-insert so the map's own order is least-recently-used.
-      merged.delete(key);
-      merged.set(key, held);
-      return held;
-    }
+    if (held) return held;
     const graph = Promise.all(routeTiles.map((tile) => loadTile(tile, profileId))).then(mergeRoadGraphs);
-    if (mergedLimit) {
-      merged.set(key, graph);
-      for (const oldest of merged.keys()) {
-        if (merged.size <= mergedLimit) break;
-        merged.delete(oldest);
-      }
-      // A corridor that failed to stitch must not be remembered as the answer.
-      graph.catch(() => merged.delete(key));
-    }
+    // A corridor that fails to stitch is forgotten by the cache, not remembered as the answer.
+    merged.set(key, graph);
     return graph;
   };
   return {

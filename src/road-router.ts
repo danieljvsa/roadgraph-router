@@ -28,6 +28,10 @@ export type RoadRouterOptions = {
   maxDetourFactor?: number;
   /** How many stitched corridors a bundle keeps; see `BundleOpenOptions`. */
   mergedCacheSize?: number;
+  /** How many bytes of stitched corridors a bundle keeps; see `BundleOpenOptions`. */
+  mergedCacheBytes?: number;
+  /** How many bytes of decoded tiles a bundle keeps; see `BundleOpenOptions`. */
+  tileCacheBytes?: number;
   /**
    * Which vehicle to route as. Only a multi-profile bundle offers a choice;
    * leaving it out uses the vehicle the bundle was compiled around.
@@ -131,7 +135,12 @@ export class RoadRouter {
       return new RoadRouter(source, undefined, options, source.profileId);
     }
     if (source.endsWith(".efrb")) {
-      const bundle = await openRoadGraphBundle(source, fetcher, { mergedCacheSize: options.mergedCacheSize, profile: options.profile });
+      const bundle = await openRoadGraphBundle(source, fetcher, {
+        mergedCacheSize: options.mergedCacheSize,
+        mergedCacheBytes: options.mergedCacheBytes,
+        tileCacheBytes: options.tileCacheBytes,
+        profile: options.profile,
+      });
       RoadRouter.assertVehicleApplies(bundle.profileId, options);
       return new RoadRouter(undefined, bundle, options, bundle.profileId, bundle.defaultVehicle);
     }
