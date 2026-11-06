@@ -1,6 +1,6 @@
 {
   "name": "roadgraph-router-v2",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Compile any OpenStreetMap PBF extract into compact, range-addressable routing bundles and route over them with A* in Node.js or the browser. Roads for five vehicle profiles, and railway infrastructure for train and metro. Public transport journeys from GTFS timetables.",
   "private": false,
   "type": "module",
