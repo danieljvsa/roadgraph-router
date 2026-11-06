@@ -78,7 +78,10 @@ export type TransitPlanOptions = {
   maxRides?: number;
   /** How far to walk, in a straight line, to the first stop or from the last. Default 1000 m. */
   maxWalkMeters?: number;
-  /** Extra time allowed for a change of vehicle at the same stop. Default 60 s. */
+  /**
+   * Extra time allowed for a change of vehicle, at the same stop or on top of
+   * the walk to another. Default 60 s.
+   */
   minTransferSeconds?: number;
   /**
    * How many later departures to offer besides the earliest arrival: each is

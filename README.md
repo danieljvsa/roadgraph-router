@@ -749,8 +749,9 @@ RAPTOR (Delling, Pajor and Werneck, 2012): round *k* finds the earliest
 arrival at every stop with at most *k* rides, and walking transfers spread
 each improvement to stops within 250 m. The best journey for each number of
 rides falls out as a side effect, and a journey is returned only if it arrives
-earlier than every journey with fewer rides. A change of vehicle at the same
-stop is allowed 60 seconds (`minTransferSeconds`).
+earlier than every journey with fewer rides. A change of vehicle is allowed
+60 seconds (`minTransferSeconds`), on top of the walk when it is to another
+stop.
 
 Trips are grouped into patterns — one line, one sequence of stops — and a
 pattern is split wherever a trip overtakes an earlier one, so that within a
@@ -1191,6 +1192,34 @@ smaller download while staying independent of tile size:
 ```ts
 const router = await RoadRouter.open("/routing/region.efrb", undefined, { maxDetourFactor: 1.15 });
 ```
+
+### Memory
+
+A router keeps the tiles it has decoded, and the corridors it stitches from
+them, so the next route nearby is fast. Both are bounded by size, counting the
+graphs' typed arrays, least recently used first:
+
+- `tileCacheBytes`, default 64 MiB: decoded tiles. One tile is always kept,
+  however large.
+- `mergedCacheBytes`, default 32 MiB: stitched corridors. A short route's two
+  corridors fit with room to spare; a corridor too large for the whole budget,
+  a long trip's, is not kept at all.
+
+`mergedCacheSize` still limits the corridors by count. On the Porto area's
+bundle a session of seven car trips, one of 45 km, peaked at 80 MB held
+instead of 107 MB, and no longer grows with every new area visited. Smaller
+budgets trade speed for memory:
+
+```ts
+const router = await RoadRouter.open("/routing/region.efrb", undefined, {
+  tileCacheBytes: 24 * 1024 * 1024,
+  mergedCacheBytes: 16 * 1024 * 1024,
+});
+```
+
+An application that routes only now and then can also drop the router between
+uses and open it again when needed: with the bundle's pieces in the browser's
+cache, reopening costs a fraction of a second.
 
 ## Compile any region
 

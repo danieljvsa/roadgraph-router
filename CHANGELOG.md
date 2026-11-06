@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **A bundle's caches are bounded by size.** Decoded tiles were kept for good,
+  so a browser tab that routed across a region kept every tile it had touched;
+  stitched corridors were bounded only by count, though one across a region is
+  many times one across a district. `tileCacheBytes` (default 64 MiB) and
+  `mergedCacheBytes` (default 32 MiB) now bound them, least recently used
+  first, on `RoadRouter.open` and `openRoadGraphBundle`. A corridor larger than
+  its whole budget is not kept; one tile always is. On the Porto bundle, a
+  session of seven car trips peaked at 80 MB held instead of 107 MB, with
+  public transport planning as fast as before. `mergedCacheSize` still applies.
+
+### Fixed
+
+- **`minTransferSeconds` applies to changes that walk to another stop.** It
+  was only added when changing at the same stop, so a change walking to a
+  nearby stop could be planned to arrive the second the next vehicle left.
+  Journeys with such changes may now board a later vehicle.
+
 ## [0.5.0] - 2026-11-03
 
 ### Added
