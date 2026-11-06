@@ -18,6 +18,13 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   session of seven car trips peaked at 80 MB held instead of 107 MB, with
   public transport planning as fast as before. `mergedCacheSize` still applies.
 
+### Fixed
+
+- **`minTransferSeconds` applies to changes that walk to another stop.** It
+  was only added when changing at the same stop, so a change walking to a
+  nearby stop could be planned to arrive the second the next vehicle left.
+  Journeys with such changes may now board a later vehicle.
+
 ## [0.5.0] - 2026-11-03
 
 ### Added

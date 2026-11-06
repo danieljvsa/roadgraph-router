@@ -166,7 +166,10 @@ export function raptor(t: TransitTimetable, index: StopPatternIndex, query: Rapt
         // Could an earlier trip be caught here, given how we got to this stop last round?
         const reached = arr[prev + s];
         if (reached === INF) continue;
-        const ready = reached + (kind[prev + s] === Label.Ride ? query.minTransferSeconds : 0);
+        // A change of vehicle, whether at this stop or after walking from
+        // another, keeps its margin; only the first boarding goes without.
+        const changing = kind[prev + s] === Label.Ride || kind[prev + s] === Label.Walk;
+        const ready = reached + (changing ? query.minTransferSeconds : 0);
         if (trip >= 0 && t.tripTimes[tripBase + 2 * pos + 1] + shift <= ready) continue;
         const next = earliestTrip(t, query.layers, p, pos, ready);
         if (next && (trip < 0 || next.departure < t.tripTimes[tripBase + 2 * pos + 1] + shift)) {

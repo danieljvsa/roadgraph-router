@@ -749,8 +749,9 @@ RAPTOR (Delling, Pajor and Werneck, 2012): round *k* finds the earliest
 arrival at every stop with at most *k* rides, and walking transfers spread
 each improvement to stops within 250 m. The best journey for each number of
 rides falls out as a side effect, and a journey is returned only if it arrives
-earlier than every journey with fewer rides. A change of vehicle at the same
-stop is allowed 60 seconds (`minTransferSeconds`).
+earlier than every journey with fewer rides. A change of vehicle is allowed
+60 seconds (`minTransferSeconds`), on top of the walk when it is to another
+stop.
 
 Trips are grouped into patterns — one line, one sequence of stops — and a
 pattern is split wherever a trip overtakes an earlier one, so that within a

@@ -180,6 +180,20 @@ describe("planning", () => {
     expect(metro.kind === "ride" && new Date(metro.intermediateStops[0].arriveAt).toISOString()).toBe("2026-09-14T07:12:00.000Z");
   });
 
+  test("a change that walks to another stop keeps the change margin too", async () => {
+    const router = new TransitRouter((await compiled()).timetable);
+    const busAfterMetro = async (minTransferSeconds?: number) => {
+      const plan = await router.plan(A, E, { ...options, departAt: lisbon("2026-09-14", "07:55"), minTransferSeconds });
+      const best = plan.journeys[0];
+      const bus = best.legs[best.legs.length - 1];
+      return bus.kind === "ride" ? new Date(bus.departAt).toISOString() : null;
+    };
+    // m1 reaches Charlie at 08:04, then a one-minute walk to Charlie Bus.
+    expect(await busAfterMetro()).toBe("2026-09-14T07:15:00.000Z"); // 08:15, b1
+    // Ten minutes' margin leaves b1 too soon after the walk: b2 at 08:30.
+    expect(await busAfterMetro(600)).toBe("2026-09-14T07:30:00.000Z");
+  });
+
   test("an overtaking express is found even though it leaves later", async () => {
     const router = new TransitRouter((await compiled()).timetable);
     const plan = await router.plan(C2, E, { ...options, departAt: lisbon("2026-09-14", "08:55") });
